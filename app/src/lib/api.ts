@@ -122,7 +122,10 @@ export type View =
   | "chatPreview"
   | "metadata"
   | "tokenizer"
-  | "tensors";
+  | "tensors"
+  | "classOutline"
+  | "bytecode"
+  | "bytecodeLines";
 
 export interface ImageSideView {
   url: string;

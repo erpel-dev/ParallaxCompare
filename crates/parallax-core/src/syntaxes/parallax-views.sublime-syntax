@@ -1,7 +1,7 @@
 %YAML 1.2
 ---
 # Text produced by the content views (document text, executable summary, hex dumps,
-# GGUF models). Quantization types are coloured by bits per weight, so that a layer
+# GGUF models, Java bytecode). Quantization types are coloured by bits per weight, so that a layer
 # map reads like a heat map.
 name: Parallax View
 scope: text.parallax
@@ -36,3 +36,9 @@ contexts:
       scope: constant.numeric.quant.q4.parallax
     - match: \b(?:Q2_K|Q3_K|IQ1_S|IQ1_M|IQ2_XXS|IQ2_XS|IQ2_S|IQ3_XXS|IQ3_S|TQ1_0|TQ2_0)\b
       scope: variable.language.quant.low.parallax
+    - match: ^  L[0-9]+:$
+      scope: entity.name.label.parallax
+    - match: (?<=\s)// .*$
+      scope: comment.line.parallax
+    - match: ^@[A-Za-z_][\w.$]*
+      scope: storage.type.annotation.parallax

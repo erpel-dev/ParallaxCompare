@@ -38,6 +38,17 @@ fn zip_bytes(files: &[(&str, &str)]) -> Vec<u8> {
     buf.into_inner()
 }
 
+fn zip_raw(files: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut buf = std::io::Cursor::new(Vec::new());
+    let mut zip = zip::ZipWriter::new(&mut buf);
+    for (path, content) in files {
+        zip.start_file(*path, zip::write::SimpleFileOptions::default()).unwrap();
+        zip.write_all(content).unwrap();
+    }
+    zip.finish().unwrap();
+    buf.into_inner()
+}
+
 fn statuses(left: &str, right: &str, opts: &CompareOptions) -> Vec<(String, Status)> {
     let (l, r) = open_pair(&SourceSpec::parse(left), &SourceSpec::parse(right), SourceOptions::default(), false)
         .expect("sources open");
@@ -729,4 +740,36 @@ fn refresh_sees_changes_made_outside() {
     let list = compare_all();
     assert_eq!(status_of(&list, "a.txt"), Status::Different);
     assert_eq!(status_of(&list, "new.txt"), Status::RightOnly);
+}
+
+/// Java classes that differ only in debug info are "similar", also inside jars.
+#[test]
+fn java_classes_and_jars() {
+    let fixture =
+        |name: &str| fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/java").join(name)).unwrap();
+    let (v1, shifted, v2, item) = (
+        fixture("OrderService-v1.class"),
+        fixture("OrderService-v1-shifted.class"),
+        fixture("OrderService-v2.class"),
+        fixture("OrderService-Item.class"),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let class = "com/example/shop/OrderService.class";
+    let item_class = "com/example/shop/OrderService$Item.class";
+    fs::write(dir.path().join("app-1.0.jar"), zip_raw(&[(class, &v1), (item_class, &item)])).unwrap();
+    fs::write(dir.path().join("app-1.0-rebuilt.jar"), zip_raw(&[(class, &shifted), (item_class, &item)])).unwrap();
+    fs::write(dir.path().join("app-1.1.jar"), zip_raw(&[(class, &v2), (item_class, &item)])).unwrap();
+    let jar = |name: &str| dir.path().join(name).display().to_string();
+
+    let rebuilt = statuses(&jar("app-1.0.jar"), &jar("app-1.0-rebuilt.jar"), &CompareOptions::default());
+    assert_eq!(status_of(&rebuilt, class), Status::Similar);
+    assert_eq!(status_of(&rebuilt, item_class), Status::Same);
+    let changed = statuses(&jar("app-1.0.jar"), &jar("app-1.1.jar"), &CompareOptions::default());
+    assert_eq!(status_of(&changed, class), Status::Different);
+
+    let reason = parallax_core::convert::content_equal("OrderService.class", &v1, &shifted);
+    assert_eq!(reason, Some("same code, only debug info or constant pool layout differ"));
+    let without_rules = CompareOptions { compare_contents: false, ..CompareOptions::default() };
+    let rebuilt = statuses(&jar("app-1.0.jar"), &jar("app-1.0-rebuilt.jar"), &without_rules);
+    assert_eq!(status_of(&rebuilt, class), Status::Different);
 }

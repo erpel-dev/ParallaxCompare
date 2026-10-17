@@ -7,6 +7,7 @@
 
 mod binary;
 mod chat;
+mod class;
 pub mod gguf;
 mod image_diff;
 mod office;
@@ -50,6 +51,12 @@ pub enum View {
     Tokenizer,
     /// GGUF model: quantization recipe, layer map and tensor list.
     Tensors,
+    /// Java class: declaration, fields and methods, with a checksum of each method's code.
+    ClassOutline,
+    /// Java class: the instructions of every method.
+    Bytecode,
+    /// Java class: the instructions with the source line numbers.
+    BytecodeLines,
 }
 
 impl View {
@@ -69,6 +76,9 @@ impl View {
             View::Metadata => "Metadata",
             View::Tokenizer => "Tokenizer",
             View::Tensors => "Tensors and quantization",
+            View::ClassOutline => "Class outline",
+            View::Bytecode => "Bytecode",
+            View::BytecodeLines => "Bytecode with line numbers",
         }
     }
 }
@@ -94,6 +104,7 @@ enum Kind {
     Text,
     Binary,
     Gguf,
+    JavaClass,
 }
 
 fn extension(name: &str) -> String {
@@ -110,6 +121,9 @@ fn kind_of(name: &str, data: &[u8]) -> Kind {
     if starts(gguf::MAGIC) {
         return Kind::Gguf;
     }
+    if class::is_class(data) {
+        return Kind::JavaClass;
+    }
     if starts(b"PK\x03\x04") {
         if matches!(ext.as_str(), "docx" | "docm" | "dotx" | "xlsx" | "xlsm" | "xltx" | "pptx" | "pptm" | "potx") {
             return Kind::Ooxml;
@@ -125,7 +139,7 @@ fn kind_of(name: &str, data: &[u8]) -> Kind {
         || starts(b"MZ")
         || starts(&[0xCF, 0xFA, 0xED, 0xFE])
         || starts(&[0xCE, 0xFA, 0xED, 0xFE])
-        || starts(&[0xCA, 0xFE, 0xBA, 0xBE]) && ext != "class"
+        || starts(&[0xCA, 0xFE, 0xBA, 0xBE])
     {
         return Kind::Executable;
     }
@@ -172,6 +186,7 @@ pub fn views_for(name: &str, data: &[u8]) -> Vec<View> {
         Kind::Gguf => {
             vec![View::Model, View::ChatTemplate, View::ChatPreview, View::Metadata, View::Tokenizer, View::Tensors]
         }
+        Kind::JavaClass => vec![View::ClassOutline, View::Bytecode, View::BytecodeLines],
     };
     views.push(View::Hex);
     views
@@ -210,6 +225,9 @@ pub fn render(view: View, name: &str, data: &[u8]) -> Result<String> {
         View::Metadata => gguf::metadata(data),
         View::Tokenizer => gguf::tokenizer(data),
         View::Tensors => gguf::tensors(data),
+        View::ClassOutline => class::outline(data),
+        View::Bytecode => class::bytecode(data, false),
+        View::BytecodeLines => class::bytecode(data, true),
     }
 }
 
@@ -236,25 +254,31 @@ pub fn has_content_rule(name: &str) -> bool {
             | "tif"
             | "tiff"
             | "ico"
+            | "class"
     )
 }
 
 /// Whether two byte-different files have equal content, for formats where
-/// "content" is well defined: document text and image pixels. `None` when the
-/// format has no such notion.
-pub fn content_equal(name: &str, left: &[u8], right: &[u8]) -> Option<bool> {
+/// "content" is well defined: document text, image pixels, the code of a Java
+/// class. The reason to show when they do; `None` when they differ or the format
+/// has no such notion.
+pub fn content_equal(name: &str, left: &[u8], right: &[u8]) -> Option<&'static str> {
     let (kl, kr) = (kind_of(name, left), kind_of(name, right));
     if kl != kr {
         return None;
     }
-    match kl {
+    let equal = match kl {
         Kind::Pdf | Kind::Ooxml | Kind::Odf => {
-            let (a, b) = (render(View::Document, name, left).ok()?, render(View::Document, name, right).ok()?);
-            Some(a == b)
+            render(View::Document, name, left).ok()? == render(View::Document, name, right).ok()?
         }
-        Kind::Raster => image_diff::pixels_equal(left, right),
-        _ => None,
-    }
+        Kind::Raster => image_diff::pixels_equal(left, right)?,
+        Kind::JavaClass => {
+            return class::same_code(left, right)?
+                .then_some("same code, only debug info or constant pool layout differ");
+        }
+        _ => false,
+    };
+    equal.then_some("same content, the file bytes differ")
 }
 
 #[cfg(test)]
@@ -273,6 +297,13 @@ mod tests {
         let minified = format!("<a>{}</a>", "<b>x</b>".repeat(500));
         assert_eq!(views_for("x.xml", minified.as_bytes())[0], View::PrettyXml);
         assert_eq!(views_for("a.bin", b"\x00\x01"), vec![View::Hex]);
+        let class = b"\xCA\xFE\xBA\xBE\x00\x00\x00\x41";
+        assert_eq!(
+            views_for("A.class", class),
+            vec![View::ClassOutline, View::Bytecode, View::BytecodeLines, View::Hex]
+        );
+        let universal_binary = b"\xCA\xFE\xBA\xBE\x00\x00\x00\x02\x01\x00\x00\x07";
+        assert_eq!(views_for("tool", universal_binary)[0], View::Executable);
         assert_eq!(views_for("notes.txt", b"hello"), vec![View::Text, View::Hex]);
         let pair = views_for_pair(Some(("a.xml", b"<a/>")), Some(("a.xml", b"\x00")));
         assert_eq!(pair, vec![View::Hex]);

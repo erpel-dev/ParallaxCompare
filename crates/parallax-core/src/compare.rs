@@ -408,8 +408,8 @@ impl<'a> Engine<'a> {
         if eol && !is_binary(&left_data) && !is_binary(&right_data) && equal_ignoring_cr(&left_data, &right_data) {
             return Ok((Status::Similar, Some("only line endings differ")));
         }
-        if content && convert::content_equal(&l.name, &left_data, &right_data) == Some(true) {
-            return Ok((Status::Similar, Some("same content, the file bytes differ")));
+        if content && let Some(reason) = convert::content_equal(&l.name, &left_data, &right_data) {
+            return Ok((Status::Similar, Some(reason)));
         }
         DIFFERENT
     }
