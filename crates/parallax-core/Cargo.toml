@@ -22,6 +22,8 @@ two-face = { version = "0.5", default-features = false, features = ["syntect-fan
 rayon = "1"
 trash = "5"
 notify = "8"
+minijinja = { version = "2", features = ["loop_controls", "json", "preserve_order", "fuel", "builtins", "macros"] }
+minijinja-contrib = { version = "2", features = ["pycompat"] }
 memmap2 = "0.9"
 encoding_rs = "0.8"
 chardetng = "1"

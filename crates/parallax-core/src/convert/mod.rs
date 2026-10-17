@@ -6,6 +6,8 @@
 //! (or, for images, pixels) that the normal diff machinery can align.
 
 mod binary;
+mod chat;
+pub mod gguf;
 mod image_diff;
 mod office;
 mod pretty;
@@ -36,6 +38,18 @@ pub enum View {
     Hex,
     /// Raster images compared pixel by pixel, or SVG rendered.
     Image,
+    /// GGUF model: architecture, size, tokenizer and quantization overview.
+    Model,
+    /// GGUF model: the chat templates as Jinja source.
+    ChatTemplate,
+    /// GGUF model: the chat template applied to sample conversations.
+    ChatPreview,
+    /// GGUF model: every metadata key and value.
+    Metadata,
+    /// GGUF model: tokenizer settings, special tokens and the vocabulary.
+    Tokenizer,
+    /// GGUF model: quantization recipe, layer map and tensor list.
+    Tensors,
 }
 
 impl View {
@@ -49,6 +63,12 @@ impl View {
             View::PrettyJson => "Pretty-printed JSON",
             View::Hex => "Hex dump",
             View::Image => "Image",
+            View::Model => "Model summary",
+            View::ChatTemplate => "Chat template",
+            View::ChatPreview => "Chat template, rendered",
+            View::Metadata => "Metadata",
+            View::Tokenizer => "Tokenizer",
+            View::Tensors => "Tensors and quantization",
         }
     }
 }
@@ -73,6 +93,7 @@ enum Kind {
     Json,
     Text,
     Binary,
+    Gguf,
 }
 
 fn extension(name: &str) -> String {
@@ -85,6 +106,9 @@ fn kind_of(name: &str, data: &[u8]) -> Kind {
     let first_char = data.iter().find(|b| !b.is_ascii_whitespace()).copied();
     if starts(b"%PDF-") {
         return Kind::Pdf;
+    }
+    if starts(gguf::MAGIC) {
+        return Kind::Gguf;
     }
     if starts(b"PK\x03\x04") {
         if matches!(ext.as_str(), "docx" | "docm" | "dotx" | "xlsx" | "xlsm" | "xltx" | "pptx" | "pptm" | "potx") {
@@ -145,6 +169,9 @@ pub fn views_for(name: &str, data: &[u8]) -> Vec<View> {
         Kind::Json if longest_line() > LONG_LINE => vec![View::PrettyJson, View::Text],
         Kind::Json => vec![View::Text, View::PrettyJson],
         Kind::Text => vec![View::Text],
+        Kind::Gguf => {
+            vec![View::Model, View::ChatTemplate, View::ChatPreview, View::Metadata, View::Tokenizer, View::Tensors]
+        }
     };
     views.push(View::Hex);
     views
@@ -177,6 +204,12 @@ pub fn render(view: View, name: &str, data: &[u8]) -> Result<String> {
         View::PrettyJson => pretty::json(data),
         View::Hex => binary::hex_dump(data),
         View::Image => Err(Error::Unsupported("images are not rendered as text".into())),
+        View::Model => gguf::summary(data),
+        View::ChatTemplate => gguf::chat_template(data),
+        View::ChatPreview => chat::preview(data),
+        View::Metadata => gguf::metadata(data),
+        View::Tokenizer => gguf::tokenizer(data),
+        View::Tensors => gguf::tensors(data),
     }
 }
 

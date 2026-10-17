@@ -108,7 +108,21 @@ export interface FileSide {
   editable: boolean;
 }
 
-export type View = "text" | "document" | "executable" | "firmware" | "prettyXml" | "prettyJson" | "hex" | "image";
+export type View =
+  | "text"
+  | "document"
+  | "executable"
+  | "firmware"
+  | "prettyXml"
+  | "prettyJson"
+  | "hex"
+  | "image"
+  | "model"
+  | "chatTemplate"
+  | "chatPreview"
+  | "metadata"
+  | "tokenizer"
+  | "tensors";
 
 export interface ImageSideView {
   url: string;
