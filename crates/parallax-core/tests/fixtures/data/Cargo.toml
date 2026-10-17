@@ -1,0 +1,62 @@
+[package]
+name = "parallax-core"
+description = "UI-agnostic compare engine of ParallaxCompare: virtual file system, folder compare, text diff, highlighting"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+gix = { version = "0.89", default-features = false, features = ["revision", "max-performance-safe", "sha1"] }
+zip = { version = "9", default-features = false, features = ["deflate", "deflate64", "bzip2", "lzma", "time", "unreserved"] }
+sevenz-rust2 = { version = "0.24", default-features = false, features = ["bzip2", "ppmd", "util", "compress"] }
+tar = "0.4"
+flate2 = "1"
+lzma-rust2 = "0.22"
+ruzstd = "0.9"
+bzip2 = "0.6"
+imara-diff = "0.2"
+similar = "3"
+syntect = { version = "5.3", default-features = false, features = ["default-fancy"] }
+two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
+rayon = "1"
+trash = "5"
+notify = "8"
+minijinja = { version = "2", features = ["loop_controls", "json", "preserve_order", "fuel", "builtins", "macros"] }
+minijinja-contrib = { version = "2", features = ["pycompat"] }
+memmap2 = "0.9"
+encoding_rs = "0.8"
+chardetng = "1"
+ignore = "0.4"
+globset = "0.4"
+parking_lot = "0.12"
+thiserror = "2"
+serde.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
+quick-xml = "0.42"
+object = { version = "0.40", default-features = false, features = ["read", "std"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp", "tiff", "ico"] }
+pdf-extract = "0.12"
+crc32fast = "1"
+cafebabe = "0.9"
+memchr = "2"
+yaml-rust2 = { version = "0.13", default-features = false }
+toml = { version = "1", default-features = false, features = ["std", "parse", "display", "serde"] }
+x509-parser = "0.18"
+sha2 = "0.10"
+base64 = "0.22"
+aes = "0.8"
+cbc = "0.1"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+hmac = "0.12"
+mail-parser = { version = "0.11", features = ["full_encoding"] }
+cfb = "0.7"
+
+[dev-dependencies]
+sevenz-rust2 = { version = "0.24", default-features = false, features = ["compress", "util"] }
+tempfile = "3"
+flate2 = "1"
+tar = "0.4"
+zip = { version = "9", default-features = false, features = ["deflate"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+anyhow.workspace = true

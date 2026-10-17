@@ -1,0 +1,13 @@
+{services: {api: {command: 'gunicorn app:create_app() --workers
+        4', environment: {DATABASE_URL: 'postgres://shop@db/shop',
+        LOG_LEVEL: info, TZ: Europe/Berlin, WORKERS: 4}, healthcheck: {
+        interval: 30s, test: [CMD, curl, -f, 'http://localhost:8000/health']},
+      image: 'shop/api:2.4.1', logging: &id001 {driver: json-file,
+        options: {max-size: 10m}}, restart: unless-stopped}, db: {
+      environment: {POSTGRES_DB: shop, POSTGRES_PASSWORD: example},
+      image: 'postgres:16', volumes: ['db-data:/var/lib/postgresql/data']},
+    web: {depends_on: [api], environment: &id002 {LOG_LEVEL: info,
+        TZ: Europe/Berlin}, image: 'nginx:1.27', logging: *id001,
+      ports: ['8080:80'], restart: unless-stopped}}, volumes: {
+    db-data: {}}, x-service: {environment: *id002, logging: *id001,
+    restart: unless-stopped}}

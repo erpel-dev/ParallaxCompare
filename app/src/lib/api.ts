@@ -142,7 +142,15 @@ export type View =
   | "measurement"
   | "calibration"
   | "imageMetadata"
-  | "mediaSummary";
+  | "mediaSummary"
+  | "dependencies"
+  | "notebook"
+  | "notebookCode"
+  | "normalizedYaml"
+  | "normalizedToml"
+  | "table"
+  | "certificate"
+  | "email";
 
 export interface ImageSideView {
   url: string;
