@@ -11,7 +11,11 @@ mod class;
 pub mod gguf;
 mod image_diff;
 mod office;
+mod onnx;
+mod parquet;
 mod pretty;
+mod safetensors;
+mod sqlite;
 
 use serde::{Deserialize, Serialize};
 
@@ -57,6 +61,14 @@ pub enum View {
     Bytecode,
     /// Java class: the instructions with the source line numbers.
     BytecodeLines,
+    /// SQLite database: tables, columns, indexes, views and triggers.
+    DatabaseSchema,
+    /// SQLite database: the rows of every table.
+    DatabaseRows,
+    /// Parquet or Arrow IPC file: schema, row groups or record batches, column statistics.
+    DataSummary,
+    /// ONNX model: opsets, inputs and outputs, initializers and the nodes of the graph.
+    ModelGraph,
 }
 
 impl View {
@@ -79,6 +91,10 @@ impl View {
             View::ClassOutline => "Class outline",
             View::Bytecode => "Bytecode",
             View::BytecodeLines => "Bytecode with line numbers",
+            View::DatabaseSchema => "Database schema",
+            View::DatabaseRows => "Database rows",
+            View::DataSummary => "Data file summary",
+            View::ModelGraph => "Model graph",
         }
     }
 }
@@ -105,6 +121,10 @@ enum Kind {
     Binary,
     Gguf,
     JavaClass,
+    Sqlite,
+    DataFile,
+    SafeTensors,
+    Onnx,
 }
 
 fn extension(name: &str) -> String {
@@ -120,6 +140,18 @@ fn kind_of(name: &str, data: &[u8]) -> Kind {
     }
     if starts(gguf::MAGIC) {
         return Kind::Gguf;
+    }
+    if ext == "onnx" && onnx::is_onnx(data) {
+        return Kind::Onnx;
+    }
+    if safetensors::is_safetensors(data) {
+        return Kind::SafeTensors;
+    }
+    if sqlite::is_sqlite(data) {
+        return Kind::Sqlite;
+    }
+    if parquet::is_parquet(data) || parquet::is_arrow(data) {
+        return Kind::DataFile;
     }
     if class::is_class(data) {
         return Kind::JavaClass;
@@ -187,6 +219,10 @@ pub fn views_for(name: &str, data: &[u8]) -> Vec<View> {
             vec![View::Model, View::ChatTemplate, View::ChatPreview, View::Metadata, View::Tokenizer, View::Tensors]
         }
         Kind::JavaClass => vec![View::ClassOutline, View::Bytecode, View::BytecodeLines],
+        Kind::Sqlite => vec![View::DatabaseSchema, View::DatabaseRows],
+        Kind::DataFile => vec![View::DataSummary],
+        Kind::SafeTensors => vec![View::Model, View::Tensors],
+        Kind::Onnx => vec![View::ModelGraph],
     };
     views.push(View::Hex);
     views
@@ -219,15 +255,21 @@ pub fn render(view: View, name: &str, data: &[u8]) -> Result<String> {
         View::PrettyJson => pretty::json(data),
         View::Hex => binary::hex_dump(data),
         View::Image => Err(Error::Unsupported("images are not rendered as text".into())),
+        View::Model if safetensors::is_safetensors(data) => safetensors::summary(data),
         View::Model => gguf::summary(data),
         View::ChatTemplate => gguf::chat_template(data),
         View::ChatPreview => chat::preview(data),
         View::Metadata => gguf::metadata(data),
         View::Tokenizer => gguf::tokenizer(data),
+        View::Tensors if safetensors::is_safetensors(data) => safetensors::tensors(data),
         View::Tensors => gguf::tensors(data),
         View::ClassOutline => class::outline(data),
         View::Bytecode => class::bytecode(data, false),
         View::BytecodeLines => class::bytecode(data, true),
+        View::DatabaseSchema => sqlite::schema(data),
+        View::DatabaseRows => sqlite::rows(data),
+        View::DataSummary => parquet::summary(data),
+        View::ModelGraph => onnx::graph(data),
     }
 }
 
@@ -255,6 +297,11 @@ pub fn has_content_rule(name: &str) -> bool {
             | "tiff"
             | "ico"
             | "class"
+            | "db"
+            | "sqlite"
+            | "sqlite3"
+            | "db3"
+            | "safetensors"
     )
 }
 
@@ -275,6 +322,12 @@ pub fn content_equal(name: &str, left: &[u8], right: &[u8]) -> Option<&'static s
         Kind::JavaClass => {
             return class::same_code(left, right)?
                 .then_some("same code, only debug info or constant pool layout differ");
+        }
+        Kind::Sqlite => {
+            return sqlite::same_content(left, right)?.then_some("same schema and rows, only page layout differs");
+        }
+        Kind::SafeTensors => {
+            return safetensors::same_tensors(left, right)?.then_some("same tensors, only metadata differs");
         }
         _ => false,
     };
@@ -307,5 +360,54 @@ mod tests {
         assert_eq!(views_for("notes.txt", b"hello"), vec![View::Text, View::Hex]);
         let pair = views_for_pair(Some(("a.xml", b"<a/>")), Some(("a.xml", b"\x00")));
         assert_eq!(pair, vec![View::Hex]);
+    }
+
+    macro_rules! fixture {
+        ($path:literal) => {
+            include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/", $path))
+        };
+    }
+
+    #[test]
+    fn detects_data_and_model_files() {
+        let sqlite = fixture!("sqlite/shop-v1.sqlite");
+        for name in ["shop.db", "shop.sqlite", "shop.sqlite3", "shop.db3", "shop", "Cookies"] {
+            assert_eq!(views_for(name, sqlite), vec![View::DatabaseSchema, View::DatabaseRows, View::Hex], "{name}");
+        }
+        let data_files: [&[u8]; 3] = [
+            fixture!("parquet/sales-v1.parquet"),
+            fixture!("parquet/sales-v1.feather"),
+            fixture!("parquet/sales-v2.arrow"),
+        ];
+        for data in data_files {
+            assert_eq!(views_for("data", data), vec![View::DataSummary, View::Hex]);
+        }
+        let st = fixture!("safetensors/tiny-v1.safetensors");
+        assert_eq!(views_for("model.safetensors", st), vec![View::Model, View::Tensors, View::Hex]);
+        assert!(render(View::Model, "model.safetensors", st).unwrap().contains("Tensors:           19"));
+        let onnx = fixture!("onnx/mlp-v1.onnx");
+        assert_eq!(views_for("mlp.onnx", onnx), vec![View::ModelGraph, View::Hex]);
+        assert_ne!(views_for("mlp.bin", onnx)[0], View::ModelGraph, "ONNX is recognised by its extension");
+        // Look-alikes: the magic alone is not enough.
+        assert_eq!(views_for("x.db", b"SQLite format 3\0"), vec![View::Hex]);
+        assert_eq!(views_for("x.parquet", b"PAR1 but no footer"), vec![View::Text, View::Hex]);
+        assert_eq!(views_for("notes.txt", b"\x10\0\0\0\0\0\0\0not json at all!"), vec![View::Hex]);
+    }
+
+    #[test]
+    fn similar_data_and_model_files() {
+        let v1 = fixture!("sqlite/shop-v1.sqlite");
+        assert!(has_content_rule("shop.sqlite") && has_content_rule("a.db") && has_content_rule("m.safetensors"));
+        assert_eq!(
+            content_equal("shop.sqlite", v1, fixture!("sqlite/shop-v1-vacuum.db")),
+            Some("same schema and rows, only page layout differs")
+        );
+        assert_eq!(content_equal("shop.sqlite", v1, fixture!("sqlite/shop-v2.sqlite")), None);
+        let st = fixture!("safetensors/tiny-v1.safetensors");
+        assert_eq!(
+            content_equal("m.safetensors", st, fixture!("safetensors/tiny-v1-meta.safetensors")),
+            Some("same tensors, only metadata differs")
+        );
+        assert_eq!(content_equal("m.safetensors", st, fixture!("safetensors/tiny-v2.safetensors")), None);
     }
 }

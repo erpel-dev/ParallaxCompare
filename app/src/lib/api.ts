@@ -125,7 +125,11 @@ export type View =
   | "tensors"
   | "classOutline"
   | "bytecode"
-  | "bytecodeLines";
+  | "bytecodeLines"
+  | "databaseSchema"
+  | "databaseRows"
+  | "dataSummary"
+  | "modelGraph";
 
 export interface ImageSideView {
   url: string;
