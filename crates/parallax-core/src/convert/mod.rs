@@ -6,12 +6,18 @@
 //! (or, for images, pixels) that the normal diff machinery can align.
 
 mod android;
+mod a2l;
 mod binary;
+mod cdfx;
 mod chat;
 mod class;
 mod dotnet;
+mod dbc;
+mod dwarf;
 pub mod gguf;
 mod image_diff;
+mod linkmap;
+mod mdf;
 mod office;
 mod onnx;
 mod parquet;
@@ -82,6 +88,18 @@ pub enum View {
     Il,
     /// Android binary XML (manifest, resources) decoded to XML text.
     AndroidXml,
+    /// DBC: messages sorted by id with their signals, comments, attributes and value tables.
+    CanDatabase,
+    /// A2L: characteristics, measurements, conversions and the other objects, sorted by kind and name.
+    A2lObjects,
+    /// GNU ld / lld map: memory regions, output sections, size by object, symbols.
+    MemoryMap,
+    /// ELF with DWARF: global and static variables with types, functions with address ranges.
+    DebugSymbols,
+    /// MDF 3/4 measurement: header, channel groups and channels from the block tree.
+    Measurement,
+    /// CDFX calibration data: every instance's values, one per line, sorted by name.
+    Calibration,
 }
 
 impl View {
@@ -113,6 +131,12 @@ impl View {
             View::AssemblyOutline => "Assembly outline",
             View::Il => "IL",
             View::AndroidXml => "Android XML",
+            View::CanDatabase => "CAN database",
+            View::A2lObjects => "A2L objects",
+            View::MemoryMap => "Memory map",
+            View::DebugSymbols => "Debug symbols",
+            View::Measurement => "Measurement summary",
+            View::Calibration => "Calibration values",
         }
     }
 }
@@ -146,6 +170,11 @@ enum Kind {
     Wasm,
     DotNet,
     AndroidXml,
+    Dbc,
+    A2l,
+    LinkMap,
+    Mdf,
+    Cdfx,
 }
 
 fn extension(name: &str) -> String {
@@ -173,6 +202,8 @@ fn kind_of(name: &str, data: &[u8]) -> Kind {
     }
     if parquet::is_parquet(data) || parquet::is_arrow(data) {
         return Kind::DataFile;
+    if mdf::is_mdf(data) {
+        return Kind::Mdf;
     }
     if class::is_class(data) {
         return Kind::JavaClass;
@@ -220,6 +251,18 @@ fn kind_of(name: &str, data: &[u8]) -> Kind {
     if matches!(ext.as_str(), "s19" | "s28" | "s37" | "srec" | "mot" | "sx" | "s") && first_char == Some(b'S') {
         return Kind::Srec;
     }
+    if ext == "dbc" {
+        return Kind::Dbc;
+    }
+    if ext == "a2l" {
+        return Kind::A2l;
+    }
+    if ext == "map" && linkmap::detect(data).is_some() {
+        return Kind::LinkMap;
+    }
+    if matches!(ext.as_str(), "cdfx" | "cdf") && cdfx::is_cdfx(data) {
+        return Kind::Cdfx;
+    }
     if crate::highlight::is_xml_name(name) || data.starts_with(b"<?xml") {
         return Kind::Xml;
     }
@@ -236,6 +279,7 @@ pub fn views_for(name: &str, data: &[u8]) -> Vec<View> {
         Kind::Pdf | Kind::Ooxml | Kind::Odf => vec![View::Document],
         Kind::LegacyOffice if office::soffice().is_some() => vec![View::Document],
         Kind::LegacyOffice | Kind::Binary => vec![],
+        Kind::Executable if dwarf::has_debug_info(data) => vec![View::Executable, View::DebugSymbols],
         Kind::Executable => vec![View::Executable],
         Kind::Raster => vec![View::Image],
         Kind::Svg => vec![View::Text, View::PrettyXml, View::Image],
@@ -256,6 +300,11 @@ pub fn views_for(name: &str, data: &[u8]) -> Vec<View> {
         Kind::Wasm => vec![View::WasmOutline, View::WasmText],
         Kind::DotNet => vec![View::AssemblyOutline, View::Il, View::Executable],
         Kind::AndroidXml => vec![View::AndroidXml],
+        Kind::Dbc => vec![View::CanDatabase, View::Text],
+        Kind::A2l => vec![View::A2lObjects, View::Text],
+        Kind::LinkMap => vec![View::MemoryMap, View::Text],
+        Kind::Mdf => vec![View::Measurement],
+        Kind::Cdfx => vec![View::Calibration, View::Text, View::PrettyXml],
     };
     views.push(View::Hex);
     views
@@ -308,6 +357,12 @@ pub fn render(view: View, name: &str, data: &[u8]) -> Result<String> {
         View::AssemblyOutline => dotnet::outline(data),
         View::Il => dotnet::il(data),
         View::AndroidXml => android::to_xml(data),
+        View::CanDatabase => dbc::summary(&text::decode(data).text),
+        View::A2lObjects => a2l::objects(&text::decode(data).text),
+        View::MemoryMap => linkmap::memory_map(&text::decode(data).text),
+        View::DebugSymbols => dwarf::debug_symbols(data),
+        View::Measurement => mdf::summary(data),
+        View::Calibration => cdfx::values(&text::decode(data).text),
     }
 }
 
@@ -344,6 +399,10 @@ pub fn has_content_rule(name: &str) -> bool {
             | "dll"
             | "exe"
             | "winmd"
+            | "dbc"
+            | "a2l"
+            | "cdfx"
+            | "cdf"
     )
 }
 
@@ -373,6 +432,18 @@ pub fn content_equal(name: &str, left: &[u8], right: &[u8]) -> Option<&'static s
         }
         Kind::Wasm => return wasm::same_code(left, right)?.then_some("same code, only custom sections differ"),
         Kind::DotNet => return dotnet::same_code(left, right)?.then_some("same code, only build identity differs"),
+        Kind::Dbc => {
+            return dbc::same_database(&text::decode(left).text, &text::decode(right).text)
+                .then_some("same messages and signals, only order or formatting differ");
+        }
+        Kind::A2l => {
+            return a2l::same_objects(&text::decode(left).text, &text::decode(right).text)?
+                .then_some("same objects, only order or formatting differ");
+        }
+        Kind::Cdfx => {
+            return cdfx::same_values(&text::decode(left).text, &text::decode(right).text)?
+                .then_some("same values, only order or formatting differ");
+        }
         _ => false,
     };
     equal.then_some("same content, the file bytes differ")

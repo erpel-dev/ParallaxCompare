@@ -13,13 +13,13 @@ use quick_xml::reader::Reader;
 use crate::{Error, Result};
 
 /// Streams the parts of an XML document that text extraction cares about.
-enum Ev<'a> {
+pub(super) enum Ev<'a> {
     Start(&'a str, &'a quick_xml::events::BytesStart<'a>),
     End(&'a str),
     Text(&'a str),
 }
 
-fn walk_xml(xml: &str, mut f: impl FnMut(Ev<'_>)) -> Result<()> {
+pub(super) fn walk_xml(xml: &str, mut f: impl FnMut(Ev<'_>)) -> Result<()> {
     let mut reader = Reader::from_str(xml);
     loop {
         match reader.read_event().map_err(|e| Error::Archive(format!("XML: {e}")))? {
@@ -51,7 +51,7 @@ fn walk_xml(xml: &str, mut f: impl FnMut(Ev<'_>)) -> Result<()> {
     }
 }
 
-fn attr(e: &quick_xml::events::BytesStart<'_>, name: &str) -> Option<String> {
+pub(super) fn attr(e: &quick_xml::events::BytesStart<'_>, name: &str) -> Option<String> {
     e.attributes().flatten().find(|a| a.key.local_name().as_ref() == name).map(|a| a.value.into_owned())
 }
 
