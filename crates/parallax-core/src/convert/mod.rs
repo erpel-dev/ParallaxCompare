@@ -5,20 +5,20 @@
 //! a minified XML file is one 5 MB line. Each [`View`] renders a file into text
 //! (or, for images, pixels) that the normal diff machinery can align.
 
-mod android;
 mod a2l;
+mod android;
 mod binary;
 mod cdfx;
 mod chat;
 mod class;
-mod dotnet;
 mod dbc;
+mod dotnet;
 mod dwarf;
 pub mod gguf;
 mod image_diff;
+mod image_meta;
 mod linkmap;
 mod mdf;
-mod image_meta;
 mod media;
 mod office;
 mod onnx;
@@ -213,6 +213,7 @@ fn kind_of(name: &str, data: &[u8]) -> Kind {
     }
     if parquet::is_parquet(data) || parquet::is_arrow(data) {
         return Kind::DataFile;
+    }
     if mdf::is_mdf(data) {
         return Kind::Mdf;
     }
