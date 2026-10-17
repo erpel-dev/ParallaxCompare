@@ -536,7 +536,9 @@ fn missing_side() -> SideInfo {
     }
 }
 
-fn load_side(source: &Source, path: &str) -> CmdResult<(SideInfo, Option<Vec<u8>>)> {
+/// The file's bytes as read: a memory map for large local files, so that views of
+/// a header (GGUF models) touch only the start of a multi-gigabyte file.
+fn load_side(source: &Source, path: &str) -> CmdResult<(SideInfo, Option<Data>)> {
     let full = source.path(path);
     let entry = match source.vfs.stat(&full) {
         Ok(entry) => entry,
@@ -550,7 +552,7 @@ fn load_side(source: &Source, path: &str) -> CmdResult<(SideInfo, Option<Vec<u8>
         binary: text::is_binary(&data),
         ..missing_side()
     };
-    Ok((info, Some(data.to_vec())))
+    Ok((info, Some(data)))
 }
 
 fn empty_doc() -> TextDoc {
@@ -600,7 +602,7 @@ pub async fn open_file_diff(
     let (info, file_diff) = blocking(move || {
         let (mut left_info, left_data) = load_side(&session.left, &path)?;
         let (mut right_info, right_data) = load_side(&session.right, &path)?;
-        let identical = left_data.is_some() && left_data == right_data;
+        let identical = left_data.is_some() && left_data.as_deref() == right_data.as_deref();
         // The name to pick views and grammars from: the compared path, or the root file name.
         let name = if path.is_empty() {
             let root = if session.left.root.is_empty() { &session.right.root } else { &session.left.root };
@@ -647,7 +649,7 @@ pub async fn open_file_diff(
 
         // Converted text for both sides; LibreOffice conversions take seconds, so the
         // two sides run at the same time.
-        let render = |data: &Option<Vec<u8>>, view: View| -> Option<Result<String, String>> {
+        let render = |data: &Option<Data>, view: View| -> Option<Result<String, String>> {
             data.as_ref().map(|d| convert::render(view, &name, d).map_err(err))
         };
         let (mut left_text, mut right_text) = (None, None);
@@ -669,7 +671,7 @@ pub async fn open_file_diff(
             }
         }
 
-        let make_doc = |data: &Option<Vec<u8>>,
+        let make_doc = |data: &Option<Data>,
                         converted: Option<Result<String, String>>,
                         info: &mut SideInfo|
          -> CmdResult<TextDoc> {
@@ -696,12 +698,12 @@ pub async fn open_file_diff(
         let mut right = make_doc(&right_data, right_text, &mut right_info)?;
         // Plain text can be edited where the source can be written and saving
         // would give back the same bytes for unedited text.
-        let editable = |source: &Source, data: &Option<Vec<u8>>, doc: &TextDoc, other: &Option<Vec<u8>>| {
+        let editable = |source: &Source, data: &Option<Data>, doc: &TextDoc, other: &Option<Data>| {
             chosen == View::Text
                 && source.info.writable
                 && source.vfs.writable()
                 && match data {
-                    Some(bytes) => !text::is_binary(bytes) && doc.encode().is_ok_and(|e| e == *bytes),
+                    Some(bytes) => !text::is_binary(bytes) && doc.encode().is_ok_and(|e| e[..] == bytes[..]),
                     None => other.as_ref().is_some_and(|o| !text::is_binary(o)),
                 }
         };
@@ -725,6 +727,7 @@ pub async fn open_file_diff(
                 .or_else(|| highlight::detect_syntax(&name, first_line.unwrap_or_default()).map(|s| s.name.clone())),
             View::PrettyXml => Some("XML".into()),
             View::PrettyJson => Some("JSON".into()),
+            View::ChatTemplate => syntax.or_else(|| Some("Jinja2".into())),
             View::Image => None,
             _ => Some(highlight::view_syntax().name.clone()),
         };

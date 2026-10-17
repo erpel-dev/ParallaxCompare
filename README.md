@@ -38,6 +38,7 @@ The design rationale, the GUI mockups and a comparison with existing tools are i
 | `.png` `.jpg` `.gif` `.bmp` `.webp` `.tif` `.ico` | Image | Side by side, difference overlay or blink; count and bounding box of differing pixels |
 | `.svg` | Text (XML) | Image view renders it |
 | XML/JSON with very long lines | Pretty-printed | Minified files re-indented, one element per line |
+| `.gguf` models (llama.cpp, Ollama, LM Studio) | Model summary | Read from the file header only, so a 70 GB model opens as fast as a small one. Views: **Model summary** (architecture, parameters, context length, heads and KV heads, RoPE, tokenizer, file type, bits per weight) · **Chat template** (Jinja source; templates stored as one line are broken at tags) · **Chat template, rendered** (the template applied to sample conversations, including a tool call, so the prompts the model sees are compared rather than the template text) · **Metadata** (every key, sorted) · **Tokenizer** (special tokens, then every token by id) · **Tensors and quantization** (recipe per type, a layer map of types per weight matrix, every tensor with shape, type and size) |
 | Other binary files | Hex dump | Up to 16 MB |
 
 ![Word documents compared by their text](docs/screenshots/document-compare.png)

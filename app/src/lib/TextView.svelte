@@ -564,7 +564,7 @@
     </select>
     <button class:on={options.ignoreCase} onclick={() => { options.ignoreCase = !options.ignoreCase; settingsChanged(); }}>Ignore case</button>
     <button class:on={options.histogram} onclick={() => { options.histogram = !options.histogram; settingsChanged(); }} title="Histogram diff instead of Myers: can read better for moved code, slower on files with many repeated lines">Histogram</button>
-    {#if info?.view === "text" || info?.view === "prettyXml" || info?.view === "prettyJson"}
+    {#if info?.view === "text" || info?.view === "prettyXml" || info?.view === "prettyJson" || info?.view === "chatTemplate"}
     <span class="sep"></span>
     <select bind:value={syntaxOverride} onchange={settingsChanged} title="Syntax highlighting">
       <option value="">Syntax: auto{info?.syntax && !syntaxOverride ? ` (${info.syntax})` : ""}</option>
