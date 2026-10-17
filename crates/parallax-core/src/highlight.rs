@@ -117,6 +117,11 @@ impl DocHighlighter {
         DocHighlighter { syntax, theme, checkpoints: Vec::new() }
     }
 
+    /// Forgets parse states from `line` on, after an edit there.
+    pub fn invalidate_from(&mut self, line: usize) {
+        self.checkpoints.truncate(line / CHECKPOINT_EVERY);
+    }
+
     pub fn syntax_name(&self) -> Option<&str> {
         self.syntax.map(|s| s.name.as_str())
     }

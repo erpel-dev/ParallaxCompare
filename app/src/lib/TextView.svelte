@@ -1,15 +1,34 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from "svelte";
-  import { api, defaultDiffOptions, theme, type FileDiffInfo, type LineView, type RowView, type SessionInfo, type View } from "./api";
+  import { listen } from "@tauri-apps/api/event";
+  import { ask } from "@tauri-apps/plugin-dialog";
+  import {
+    api,
+    defaultDiffOptions,
+    END,
+    theme,
+    type EditInfo,
+    type FileDiffInfo,
+    type LineView,
+    type PathsChanged,
+    type RowView,
+    type SessionInfo,
+    type SideName,
+    type View,
+  } from "./api";
   import ImagePanel from "./ImagePanel.svelte";
   import PathBar from "./PathBar.svelte";
   import { formatSize } from "./format";
 
-  let { session, path }: { session: SessionInfo; path: string } = $props();
+  let {
+    session,
+    path,
+    onDirty,
+  }: { session: SessionInfo; path: string; onDirty?: (dirty: boolean) => void } = $props();
 
   const ROW = 19;
   const CHUNK = 200;
-  const CHAR = 7.6;
+  const SIDE_NAMES: [SideName, SideName] = ["left", "right"];
 
   let options = $state(defaultDiffOptions());
   let syntaxOverride = $state<string>("");
@@ -18,6 +37,7 @@
   let info = $state<FileDiffInfo | null>(null);
   let error = $state("");
   let loading = $state(true);
+  let busy = $state("");
 
   // Rows are fetched lazily in chunks; the counter re-renders when chunks arrive.
   let cache = new Map<number, RowView>();
@@ -30,6 +50,24 @@
   let hscroll = $state(0);
   let selected = $state<number | null>(null);
   let section = $state(-1);
+
+  // Editing state.
+  let dirty = $state<[boolean, boolean]>([false, false]);
+  let canUndo = $state(false);
+  let canRedo = $state(false);
+  /** The side that keyboard commands (Enter, copy) act on: the last one clicked. */
+  let activeSide = $state<0 | 1>(1);
+  /** The line being typed in: its row, and its line number (null in a filler row). */
+  let editing = $state<{ side: 0 | 1; row: number; line: number | null } | null>(null);
+  let draft = $state("");
+  let original = "";
+  let input = $state<HTMLInputElement>();
+  /** After an edit, the caret waits for its row to be loaded. */
+  let caretWanted: { side: 0 | 1; line: number; col: number; hint: number } | null = null;
+  /** File changed on disk while it has unsaved edits. */
+  let changedOnDisk = $state(false);
+  // Edits run one after another, in the order they were made.
+  let queue: Promise<unknown> = Promise.resolve();
 
   const total = $derived(info?.rows ?? 0);
   const first = $derived(Math.max(0, Math.floor(scrollTop / ROW) - 20));
@@ -44,21 +82,40 @@
     void cacheVersion;
     return selected === null ? undefined : cache.get(selected);
   });
+  const editable = $derived<[boolean, boolean]>([!!info?.left.editable, !!info?.right.editable]);
+  const anyDirty = $derived(dirty[0] || dirty[1]);
+  /** Section index by its first row, for the copy arrows. */
+  const sectionStarts = $derived(new Map((info?.sections ?? []).map((s, i) => [s.start, i])));
+  /** The section the toolbar's copy buttons act on. */
+  const currentSection = $derived.by(() => {
+    if (!info) return -1;
+    if (selected !== null) {
+      const i = info.sections.findIndex((s) => s.start <= selected! && selected! < s.end);
+      if (i >= 0) return i;
+    }
+    return section;
+  });
 
-  async function load() {
+  $effect(() => onDirty?.(anyDirty));
+
+  async function load(keepPosition = false) {
     loading = true;
     error = "";
+    changedOnDisk = false;
     const previous = info?.id;
+    const top = viewport?.scrollTop ?? 0;
     try {
       info = await api.openFileDiff(session.id, path, $state.snapshot(options), syntaxOverride || null, view);
       view = info.view;
-      cache = new Map();
-      pending = new Set();
-      cacheVersion++;
+      dirty = [false, false];
+      canUndo = canRedo = false;
+      editing = null;
+      resetRows();
       section = -1;
       if (previous !== undefined) api.closeFileDiff(previous);
       await tick();
-      if (info.sections.length) goTo(0);
+      if (keepPosition && viewport) viewport.scrollTop = top;
+      else if (info.sections.length) goTo(0);
       else ensureLoaded();
     } catch (e) {
       error = String(e);
@@ -67,15 +124,25 @@
     }
   }
 
+  function resetRows() {
+    cache = new Map();
+    pending = new Set();
+    cacheVersion++;
+    ensureLoaded();
+  }
+
   async function fetchChunk(chunk: number) {
     if (!info || pending.has(chunk)) return;
     pending.add(chunk);
     const id = info.id;
+    const version = cacheVersion;
     try {
       const rows = await api.fileRows(id, chunk * CHUNK, CHUNK, theme());
-      if (info?.id !== id) return;
+      // Rows of an older diff, from before an edit.
+      if (info?.id !== id || version !== cacheVersion) return;
       rows.forEach((row, i) => cache.set(chunk * CHUNK + i, row));
       cacheVersion++;
+      placeCaret();
     } catch (e) {
       pending.delete(chunk);
       error = String(e);
@@ -85,6 +152,7 @@
   function ensureLoaded() {
     if (!info) return;
     for (let c = Math.floor(first / CHUNK); c <= Math.floor(Math.max(first, last - 1) / CHUNK); c++) fetchChunk(c);
+    if (caretWanted) fetchChunk(Math.floor(caretWanted.hint / CHUNK));
   }
 
   $effect(() => {
@@ -112,10 +180,278 @@
     }
   }
 
+  /** Scrolls a row into view if it is not visible. */
+  function reveal(row: number) {
+    if (!viewport) return;
+    const top = row * ROW;
+    if (top < viewport.scrollTop || top + ROW > viewport.scrollTop + viewHeight) {
+      viewport.scrollTop = Math.max(0, top - viewHeight / 3);
+    }
+  }
+
+  // ---- Editing ----
+
+  function enqueue<T>(task: () => Promise<T>): Promise<T | undefined> {
+    const run = queue.then(task).catch((e) => {
+      error = String(e);
+      return undefined;
+    });
+    queue = run;
+    return run;
+  }
+
+  function applyEdit(e: EditInfo | undefined) {
+    if (!e || !info) return;
+    info = {
+      ...info,
+      rows: e.rows,
+      sections: e.sections,
+      stats: e.stats,
+      identical: e.identical,
+      note: null,
+      left: { ...info.left, lines: e.lines[0], exists: e.exists[0] },
+      right: { ...info.right, lines: e.lines[1], exists: e.exists[1] },
+    };
+    dirty = e.dirty;
+    canUndo = e.canUndo;
+    canRedo = e.canRedo;
+    error = "";
+    section = -1;
+    if (e.focusRow !== null) {
+      selected = e.focusRow;
+      reveal(e.focusRow);
+    }
+    if (e.caret && editing) {
+      caretWanted = { side: editing.side, line: e.caret.line, col: e.caret.col, hint: e.caret.row };
+      editing = null;
+      reveal(e.caret.row);
+    }
+    resetRows();
+  }
+
+  /** Opens the line editor on a row once the row with the wanted line is loaded. */
+  function placeCaret() {
+    const want = caretWanted;
+    if (!want) return;
+    for (let d = 0; d < 400; d++) {
+      for (const i of d ? [want.hint + d, want.hint - d] : [want.hint]) {
+        const row = cache.get(i);
+        const line = row && (want.side === 0 ? row.l : row.r);
+        if (line?.n === want.line) {
+          caretWanted = null;
+          openEditor(want.side, i, want.col);
+          return;
+        }
+      }
+    }
+  }
+
+  function lineOf(side: 0 | 1, row: RowView | undefined): LineView | null | undefined {
+    return row && (side === 0 ? row.l : row.r);
+  }
+
+  function openEditor(side: 0 | 1, index: number, col?: number) {
+    const row = cache.get(index);
+    if (!row || !editable[side]) return;
+    const line = lineOf(side, row);
+    if (line?.x) {
+      error = "This line is too long to edit here.";
+      return;
+    }
+    activeSide = side;
+    selected = index;
+    editing = { side, row: index, line: line ? line.n : null };
+    draft = original = line?.t ?? "";
+    const at = Math.min(col ?? draft.length, draft.length);
+    tick().then(() => {
+      input?.focus();
+      input?.setSelectionRange(at, at);
+    });
+  }
+
+  /** The UTF-16 column under the mouse in a code cell. */
+  function columnAt(e: MouseEvent, cell: HTMLElement): number | undefined {
+    const doc = document as Document & { caretRangeFromPoint?: (x: number, y: number) => Range | null };
+    const hit = doc.caretRangeFromPoint?.(e.clientX, e.clientY);
+    const text = cell.querySelector(".text");
+    if (!hit || !text || !text.contains(hit.startContainer)) return undefined;
+    const range = document.createRange();
+    range.setStart(text, 0);
+    range.setEnd(hit.startContainer, hit.startOffset);
+    return range.toString().length;
+  }
+
+  function startEdit(e: MouseEvent, side: 0 | 1, index: number) {
+    if (!editable[side]) return;
+    openEditor(side, index, columnAt(e, e.currentTarget as HTMLElement));
+  }
+
+  /** Sends the typed line; `text` may hold line breaks, `caret` where typing goes on. */
+  function commit(text: string, caret: number | null, then?: (e: EditInfo | undefined) => void) {
+    const ed = editing;
+    if (!ed || !info) return;
+    const id = info.id;
+    const side = SIDE_NAMES[ed.side];
+    if (caret === null) editing = null;
+    if (text === original && caret === null) return;
+    enqueue(() =>
+      ed.line === null
+        ? api.insertLine(id, side, ed.row, text)
+        : api.editText(id, side, { line: ed.line, col: 0 }, { line: ed.line, col: END }, text, caret),
+    ).then((e) => {
+      applyEdit(e);
+      then?.(e);
+    });
+  }
+
+  function editKey(e: KeyboardEvent) {
+    const ed = editing;
+    if (!ed || !info || !input) return;
+    const [a, b] = [input.selectionStart ?? 0, input.selectionEnd ?? 0];
+    const id = info.id;
+    const side = SIDE_NAMES[ed.side];
+    const mod = e.ctrlKey || e.metaKey;
+    if (e.key === "Enter") {
+      commit(draft.slice(0, a) + "\n" + draft.slice(b), a + 1);
+    } else if (e.key === "Escape") {
+      editing = null;
+      viewport?.focus();
+    } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+      const target = ed.line === null ? null : ed.line + (e.key === "ArrowUp" ? -1 : 1);
+      const col = a;
+      const sideLines = ed.side === 0 ? info.left.lines : info.right.lines;
+      if (target === null || target < 0 || target >= sideLines) return;
+      const move = (hint: number) => {
+        caretWanted = { side: ed.side, line: target, col, hint: hint + (e.key === "ArrowUp" ? -1 : 1) };
+        editing = null;
+        placeCaret();
+      };
+      if (draft === original) move(ed.row);
+      else commit(draft, col, (r) => r?.caret && move(r.caret.row));
+    } else if (e.key === "Backspace" && a === 0 && b === 0 && ed.line !== null && ed.line > 0) {
+      // Joins the line to the one above.
+      const line = ed.line;
+      editing = null;
+      enqueue(() => api.editText(id, side, { line: line - 1, col: END }, { line, col: END }, draft, 0)).then((r) => {
+        if (r?.caret) editing = { side: ed.side, row: r.caret.row, line: r.caret.line };
+        applyEdit(r);
+      });
+    } else if (e.key === "Delete" && a === draft.length && b === a && ed.line !== null) {
+      // Joins the line below to this one.
+      const line = ed.line;
+      const sideLines = ed.side === 0 ? info.left.lines : info.right.lines;
+      if (line + 1 >= sideLines) return;
+      editing = null;
+      enqueue(() => api.editText(id, side, { line, col: 0 }, { line: line + 1, col: 0 }, draft, a)).then((r) => {
+        if (r?.caret) editing = { side: ed.side, row: r.caret.row, line: r.caret.line };
+        applyEdit(r);
+      });
+    } else if (e.key === "Tab" && !mod) {
+      draft = draft.slice(0, a) + "\t" + draft.slice(b);
+      tick().then(() => input?.setSelectionRange(a + 1, a + 1));
+    } else if (mod && e.key === "s") {
+      commit(draft, null);
+      save();
+    } else if (mod && (e.key === "z" || e.key === "y") && draft === original) {
+      editing = null;
+      if (e.key === "z" && !e.shiftKey) undo();
+      else redo();
+    } else {
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+  }
+
+  function onPaste(e: ClipboardEvent) {
+    const text = e.clipboardData?.getData("text/plain") ?? "";
+    if (!input || !/[\r\n]/.test(text)) return;
+    // Several lines: they replace the selection and become lines of the file.
+    e.preventDefault();
+    const [a, b] = [input.selectionStart ?? 0, input.selectionEnd ?? 0];
+    commit(draft.slice(0, a) + text + draft.slice(b), a + text.length);
+  }
+
+  function copySection(i: number, to: 0 | 1) {
+    if (!info || i < 0 || !editable[to]) return;
+    const s = info.sections[i];
+    const id = info.id;
+    editing = null;
+    enqueue(() => api.copyRows(id, s.start, s.end, SIDE_NAMES[to])).then(applyEdit);
+  }
+
+  function undo() {
+    if (!info) return;
+    const id = info.id;
+    editing = null;
+    enqueue(() => api.undo(id)).then(applyEdit);
+  }
+
+  function redo() {
+    if (!info) return;
+    const id = info.id;
+    editing = null;
+    enqueue(() => api.redo(id)).then(applyEdit);
+  }
+
+  async function save() {
+    if (!info) return;
+    const id = info.id;
+    // Typed edits land first, so they are saved too.
+    await queue;
+    for (const side of [0, 1] as const) {
+      if (!dirty[side]) continue;
+      busy = "Saving…";
+      try {
+        applyEdit(await api.saveSide(id, SIDE_NAMES[side]));
+      } catch (e) {
+        error = String(e);
+        return;
+      } finally {
+        busy = "";
+      }
+    }
+  }
+
+  /** Whitespace, case and grammar changes keep the edits. */
+  function settingsChanged() {
+    if (!info || (!anyDirty && !canUndo)) {
+      load(true);
+      return;
+    }
+    const id = info.id;
+    enqueue(() => api.updateDiff(id, $state.snapshot(options), syntaxOverride || null)).then(applyEdit);
+  }
+
+  async function reloadFromDisk() {
+    if (anyDirty) {
+      const ok = await ask("Reload the file from disk and discard your unsaved edits?", { title: "Reload", kind: "warning" });
+      if (!ok) return;
+    }
+    load(true);
+  }
+
+  // ---- Keys, mouse ----
+
   function onKey(e: KeyboardEvent) {
+    // Keys typed into the line editor.
+    if (e.target instanceof HTMLInputElement) return;
+    const mod = e.ctrlKey || e.metaKey;
     if (e.key === "F8" || (e.altKey && e.key === "ArrowDown") || e.key === "n") next(1);
     else if (e.key === "F7" || (e.altKey && e.key === "ArrowUp") || e.key === "p") next(-1);
-    else return;
+    else if (e.altKey && e.key === "ArrowRight") copySection(currentSection, 1);
+    else if (e.altKey && e.key === "ArrowLeft") copySection(currentSection, 0);
+    else if (mod && e.key === "z" && !e.shiftKey) undo();
+    else if (mod && (e.key === "y" || (e.key === "Z" && e.shiftKey) || (e.key === "z" && e.shiftKey))) redo();
+    else if (mod && e.key === "s") save();
+    else if ((e.key === "Enter" || e.key === "F2") && selected !== null) openEditor(activeSide, selected);
+    else if (e.key === "ArrowDown" && selected !== null) {
+      selected = Math.min(total - 1, selected + 1);
+      reveal(selected);
+    } else if (e.key === "ArrowUp" && selected !== null) {
+      selected = Math.max(0, selected - 1);
+      reveal(selected);
+    } else return;
     e.preventDefault();
   }
 
@@ -173,13 +509,22 @@
     load();
     api.syntaxNames().then((n) => (syntaxNames = n));
     const media = window.matchMedia("(prefers-color-scheme: light)");
-    const onTheme = () => {
-      cache = new Map();
-      pending = new Set();
-      cacheVersion++;
-    };
+    const onTheme = () => resetRows();
     media.addEventListener("change", onTheme);
-    return () => media.removeEventListener("change", onTheme);
+    // The file changed on disk (or was saved from another tab).
+    const unlisten = listen<PathsChanged>("paths-changed", (e) => {
+      const p = e.payload;
+      // Its own saves keep the undo history.
+      if (p.session !== session.id || !info || p.origin === info.id) return;
+      const hit = p.full || p.paths.some((q) => q === path || q === "" || path.startsWith(q + "/"));
+      if (!hit || busy) return;
+      if (anyDirty) changedOnDisk = true;
+      else load(true);
+    });
+    return () => {
+      media.removeEventListener("change", onTheme);
+      unlisten.then((f) => f());
+    };
   });
 
   onDestroy(() => {
@@ -190,7 +535,7 @@
 <div class="view">
   <div class="toolbar">
     {#if info && info.views.length > 1}
-      <select bind:value={view} onchange={() => { syntaxOverride = ""; load(); }} title="How the files are shown">
+      <select bind:value={view} onchange={() => { syntaxOverride = ""; load(); }} disabled={anyDirty} title={anyDirty ? "Save or undo the edits to change the view" : "How the files are shown"}>
         {#each info.views as v (v.id)}
           <option value={v.id}>{v.label}</option>
         {/each}
@@ -203,17 +548,25 @@
     {#if info}
       <span class="count">{section >= 0 ? section + 1 : "–"} / {info.sections.length}</span>
     {/if}
+    {#if editable[0] || editable[1]}
+      <span class="sep"></span>
+      <button onclick={() => copySection(currentSection, 0)} disabled={!editable[0] || currentSection < 0} title="Copy the current difference to the left side (Alt+←)">Copy ←</button>
+      <button onclick={() => copySection(currentSection, 1)} disabled={!editable[1] || currentSection < 0} title="Copy the current difference to the right side (Alt+→)">Copy →</button>
+      <button onclick={undo} disabled={!canUndo} title="Undo (Ctrl+Z)">↶</button>
+      <button onclick={redo} disabled={!canRedo} title="Redo (Ctrl+Y)">↷</button>
+      <button class:dirty={anyDirty} onclick={save} disabled={!anyDirty} title="Save the changed sides (Ctrl+S)">Save{anyDirty ? " ●" : ""}</button>
+    {/if}
     <span class="sep"></span>
-    <select bind:value={options.whitespace} onchange={load} title="Whitespace rule">
+    <select bind:value={options.whitespace} onchange={settingsChanged} title="Whitespace rule">
       <option value="exact">Whitespace: exact</option>
       <option value="normalize">Whitespace: ignore changes</option>
       <option value="ignoreAll">Whitespace: ignore all</option>
     </select>
-    <button class:on={options.ignoreCase} onclick={() => { options.ignoreCase = !options.ignoreCase; load(); }}>Ignore case</button>
-    <button class:on={options.histogram} onclick={() => { options.histogram = !options.histogram; load(); }} title="Histogram diff instead of Myers: can read better for moved code, slower on files with many repeated lines">Histogram</button>
+    <button class:on={options.ignoreCase} onclick={() => { options.ignoreCase = !options.ignoreCase; settingsChanged(); }}>Ignore case</button>
+    <button class:on={options.histogram} onclick={() => { options.histogram = !options.histogram; settingsChanged(); }} title="Histogram diff instead of Myers: can read better for moved code, slower on files with many repeated lines">Histogram</button>
     {#if info?.view === "text" || info?.view === "prettyXml" || info?.view === "prettyJson"}
     <span class="sep"></span>
-    <select bind:value={syntaxOverride} onchange={load} title="Syntax highlighting">
+    <select bind:value={syntaxOverride} onchange={settingsChanged} title="Syntax highlighting">
       <option value="">Syntax: auto{info?.syntax && !syntaxOverride ? ` (${info.syntax})` : ""}</option>
       {#each syntaxNames as name (name)}
         <option value={name}>{name}</option>
@@ -224,8 +577,8 @@
   </div>
 
   <div class="pathbars">
-    <PathBar info={session.left} suffix={path} />
-    <PathBar info={session.right} suffix={path} />
+    <PathBar info={session.left} suffix={path} modified={dirty[0]} />
+    <PathBar info={session.right} suffix={path} modified={dirty[1]} />
   </div>
   {#if info}
     <div class="meta">
@@ -234,6 +587,11 @@
     </div>
   {/if}
 
+  {#if changedOnDisk}
+    <div class="banner warn">
+      The file changed on disk. <button onclick={reloadFromDisk}>Reload</button> discards your unsaved edits.
+    </div>
+  {/if}
   {#if error}
     <div class="banner err">{error}</div>
   {:else if info?.note}
@@ -276,15 +634,39 @@
             <!-- svelte-ignore a11y_click_events_have_key_events -->
             <div class="row {row?.k ?? 'equal'}" class:cur={index === selected} role="row" tabindex="-1" onclick={() => (selected = index)}>
               {#each [row?.l, row?.r] as line, side (side)}
+                {@const s = side as 0 | 1}
                 {#if side === 1}
-                  <div class="mid">{row && row.k !== "equal" ? { minor: "≈", changed: "≠", removed: "−", added: "+" }[row.k] : ""}</div>
+                  <div class="mid">
+                    {#if sectionStarts.has(index) && (editable[0] || editable[1])}
+                      {@const i = sectionStarts.get(index)!}
+                      {#if editable[0]}<button class="arrow" onclick={(e) => { e.stopPropagation(); copySection(i, 0); }} title="Copy this difference to the left">←</button>{/if}
+                      {#if editable[1]}<button class="arrow" onclick={(e) => { e.stopPropagation(); copySection(i, 1); }} title="Copy this difference to the right">→</button>{/if}
+                    {:else}
+                      {row && row.k !== "equal" ? { minor: "≈", changed: "≠", removed: "−", added: "+" }[row.k] : ""}
+                    {/if}
+                  </div>
                 {/if}
-                {#if line}
+                {#if editing && editing.row === index && editing.side === s}
+                  <div class="ln" class:fill={!line}>{line ? line.n + 1 : "+"}</div>
+                  <div class="code editing">
+                    <input
+                      class="edit"
+                      bind:this={input}
+                      bind:value={draft}
+                      onkeydown={editKey}
+                      onpaste={onPaste}
+                      onblur={() => commit(draft, null)}
+                      spellcheck="false"
+                    />
+                  </div>
+                {:else if line}
                   <div class="ln">{line.n + 1}</div>
-                  <div class="code"><span style:transform="translateX({-hscroll}px)">{#each segments(line) as seg, si (si)}<span class:mk={seg.mark} style:color={seg.color}>{seg.text}</span>{/each}{#if line.x}<span class="cut" title="The line is cut for display">… {line.x.toLocaleString()} more characters</span>{/if}</span></div>
+                  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+                  <div class="code" class:editable={editable[s]} onclick={() => (activeSide = s)} ondblclick={(e) => startEdit(e, s, index)}><span class="text" style:transform="translateX({-hscroll}px)">{#each segments(line) as seg, si (si)}<span class:mk={seg.mark} style:color={seg.color}>{seg.text}</span>{/each}</span>{#if line.nn}<span class="cut" title="The other file ends with a line break">no line break at end</span>{/if}{#if line.x}<span class="cut" title="The line is cut for display">… {line.x.toLocaleString()} more characters</span>{/if}</div>
                 {:else if row}
                   <div class="ln fill"></div>
-                  <div class="code fill"></div>
+                  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+                  <div class="code fill" onclick={() => (activeSide = s)} ondblclick={(e) => startEdit(e, s, index)}></div>
                 {:else}
                   <div class="ln"></div>
                   <div class="code"></div>
@@ -320,7 +702,8 @@
       <span class="c-rem">{info.stats.removed} removed</span>
       {#if selected !== null}<span>Row {selected + 1} of {total}</span>{/if}
       <span>{info.view === "text" ? (info.syntax ?? "Plain text") : info.views.find((v) => v.id === info?.view)?.label}</span>
-      <span class="hint">F7 / F8: previous / next difference · Shift+wheel: scroll sideways</span>
+      {#if busy}<span>{busy}</span>{/if}
+      <span class="hint">{editable[0] || editable[1] ? "Double-click to edit · Alt+←/→: copy difference · " : ""}F7 / F8: previous / next difference</span>
     {/if}
   </div>
 </div>
@@ -346,6 +729,10 @@
     min-width: 48px;
     text-align: center;
     font-variant-numeric: tabular-nums;
+  }
+  .dirty {
+    color: var(--accent);
+    font-weight: 600;
   }
   .pathbars,
   .meta {
@@ -373,6 +760,9 @@
   }
   .banner.err {
     color: var(--error);
+  }
+  .banner.warn {
+    color: var(--similar);
   }
   .body {
     flex: 1;
@@ -421,7 +811,7 @@
   }
   .row {
     display: grid;
-    grid-template-columns: 48px minmax(0, 1fr) 22px 48px minmax(0, 1fr);
+    grid-template-columns: 48px minmax(0, 1fr) 36px 48px minmax(0, 1fr);
     height: 19px;
     white-space: pre;
   }
@@ -440,16 +830,48 @@
     overflow: hidden;
     padding-left: 6px;
   }
-  .code > span {
+  .code.editable {
+    cursor: text;
+  }
+  .code > .text {
     display: inline-block;
   }
+  .code.editing {
+    padding: 0;
+    background: var(--input);
+  }
+  .edit {
+    width: 100%;
+    height: 19px;
+    border: none;
+    border-radius: 0;
+    outline: 1px solid var(--accent);
+    outline-offset: -1px;
+    padding: 0 0 0 6px;
+    font: inherit;
+    background: var(--input);
+    color: var(--text);
+    tab-size: 4;
+  }
   .mid {
+    display: flex;
+    justify-content: center;
+    gap: 1px;
     background: var(--panel-2);
     border-left: 1px solid var(--line);
     border-right: 1px solid var(--line);
     text-align: center;
     color: var(--dim);
     font-size: 11px;
+  }
+  .arrow {
+    padding: 0 3px;
+    min-width: 0;
+    height: 17px;
+    margin-top: 1px;
+    line-height: 15px;
+    font-size: 11px;
+    border-radius: 3px;
   }
   .changed .code {
     background: var(--row-changed);

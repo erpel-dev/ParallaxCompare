@@ -155,14 +155,16 @@ pub trait Vfs: Send + Sync {
     fn local_path(&self, _path: &str) -> Option<PathBuf> {
         None
     }
-    /// Tells a provider that caches its tree that `path` was written or deleted.
+    /// Tells a provider that caches its tree that `path` was written or deleted;
+    /// `""` means anything may have changed.
     fn changed(&self, _path: &str) {}
     /// Whether [`apply`](Self::apply) can write to this tree.
     fn writable(&self) -> bool {
         false
     }
     /// Writes `changes` in one go; for an archive, that is one rewrite of the archive.
-    fn apply(&self, _changes: Vec<Change>) -> Result<()> {
+    /// Cancelling through `progress` leaves an archive as it was.
+    fn apply(&self, _changes: Vec<Change>, _progress: &crate::progress::Progress) -> Result<()> {
         Err(crate::Error::Unsupported(format!("{} is read-only", self.label())))
     }
 }

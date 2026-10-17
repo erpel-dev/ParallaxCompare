@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { SourceInfo } from "./api";
 
-  let { info, suffix = "" }: { info: SourceInfo; suffix?: string } = $props();
+  let { info, suffix = "", modified = false }: { info: SourceInfo; suffix?: string; modified?: boolean } = $props();
 
   const badge = $derived(
     { folder: ["DIR", "fs"], archive: ["ARC", "arc"], gitRev: ["GIT", "git"], gitWorktree: ["WT", "wt"] }[info.kind],
@@ -14,6 +14,7 @@
   {#if info.rev}
     <span class="ref mono">⎇ {info.rev}{info.commit && info.commit !== info.rev ? ` · ${info.commit}` : ""}</span>
   {/if}
+  {#if modified}<span class="mod" title="Unsaved changes">● modified</span>{/if}
   {#if !info.writable}<span class="ro">read-only</span>{/if}
 </div>
 
@@ -64,5 +65,10 @@
   .ro {
     color: var(--dim);
     font-size: 11px;
+  }
+  .mod {
+    color: var(--accent);
+    font-size: 11px;
+    white-space: nowrap;
   }
 </style>

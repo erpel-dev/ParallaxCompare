@@ -6,8 +6,18 @@ use std::path::Path;
 use std::process::Command;
 
 use parallax_core::compare::{self, CompareMode, CompareOptions, Control, Status};
-use parallax_core::source::{SourceOptions, SourceSpec, open_pair};
+use parallax_core::ops::{self, Removal};
+use parallax_core::progress::Progress;
+use parallax_core::source::{Source, SourceOptions, SourceSpec, open_pair};
 use parallax_core::vfs::EntryKind;
+
+fn copy(from: &Source, to: &Source, path: &str) -> parallax_core::Result<u64> {
+    ops::copy(from, to, &[path.to_string()], &Progress::default())
+}
+
+fn delete(source: &Source, path: &str) -> parallax_core::Result<()> {
+    ops::delete(source, &[path.to_string()], Removal::Permanent, &Progress::default()).map(|_| ())
+}
 
 fn write(root: &Path, files: &[(&str, &str)]) {
     for (path, content) in files {
@@ -251,12 +261,12 @@ fn copy_between_sides() {
         false,
     )
     .unwrap();
-    assert_eq!(parallax_core::ops::copy(&l, &r, "dir").unwrap(), 1);
-    parallax_core::ops::copy(&l, &r, "y.txt").unwrap();
+    assert_eq!(copy(&l, &r, "dir").unwrap(), 1);
+    copy(&l, &r, "y.txt").unwrap();
     let list =
         compare::flatten(&compare::compare(&l, &r, &CompareOptions::default(), &Control::default()).unwrap().root);
     assert!(list.iter().all(|(_, s)| *s == Status::Same), "{list:?}");
-    parallax_core::ops::delete(&r, "dir").unwrap();
+    delete(&r, "dir").unwrap();
     assert!(!b.path().join("dir").exists());
 }
 
@@ -284,7 +294,7 @@ fn copy_out_of_solid_and_non_solid_7z() {
         )
         .unwrap();
         for child in l.vfs.list(&l.path("")).unwrap() {
-            parallax_core::ops::copy(&l, &r, &child.name).unwrap();
+            copy(&l, &r, &child.name).unwrap();
         }
         assert_eq!(fs::read_to_string(target.path().join("b/three.txt")).unwrap(), "333");
         assert_eq!(fs::read(target.path().join("empty.txt")).unwrap(), b"");
@@ -320,15 +330,15 @@ fn copy_into_folder_with_gitignore_updates_the_tree() {
     };
     assert_eq!(refresh("new"), Status::LeftOnly);
     // A file in a folder that does not exist yet on the right.
-    parallax_core::ops::copy(&l, &r, "new/deep/a.txt").unwrap();
+    copy(&l, &r, "new/deep/a.txt").unwrap();
     assert_eq!(refresh("new"), Status::Same);
-    parallax_core::ops::copy(&l, &r, "keep.txt").unwrap();
+    copy(&l, &r, "keep.txt").unwrap();
     assert_eq!(refresh("keep.txt"), Status::Same);
     // Ignore rules still hide what they match.
-    parallax_core::ops::copy(&l, &r, "x.log").unwrap();
+    copy(&l, &r, "x.log").unwrap();
     assert!(repo.join("x.log").exists());
     assert_eq!(refresh("x.log"), Status::LeftOnly);
-    parallax_core::ops::delete(&r, "new").unwrap();
+    delete(&r, "new").unwrap();
     assert_eq!(refresh("new"), Status::LeftOnly);
 }
 
@@ -377,7 +387,7 @@ fn symlinks_compare_by_target() {
         false,
     )
     .unwrap();
-    parallax_core::ops::copy(&l, &r, "file-link").unwrap();
+    self::copy(&l, &r, "file-link").unwrap();
     assert_eq!(fs::read_link(copy.path().join("file-link")).unwrap(), Path::new("other.txt"));
 }
 
@@ -513,14 +523,14 @@ fn copy_into_and_delete_from_archives() {
         let opts = CompareOptions::default();
         let refresh = |path: &str| compare::compare_path(&l, &r, path, &opts, &Control::default()).unwrap().root.status;
         assert!(l.info.writable, "{kind}");
-        assert_eq!(parallax_core::ops::copy(&r, &l, "a/two.txt").unwrap(), 1, "{kind}");
+        assert_eq!(copy(&r, &l, "a/two.txt").unwrap(), 1, "{kind}");
         assert_eq!(refresh("a/two.txt"), Status::Same, "{kind}");
         // An empty file first, then folders: see the 7z header check below.
-        parallax_core::ops::copy(&r, &l, "empty.txt").unwrap();
-        assert_eq!(parallax_core::ops::copy(&r, &l, "new").unwrap(), 1, "{kind}");
+        copy(&r, &l, "empty.txt").unwrap();
+        assert_eq!(copy(&r, &l, "new").unwrap(), 1, "{kind}");
         assert_eq!(refresh("new"), Status::Same, "{kind}");
-        parallax_core::ops::delete(&l, "gone").unwrap();
-        parallax_core::ops::delete(&l, "keep.txt").unwrap();
+        delete(&l, "gone").unwrap();
+        delete(&l, "keep.txt").unwrap();
 
         // A fresh look at the file on disk.
         let list = statuses(&archive.display().to_string(), &folder.display().to_string(), &opts);
@@ -576,7 +586,7 @@ fn write_into_nested_archives() {
 
     let spec = |p: &Path| SourceSpec::parse(&p.display().to_string());
     let (l, r) = open_pair(&spec(&left), &spec(&right), SourceOptions::default(), false).unwrap();
-    parallax_core::ops::copy(&l, &r, "bundle.zip/lib.tar.gz/x.txt").unwrap();
+    copy(&l, &r, "bundle.zip/lib.tar.gz/x.txt").unwrap();
     let list = statuses(&left.display().to_string(), &right.display().to_string(), &CompareOptions::default());
     assert_eq!(status_of(&list, "bundle.zip/lib.tar.gz/x.txt"), Status::Same);
     assert_eq!(status_of(&list, "bundle.zip/readme.md"), Status::RightOnly);
@@ -595,7 +605,7 @@ fn git_revisions_stay_read_only() {
     )
     .unwrap();
     assert!(!l.info.writable);
-    assert!(matches!(parallax_core::ops::copy(&r, &l, "new.txt"), Err(parallax_core::Error::Unsupported(_))));
+    assert!(matches!(copy(&r, &l, "new.txt"), Err(parallax_core::Error::Unsupported(_))));
 }
 
 #[test]
@@ -622,7 +632,7 @@ fn zip_rewrite_keeps_entries_as_stored() {
         false,
     )
     .unwrap();
-    parallax_core::ops::copy(&r, &l, "new.txt").unwrap();
+    copy(&r, &l, "new.txt").unwrap();
 
     let mut zip = zip::ZipArchive::new(fs::File::open(&path).unwrap()).unwrap();
     assert_eq!(zip.comment(), b"release 1");
@@ -631,4 +641,92 @@ fn zip_rewrite_keeps_entries_as_stored() {
     assert!(extra.windows(2).any(|w| w == [0x75, 0x78]), "{extra:?}");
     drop(old);
     assert_eq!(std::io::read_to_string(zip.by_name("new.txt").unwrap()).unwrap(), "new");
+}
+
+#[test]
+fn cancelled_copy_into_an_archive_leaves_it_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let zip = dir.path().join("pack.zip");
+    fs::write(&zip, zip_bytes(&[("a.txt", "a")])).unwrap();
+    let before = fs::read(&zip).unwrap();
+    let folder = dir.path().join("folder");
+    write(&folder, &[("b.txt", "b"), ("c/d.txt", "d")]);
+    let (l, r) = open_pair(
+        &SourceSpec::parse(&zip.display().to_string()),
+        &SourceSpec::parse(&folder.display().to_string()),
+        SourceOptions::default(),
+        false,
+    )
+    .unwrap();
+    let progress = Progress::default();
+    progress.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    let paths = ["b.txt".to_string(), "c".to_string()];
+    assert!(matches!(ops::copy(&r, &l, &paths, &progress), Err(parallax_core::Error::Cancelled)));
+    assert_eq!(fs::read(&zip).unwrap(), before);
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2, "no temporary file left");
+
+    // Not cancelled: both paths go in, with one rewrite counted by the progress.
+    let progress = Progress::default();
+    assert_eq!(ops::copy(&r, &l, &paths, &progress).unwrap(), 2);
+    let list = statuses(&zip.display().to_string(), &folder.display().to_string(), &CompareOptions::default());
+    assert_eq!(status_of(&list, "c/d.txt"), Status::Same);
+    let done = progress.done.load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(done, progress.total.load(std::sync::atomic::Ordering::Relaxed));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn delete_moves_to_the_trash() {
+    let dir = tempfile::tempdir().unwrap();
+    // A trash of its own, on the same file system as the files.
+    // SAFETY: no other test reads XDG_DATA_HOME.
+    unsafe { std::env::set_var("XDG_DATA_HOME", dir.path().join("data")) };
+    let a = dir.path().join("a");
+    let b = dir.path().join("b");
+    write(&a, &[("x.txt", "x")]);
+    write(&b, &[("x.txt", "x"), ("folder/y.txt", "y")]);
+    let (_, r) = open_pair(
+        &SourceSpec::parse(&a.display().to_string()),
+        &SourceSpec::parse(&b.display().to_string()),
+        SourceOptions::default(),
+        false,
+    )
+    .unwrap();
+    let paths = ["x.txt".to_string(), "folder".to_string()];
+    let not_trashed = ops::delete(&r, &paths, Removal::Trash, &Progress::default()).unwrap();
+    assert!(not_trashed.is_empty());
+    assert!(!b.join("x.txt").exists() && !b.join("folder").exists());
+    let trashed: Vec<_> =
+        fs::read_dir(dir.path().join("data/Trash/files")).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(trashed.len(), 2, "{trashed:?}");
+}
+
+#[test]
+fn refresh_sees_changes_made_outside() {
+    let dir = tempfile::tempdir().unwrap();
+    let zip = dir.path().join("pack.zip");
+    fs::write(&zip, zip_bytes(&[("a.txt", "a")])).unwrap();
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q"]);
+    write(&repo, &[("a.txt", "a")]);
+    let (l, r) = open_pair(
+        &SourceSpec::parse(&zip.display().to_string()),
+        &SourceSpec::parse(&repo.display().to_string()),
+        SourceOptions::default(),
+        false,
+    )
+    .unwrap();
+    let compare_all =
+        || compare::flatten(&compare::compare(&l, &r, &CompareOptions::default(), &Control::default()).unwrap().root);
+    assert_eq!(status_of(&compare_all(), "a.txt"), Status::Same);
+
+    // Another program replaces the archive and adds a file to the folder.
+    fs::write(&zip, zip_bytes(&[("a.txt", "changed")])).unwrap();
+    write(&repo, &[("new.txt", "n")]);
+    l.vfs.changed(&l.path(""));
+    r.vfs.changed(&r.path(""));
+    let list = compare_all();
+    assert_eq!(status_of(&list, "a.txt"), Status::Different);
+    assert_eq!(status_of(&list, "new.txt"), Status::RightOnly);
 }

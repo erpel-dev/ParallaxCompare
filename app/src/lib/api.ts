@@ -87,6 +87,8 @@ export interface LineView {
   m: [number, number][];
   /** Characters cut from the end of a very long line. */
   x?: number;
+  /** The file's last line, without the line break the other file has. */
+  nn?: boolean;
 }
 
 export interface RowView {
@@ -103,6 +105,7 @@ export interface FileSide {
   lineEnding: "LF" | "CRLF" | "CR" | "Mixed" | "None";
   bom: boolean;
   lines: number;
+  editable: boolean;
 }
 
 export type View = "text" | "document" | "executable" | "firmware" | "prettyXml" | "prettyJson" | "hex" | "image";
@@ -136,6 +139,45 @@ export interface FileDiffInfo {
   views: { id: View; label: string }[];
   image: ImageView | null;
   note: string | null;
+}
+
+export type SideName = "left" | "right";
+
+/** A position as JavaScript counts: line and UTF-16 column. */
+export interface Pos {
+  line: number;
+  col: number;
+}
+
+/** A column past the end of the line: the end of the line. */
+export const END = 0xffffffff;
+
+export interface EditInfo {
+  rows: number;
+  sections: { start: number; end: number }[];
+  stats: { changed: number; added: number; removed: number; minor: number };
+  lines: [number, number];
+  dirty: [boolean, boolean];
+  exists: [boolean, boolean];
+  canUndo: boolean;
+  canRedo: boolean;
+  identical: boolean;
+  focusRow: number | null;
+  caret: { row: number; line: number; col: number } | null;
+}
+
+export interface OpResult {
+  nodes: (Node | null)[];
+  error: string | null;
+  notTrashed: string[];
+}
+
+export interface PathsChanged {
+  session: number;
+  paths: string[];
+  full: boolean;
+  /** The file comparison that saved, when the change came from a save. */
+  origin?: number;
 }
 
 export interface RefInfo {
@@ -187,18 +229,34 @@ export const api = {
   openSession: (left: SourceSpec, right: SourceSpec, options: SourceOptions, mergeBase: boolean) =>
     invoke<SessionInfo>("open_session", { left, right, options, mergeBase }),
   closeSession: (id: number) => invoke<void>("close_session", { id }),
-  runCompare: (id: number, options: CompareOptions) => invoke<CompareResult>("run_compare", { id, options }),
+  /** `invalidate`: a refresh, which reads cached archives and folder snapshots again. */
+  runCompare: (id: number, options: CompareOptions, invalidate = false) =>
+    invoke<CompareResult>("run_compare", { id, options, invalidate }),
   cancelCompare: (id: number) => invoke<void>("cancel_compare", { id }),
   expand: (id: number, path: string, options: CompareOptions) => invoke<Node>("expand", { id, path, options }),
-  copyEntry: (id: number, path: string, toRight: boolean, options: CompareOptions) =>
-    invoke<Node>("copy_entry", { id, path, toRight, options }),
-  deleteEntry: (id: number, path: string, left: boolean, options: CompareOptions) =>
-    invoke<Node | null>("delete_entry", { id, path, left, options }),
+  copyEntries: (id: number, paths: string[], toRight: boolean, options: CompareOptions) =>
+    invoke<OpResult>("copy_entries", { id, paths, toRight, options }),
+  deleteEntries: (id: number, paths: string[], left: boolean, permanent: boolean, options: CompareOptions) =>
+    invoke<OpResult>("delete_entries", { id, paths, left, permanent, options }),
+  cancelOp: (id: number) => invoke<void>("cancel_op", { id }),
+  refreshPaths: (id: number, paths: string[], options: CompareOptions) =>
+    invoke<(Node | null)[]>("refresh_paths", { id, paths, options }),
   openFileDiff: (id: number, path: string, options: DiffOptions, syntax: string | null, view: View | null) =>
     invoke<FileDiffInfo>("open_file_diff", { id, path, options, syntax, view }),
   fileRows: (id: number, start: number, count: number, theme: "dark" | "light") =>
     invoke<RowView[]>("file_rows", { id, start, count, theme }),
   closeFileDiff: (id: number) => invoke<void>("close_file_diff", { id }),
+  editText: (id: number, side: SideName, from: Pos, to: Pos, text: string, caret: number | null) =>
+    invoke<EditInfo>("edit_text", { id, side, from, to, text, caret }),
+  insertLine: (id: number, side: SideName, row: number, text: string) =>
+    invoke<EditInfo>("insert_line", { id, side, row, text }),
+  copyRows: (id: number, start: number, end: number, to: SideName) =>
+    invoke<EditInfo>("copy_rows", { id, start, end, to }),
+  undo: (id: number) => invoke<EditInfo>("undo", { id }),
+  redo: (id: number) => invoke<EditInfo>("redo", { id }),
+  updateDiff: (id: number, options: DiffOptions, syntax: string | null) =>
+    invoke<EditInfo>("update_diff", { id, options, syntax }),
+  saveSide: (id: number, side: SideName) => invoke<EditInfo>("save_side", { id, side }),
   syntaxNames: () => invoke<string[]>("syntax_names"),
 };
 

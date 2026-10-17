@@ -2,10 +2,21 @@
   import { onMount, tick } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { ask } from "@tauri-apps/plugin-dialog";
-  import { api, defaultCompareOptions, type CompareResult, type SessionInfo, type Side } from "./api";
+  import { api, defaultCompareOptions, type CompareResult, type Node, type OpResult, type PathsChanged, type SessionInfo, type Side } from "./api";
   import PathBar from "./PathBar.svelte";
   import { formatSize, formatTime } from "./format";
-  import { allFolders, countFiles, countNodes, differingFolders, findNode, flatten, replaceNode, type Filter } from "./tree";
+  import {
+    allFolders,
+    countFiles,
+    countNodes,
+    differingFolders,
+    filesBelow,
+    findNode,
+    flatten,
+    refreshTarget,
+    replaceNode,
+    type Filter,
+  } from "./tree";
 
   let {
     session,
@@ -22,11 +33,20 @@
   let version = $state(0);
   let expanded = new Set<string>();
   let filter = $state<Filter>("all");
+  /** The focused row; `selection` holds all selected rows (Ctrl/Shift+click). */
   let selected = $state<string | null>(null);
+  let selection = $state(new Set<string>());
+  let anchor: string | null = null;
   let running = $state(false);
   let progress = $state(0);
   let error = $state("");
   let busy = $state("");
+  /** A running copy or delete: what it is, and its progress. */
+  let op = $state<{ label: string; done: number; total: number } | null>(null);
+  /** Paths changed on disk while a compare or an operation was running. */
+  let deferred = new Set<string>();
+  let deferredFull = false;
+  const trashName = navigator.userAgent.includes("Windows") ? "Recycle Bin" : "Trash";
 
   let viewport = $state<HTMLDivElement>();
   let scrollTop = $state(0);
@@ -45,12 +65,12 @@
   const selectedIndex = $derived(selected === null ? -1 : rows.findIndex((r) => r.path === selected));
   const selectedRow = $derived(selectedIndex >= 0 ? rows[selectedIndex] : null);
 
-  async function run() {
+  async function run(invalidate = false) {
     running = true;
     error = "";
     progress = 0;
     try {
-      const r = await api.runCompare(session.id, $state.snapshot(options));
+      const r = await api.runCompare(session.id, $state.snapshot(options), invalidate);
       // Open folders with differences, but keep huge trees collapsed.
       expanded = new Set(differingFolders(r.root, countNodes(r.root) > 20000 ? 0 : 400));
       result = r;
@@ -60,16 +80,28 @@
     } finally {
       running = false;
     }
+    // Changes that came in during the compare are in the new result already.
+    deferred.clear();
+    deferredFull = false;
   }
 
   onMount(() => {
     run();
-    const unlisten = listen<{ session: number; files: number }>("compare-progress", (e) => {
-      if (e.payload.session === session.id) progress = e.payload.files;
-    });
-    return () => {
-      unlisten.then((f) => f());
-    };
+    const unlisten = [
+      listen<{ session: number; files: number }>("compare-progress", (e) => {
+        if (e.payload.session === session.id) progress = e.payload.files;
+      }),
+      listen<{ session: number; done: number; total: number }>("op-progress", (e) => {
+        if (e.payload.session === session.id && op) op = { ...op, done: e.payload.done, total: e.payload.total };
+      }),
+      listen<PathsChanged>("paths-changed", (e) => {
+        if (e.payload.session !== session.id) return;
+        if (e.payload.full) deferredFull = true;
+        for (const p of e.payload.paths) deferred.add(p);
+        flushChanges();
+      }),
+    ];
+    return () => unlisten.forEach((u) => u.then((f) => f()));
   });
 
   function applyExcludes() {
@@ -113,9 +145,36 @@
   }
 
   function activate(path: string, container: boolean) {
-    selected = path;
+    selectOnly(path);
     if (container) toggle(path);
     else onOpenFile(path);
+  }
+
+  function selectOnly(path: string) {
+    selected = anchor = path;
+    selection = new Set([path]);
+  }
+
+  function click(e: MouseEvent, path: string) {
+    if (e.shiftKey && anchor) {
+      selectRange(anchor, path);
+    } else if (e.ctrlKey || e.metaKey) {
+      const next = new Set(selection);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      selection = next;
+      selected = anchor = path;
+    } else {
+      selectOnly(path);
+    }
+  }
+
+  function selectRange(from: string, to: string) {
+    const a = rows.findIndex((r) => r.path === from);
+    const b = rows.findIndex((r) => r.path === to);
+    if (a < 0 || b < 0) return selectOnly(to);
+    selection = new Set(rows.slice(Math.min(a, b), Math.max(a, b) + 1).map((r) => r.path));
+    selected = to;
   }
 
   async function ensureVisible(index: number) {
@@ -161,11 +220,21 @@
         }
         break;
       case "F5":
-        if (!running) run();
+        if (!running) run(true);
         e.preventDefault();
         return;
       case "Enter":
         if (row) activate(row.path, row.container);
+        e.preventDefault();
+        return;
+      case "Delete":
+        if (canDelete[1] && !canDelete[0]) remove(false);
+        else if (canDelete[0] && !canDelete[1]) remove(true);
+        e.preventDefault();
+        return;
+      case "a":
+        if (!(e.ctrlKey || e.metaKey)) return;
+        selection = new Set(rows.map((r) => r.path));
         e.preventDefault();
         return;
       default:
@@ -173,50 +242,162 @@
     }
     e.preventDefault();
     if (index >= 0) {
-      selected = rows[index].path;
+      if (e.shiftKey && anchor) selectRange(anchor, rows[index].path);
+      else selectOnly(rows[index].path);
       ensureVisible(index);
     }
   }
 
-  async function copy(toRight: boolean) {
-    const row = selectedRow;
-    if (!row || !result) return;
-    busy = `Copying ${row.path}…`;
+  /** The selected paths, in display order, without those inside another selected folder. */
+  const targets = $derived.by(() => {
+    void version;
+    const paths = rows.filter((r) => selection.has(r.path)).map((r) => r.path);
+    return paths.filter((p) => !paths.some((q) => p.startsWith(q + "/")));
+  });
+
+  /** Paths of `targets` present on one side. */
+  function present(left: boolean): string[] {
+    if (!result) return [];
+    return targets.filter((p) => {
+      const node = findNode(result!.root, p);
+      return !!(left ? node?.left : node?.right);
+    });
+  }
+
+  function applyResult(paths: string[], r: OpResult) {
+    if (!result) return;
+    paths.forEach((p, i) => replaceNode(result!.root, p, r.nodes[i]));
+    version++;
+    if (r.error && r.error !== "cancelled") error = r.error;
+  }
+
+  /** Runs a copy or delete, showing its progress, then the refreshed rows. */
+  async function runOp(label: string, paths: string[], call: () => Promise<OpResult>): Promise<OpResult | null> {
+    op = { label, done: 0, total: 0 };
+    error = "";
     try {
-      const node = await api.copyEntry(session.id, row.path, toRight, $state.snapshot(options));
-      replaceNode(result.root, row.path, node);
-      version++;
+      const r = await call();
+      applyResult(paths, r);
+      return r;
     } catch (e) {
       error = String(e);
+      return null;
     } finally {
-      busy = "";
+      op = null;
+      flushChanges();
     }
+  }
+
+  function list(paths: string[], limit = 12): string {
+    const shown = paths.slice(0, limit).map((p) => `  ${p}`);
+    if (paths.length > limit) shown.push(`  … and ${paths.length - limit} more`);
+    return shown.join("\n");
+  }
+
+  async function copy(toRight: boolean) {
+    if (!result) return;
+    const paths = present(!toRight);
+    if (!paths.length) return;
+    // Files on the target side that the copy replaces, and those newer than their source.
+    const replaced: string[] = [];
+    const newer: string[] = [];
+    for (const p of paths) {
+      for (const f of filesBelow(findNode(result.root, p)!, p)) {
+        const [src, dst] = toRight ? [f.node.left, f.node.right] : [f.node.right, f.node.left];
+        if (!src || !dst || f.node.status === "same") continue;
+        replaced.push(f.path);
+        if (src.mtime !== null && dst.mtime !== null && dst.mtime > src.mtime) newer.push(f.path);
+      }
+    }
+    const side = toRight ? "right" : "left";
+    if (replaced.length) {
+      const message =
+        `Copying replaces ${replaced.length} file${replaced.length > 1 ? "s" : ""} on the ${side} side:\n${list(replaced)}` +
+        (newer.length ? `\n\n${newer.length} of them ${newer.length > 1 ? "are" : "is"} newer than the copy:\n${list(newer, 6)}` : "");
+      const ok = await ask(message, { title: "Replace files", kind: "warning", okLabel: "Replace", cancelLabel: "Cancel" });
+      if (!ok) return;
+    }
+    const what = paths.length === 1 ? paths[0] : `${paths.length} items`;
+    await runOp(`Copying ${what}`, paths, () => api.copyEntries(session.id, paths, toRight, $state.snapshot(options)));
+  }
+
+  /** Whether `path` lies inside an archive on that side, where deleting is for good. */
+  function insideArchive(path: string, left: boolean): boolean {
+    const info = left ? session.left : session.right;
+    if (info.kind === "archive") return true;
+    const parts = path.split("/");
+    let node = result?.root;
+    for (const part of parts.slice(0, -1)) {
+      node = node?.children?.find((c) => c.name === part);
+      if ((left ? node?.left : node?.right)?.kind === "archive") return true;
+    }
+    return false;
   }
 
   async function remove(left: boolean) {
-    const row = selectedRow;
-    if (!row || !result) return;
-    const side = left ? session.left.display : session.right.display;
-    const ok = await ask(`Delete "${row.path}" from ${side}?\n\nThis cannot be undone.`, {
-      title: "Delete",
-      kind: "warning",
-    });
+    const paths = present(left);
+    if (!paths.length) return;
+    const side = left ? "left" : "right";
+    const what = paths.length === 1 ? `"${paths[0]}"` : `${paths.length} items`;
+    const inArchive = paths.filter((p) => insideArchive(p, left));
+    const message = inArchive.length
+      ? `Delete ${what} from the ${side} side?\n\n${inArchive.length === paths.length ? "They are" : `${inArchive.length} of them are`} inside an archive and are deleted for good; this cannot be undone.${inArchive.length < paths.length ? ` The others go to the ${trashName}.` : ""}`
+      : `Move ${what} from the ${side} side to the ${trashName}?`;
+    const ok = await ask(message, { title: "Delete", kind: "warning", okLabel: inArchive.length ? "Delete" : `Move to ${trashName}`, cancelLabel: "Cancel" });
     if (!ok) return;
-    // Deleting from an archive rewrites it, which takes a while for large ones.
-    busy = `Deleting ${row.path}…`;
-    try {
-      const node = await api.deleteEntry(session.id, row.path, left, $state.snapshot(options));
-      replaceNode(result.root, row.path, node);
-      version++;
-    } catch (e) {
-      error = String(e);
-    } finally {
-      busy = "";
+    const r = await runOp(`Deleting ${what}`, paths, () =>
+      api.deleteEntries(session.id, paths, left, false, $state.snapshot(options)),
+    );
+    if (!r?.notTrashed.length) return;
+    const again = await ask(
+      `These could not be moved to the ${trashName} (on a network drive, for example):\n${list(r.notTrashed)}\n\nDelete them permanently? This cannot be undone.`,
+      { title: "Delete permanently", kind: "warning", okLabel: "Delete permanently", cancelLabel: "Keep them" },
+    );
+    if (again) {
+      const rest = r.notTrashed;
+      await runOp(`Deleting ${rest.length} items`, rest, () =>
+        api.deleteEntries(session.id, rest, left, true, $state.snapshot(options)),
+      );
     }
   }
 
-  const canCopyRight = $derived(!!selectedRow?.node.left && session.right.writable);
-  const canCopyLeft = $derived(!!selectedRow?.node.right && session.left.writable);
+  /** Brings the rows of changed paths up to date, or compares again when too much changed. */
+  async function flushChanges() {
+    if (!result || running || op || (!deferred.size && !deferredFull)) return;
+    if (deferredFull) {
+      deferredFull = false;
+      deferred.clear();
+      run(true);
+      return;
+    }
+    const root = result.root;
+    const targets = [...new Set([...deferred].map((p) => refreshTarget(root, p)))];
+    deferred.clear();
+    if (targets.includes("")) {
+      run(true);
+      return;
+    }
+    // Only the outermost of nested targets.
+    const outer = targets.filter((p) => !targets.some((q) => p.startsWith(q + "/")));
+    try {
+      const nodes = await api.refreshPaths(session.id, outer, $state.snapshot(options));
+      if (result?.root !== root) return;
+      outer.forEach((p, i) => replaceNode(root, p, nodes[i]));
+      version++;
+    } catch (e) {
+      error = String(e);
+    }
+    flushChanges();
+  }
+
+  const canCopy = $derived.by(() => {
+    void version;
+    return [session.left.writable && present(false).length > 0, session.right.writable && present(true).length > 0];
+  });
+  const canDelete = $derived.by(() => {
+    void version;
+    return [session.left.writable && present(true).length > 0, session.right.writable && present(false).length > 0];
+  });
 
   const glyph = { same: "=", similar: "≈", different: "≠", leftOnly: "◀", rightOnly: "▶", error: "!" } as const;
 
@@ -238,7 +419,7 @@
 
 <div class="view">
   <div class="toolbar">
-    <button onclick={run} disabled={running} title="Compare again (F5)">⟳ Refresh</button>
+    <button onclick={() => run(true)} disabled={running} title="Compare again (F5)">⟳ Refresh</button>
     <button onclick={onSwap} title="Swap left and right">⇄ Swap</button>
     <span class="sep"></span>
     {#each [["all", "All"], ["diffs", "Diffs"], ["same", "Same"], ["orphans", "Orphans"]] as const as [id, label] (id)}
@@ -248,18 +429,18 @@
     <button onclick={() => setAll(true)} title="Expand all folders">Expand</button>
     <button onclick={() => setAll(false)} title="Collapse all folders">Collapse</button>
     <span class="sep"></span>
-    <button disabled={!canCopyRight} onclick={() => copy(true)} title="Copy the selection to the right side">Copy →</button>
-    <button disabled={!canCopyLeft} onclick={() => copy(false)} title="Copy the selection to the left side">← Copy</button>
-    <button disabled={!selectedRow?.node.left || !session.left.writable} onclick={() => remove(true)} title="Delete the selection on the left side">Delete ◀</button>
-    <button disabled={!selectedRow?.node.right || !session.right.writable} onclick={() => remove(false)} title="Delete the selection on the right side">Delete ▶</button>
+    <button disabled={!canCopy[1] || !!op} onclick={() => copy(true)} title="Copy the selection to the right side">Copy →</button>
+    <button disabled={!canCopy[0] || !!op} onclick={() => copy(false)} title="Copy the selection to the left side">← Copy</button>
+    <button disabled={!canDelete[0] || !!op} onclick={() => remove(true)} title="Delete the selection on the left side">Delete ◀</button>
+    <button disabled={!canDelete[1] || !!op} onclick={() => remove(false)} title="Delete the selection on the right side">Delete ▶</button>
     <span class="sep"></span>
-    <select bind:value={options.mode} onchange={run} title="Compare rule">
+    <select bind:value={options.mode} onchange={() => run()} title="Compare rule">
       <option value="content">Content</option>
       <option value="quick">Size &amp; date</option>
     </select>
-    <label class="check"><input type="checkbox" bind:checked={options.ignoreLineEndings} onchange={run} /> Ignore CRLF/LF</label>
+    <label class="check"><input type="checkbox" bind:checked={options.ignoreLineEndings} onchange={() => run()} /> Ignore CRLF/LF</label>
     <label class="check" title="Documents (PDF, Word, Excel, PowerPoint, OpenDocument) with the same text and images with the same pixels are marked ≈ instead of ≠">
-      <input type="checkbox" bind:checked={options.compareContents} onchange={run} /> By content
+      <input type="checkbox" bind:checked={options.compareContents} onchange={() => run()} /> By content
     </label>
     <input
       type="text"
@@ -302,12 +483,13 @@
           <!-- svelte-ignore a11y_click_events_have_key_events -->
           <div
             class="row {row.node.status}"
-            class:sel={row.path === selected}
+            class:sel={selection.has(row.path)}
+            class:focus={row.path === selected}
             role="treeitem"
-            aria-selected={row.path === selected}
+            aria-selected={selection.has(row.path)}
             aria-expanded={row.container ? row.expanded : undefined}
             tabindex="-1"
-            onclick={() => (selected = row.path)}
+            onclick={(e) => click(e, row.path)}
             ondblclick={() => activate(row.path, row.container)}
             title={row.node.message ?? ""}
           >
@@ -355,6 +537,11 @@
       <span>compared in <b>{s.elapsedMs < 1000 ? `${s.elapsedMs} ms` : `${(s.elapsedMs / 1000).toFixed(2)} s`}</b>{s.identicalSubtrees ? ` · ${s.identicalSubtrees.toLocaleString()} identical folders skipped via Git tree ids` : ""}</span>
     {/if}
     {#if busy}<span>{busy}</span>{/if}
+    {#if op}
+      <span>{op.label}…{op.total ? ` ${op.done.toLocaleString()} / ${op.total.toLocaleString()}` : ""}</span>
+      <button class="small" onclick={() => api.cancelOp(session.id)}>Cancel</button>
+    {/if}
+    {#if targets.length > 1}<span>{targets.length} selected</span>{/if}
     {#if error}<span class="c-err" title={error}>{error}</span>{/if}
   </div>
 </div>
@@ -442,7 +629,7 @@
   .row.sel {
     background: var(--sel);
   }
-  .viewport:focus .row.sel {
+  .viewport:focus .row.focus {
     outline: 1px solid var(--accent);
     outline-offset: -1px;
   }

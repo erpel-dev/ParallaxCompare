@@ -7,12 +7,15 @@
 
 pub mod compare;
 pub mod convert;
+pub mod edit;
 pub mod error;
 pub mod highlight;
 pub mod ops;
+pub mod progress;
 pub mod source;
 pub mod text;
 pub mod textdiff;
 pub mod vfs;
+pub mod watch;
 
 pub use error::{Error, Result};

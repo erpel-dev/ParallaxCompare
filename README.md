@@ -19,10 +19,11 @@ The design rationale, the GUI mockups and a comparison with existing tools are i
 | | |
 |---|---|
 | **Sources** | Local folders and files · zip and zip-based formats (jar, war, nupkg, vsix, whl, apk …) · 7z · tar, tar.gz, tar.xz, tar.zst, tar.bz2 · Git branches, tags, commits and `HEAD~n` · Git working tree (honours `.gitignore`) |
-| **Folder compare** | Aligned two-pane tree with missing-side placeholders · filters: all, differences, same, orphans · compare by content (default) or by size and date · **≈ similar** status for files whose bytes differ but whose content is equal (CRLF vs LF, re-saved documents with the same text, re-encoded images with the same pixels) · exclude globs · copy left↔right and delete on writable sides |
+| **Folder compare** | Aligned two-pane tree with missing-side placeholders · filters: all, differences, same, orphans · compare by content (default) or by size and date · **≈ similar** status for files whose bytes differ but whose content is equal (CRLF vs LF, re-saved documents with the same text, re-encoded images with the same pixels) · exclude globs · select several rows (Ctrl/Shift+click) to copy left↔right or delete at once, with progress and Cancel · copying asks first when it replaces files, and names those newer than the copy · deleting moves files to the Recycle Bin / Trash (inside archives it is for good, and the dialog says so) · rows update by themselves when files change on disk |
 | **Git** | Compare any two revisions without a checkout · *merge-base* mode shows only what a branch changed since it branched off · identical folders are recognised by their tree id and skipped without being walked |
 | **Content views** | Each file type is shown in the form that makes its changes readable, with raw text or a hex dump always one click away. See the table below. |
 | **Text compare** | Line diff (Myers, or histogram as an option) with aligned rows and placeholders · changed words marked within each line · whitespace and case rules · overview strip · previous/next difference (F7/F8) · line-detail pane · encoding (UTF-8/16, legacy code pages) and line-ending detection · binary detection |
+| **Editing** | Copy a difference to the other side with the arrows next to it or Alt+←/→ · double-click a line to edit it (Enter splits, Backspace/Delete join, multi-line paste) · undo/redo (Ctrl+Z/Ctrl+Y) · save with Ctrl+S, also into archives · the file's encoding, BOM and line endings are kept; files that would not save back byte for byte are not editable · unsaved changes are kept through whitespace and syntax changes, and closing asks first |
 | **Syntax highlighting** | ~190 languages via the syntect grammars bundled with `bat`, plus A2L, DBC, Intel HEX and S-record; ARXML, ODX, CDD and other XML dialects are recognised as XML. Detected by file name, extension or shebang line, with a manual override |
 | **CLI** | `parallax` for scripts and CI: tree or unified-diff output, JSON, `diff`-style exit codes |
 
@@ -54,6 +55,12 @@ Copy and delete work inside zip, 7z and tar archives, including archives nested 
 - **tar, .tar.gz, .tar.xz, .tar.bz2, .tar.zst:** the whole archive is compressed again.
 
 New entries are compressed with deflate (zip) or LZMA2 at 7-Zip's default level (7z, .tar.xz). File permissions are not carried over: new tar entries get mode 644 (folders 755).
+
+## Watching for changes
+
+Local folders, archives and files are watched while they are compared. A change outside the app updates only the rows it affects: a changed file is compared again on its own, a new file is inserted into its folder, and a burst of changes (a build, a checkout) is collected for a moment and merged into the few folders it touched, or one full compare when it reaches the top. A file open in a text tab is reloaded, or, with unsaved edits, a banner offers to reload it. Excluded folders and the app's own writes do not count.
+
+On Linux, where each folder needs its own watch, only the folders the compare shows are watched: folders hidden by `.gitignore` (`target/`, `node_modules/` …) and excluded folders are left out, and new folders are added as they appear. Watching the 3 500 folders of the test tree takes about 0.15 s, in the background; 5 000 files written in 0.15 s arrive as one update 0.35 s later.
 
 ## Performance
 
@@ -180,7 +187,7 @@ The key abstraction is `trait Vfs { list, stat, read }`. Each entry can carry a 
 
 This is the first version of the MVP described in the concept. Not done yet:
 
-- editing and saving in the text view, and 3-way merge (as a `git mergetool`)
+- 3-way merge (as a `git mergetool`)
 - byte-aligned hex compare (the hex dump view is line-based, so an inserted byte shifts the rest of the file)
 - table compare for CSV/XLSX with key columns, so moved rows are recognised
 - RAR archives, Git LFS pointer resolution, submodule contents

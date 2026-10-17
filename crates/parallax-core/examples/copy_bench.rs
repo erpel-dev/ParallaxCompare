@@ -36,11 +36,15 @@ fn main() -> anyhow::Result<()> {
         let s = compare::compare(&l, &r, &opts, &Control::default())?.summary;
         Ok(format!("({} files, {} left only)", s.files, s.left_only))
     })?;
-    time("copy file", &mut || Ok(format!("({} copied)", ops::copy(&l, &r, file)?)))?;
+    time("copy file", &mut || {
+        Ok(format!("({} copied)", ops::copy(&l, &r, std::slice::from_ref(file), &Default::default())?))
+    })?;
     time("  refresh file", &mut || {
         Ok(format!("({:?})", compare::compare_path(&l, &r, file, &opts, &Control::default())?.root.status))
     })?;
-    time("copy folder", &mut || Ok(format!("({} copied)", ops::copy(&l, &r, dir)?)))?;
+    time("copy folder", &mut || {
+        Ok(format!("({} copied)", ops::copy(&l, &r, std::slice::from_ref(dir), &Default::default())?))
+    })?;
     time("  refresh folder", &mut || {
         Ok(format!("({:?})", compare::compare_path(&l, &r, dir, &opts, &Control::default())?.root.status))
     })?;
@@ -48,11 +52,8 @@ fn main() -> anyhow::Result<()> {
     let all = tempfile::tempdir()?;
     let (l, r) = open_pair(&spec(archive), &spec(&all.path().display().to_string()), SourceOptions::default(), false)?;
     time("copy everything, fresh session", &mut || {
-        let mut copied = 0;
-        for child in l.vfs.list(&l.path(""))? {
-            copied += ops::copy(&l, &r, &child.name)?;
-        }
-        Ok(format!("({copied} copied)"))
+        let all: Vec<String> = l.vfs.list(&l.path(""))?.into_iter().map(|e| e.name).collect();
+        Ok(format!("({} copied)", ops::copy(&l, &r, &all, &Default::default())?))
     })?;
     time("  refresh everything", &mut || {
         let s = compare::compare(&l, &r, &opts, &Control::default())?.summary;

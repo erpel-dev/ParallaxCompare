@@ -176,6 +176,17 @@ pub fn diff_docs(left: &TextDoc, right: &TextDoc, opts: &DiffOptions) -> TextDif
         r += m;
     }
     push_equal(&mut rows, &mut stats, left.len() as u32, &mut l, &mut r);
+    // A final newline on one side only is a difference too, or it could not be copied.
+    if let Some(last) = rows.last_mut()
+        && matches!(last.kind, RowKind::Equal | RowKind::Minor)
+        && left.ends_with_newline() != right.ends_with_newline()
+    {
+        if last.kind == RowKind::Minor {
+            stats.minor -= 1;
+        }
+        last.kind = RowKind::Changed;
+        stats.changed += 1;
+    }
 
     let mut sections = Vec::new();
     let mut open: Option<u32> = None;
@@ -306,6 +317,13 @@ mod tests {
         assert_eq!(kinds(&diff), vec![Equal, Changed, Equal, Added, Added, Equal]);
         assert_eq!(diff.sections.len(), 2);
         assert_eq!((diff.stats.changed, diff.stats.added), (1, 2));
+    }
+
+    #[test]
+    fn missing_final_newline_is_a_change() {
+        let diff = diff_docs(&decode(b"a\nb"), &decode(b"a\nb\n"), &DiffOptions::default());
+        assert_eq!(kinds(&diff), vec![RowKind::Equal, RowKind::Changed]);
+        assert_eq!(diff.sections.len(), 1);
     }
 
     #[test]
