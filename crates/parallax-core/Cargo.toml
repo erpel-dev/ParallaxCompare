@@ -1,0 +1,39 @@
+[package]
+name = "parallax-core"
+description = "UI-agnostic compare engine of ParallaxCompare: virtual file system, folder compare, text diff, highlighting"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+gix = { version = "0.89", default-features = false, features = ["revision", "max-performance-safe", "sha1"] }
+zip = { version = "9", default-features = false, features = ["deflate", "deflate64", "bzip2", "lzma", "time"] }
+sevenz-rust2 = { version = "0.24", default-features = false, features = ["bzip2", "ppmd", "util"] }
+tar = "0.4"
+flate2 = "1"
+lzma-rust2 = "0.22"
+ruzstd = "0.9"
+bzip2 = "0.6"
+imara-diff = "0.2"
+similar = "3"
+syntect = { version = "5.3", default-features = false, features = ["default-fancy"] }
+two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
+rayon = "1"
+memmap2 = "0.9"
+encoding_rs = "0.8"
+chardetng = "1"
+ignore = "0.4"
+globset = "0.4"
+parking_lot = "0.12"
+thiserror = "2"
+serde.workspace = true
+
+[dev-dependencies]
+sevenz-rust2 = { version = "0.24", default-features = false, features = ["compress", "util"] }
+tempfile = "3"
+flate2 = "1"
+tar = "0.4"
+zip = { version = "9", default-features = false, features = ["deflate"] }
+anyhow.workspace = true
