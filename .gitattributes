@@ -1,0 +1,2 @@
+# Test fixtures are compared byte for byte; keep them as committed on every OS.
+crates/*/tests/fixtures/** -text
