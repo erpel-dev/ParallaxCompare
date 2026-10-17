@@ -260,6 +260,78 @@ fn copy_between_sides() {
     assert!(!b.path().join("dir").exists());
 }
 
+#[test]
+fn copy_out_of_solid_and_non_solid_7z() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    write(&src, &[("a/one.txt", "1"), ("a/two.txt", "22"), ("b/three.txt", "333"), ("empty.txt", "")]);
+    for solid in [true, false] {
+        let archive = dir.path().join(format!("pack-{solid}.7z"));
+        let mut writer = sevenz_rust2::ArchiveWriter::create(&archive).unwrap();
+        if solid {
+            writer.push_source_path(&src, |_| true).unwrap();
+        } else {
+            writer.push_source_path_non_solid(&src, |_| true).unwrap();
+        }
+        writer.finish().unwrap();
+
+        let target = tempfile::tempdir().unwrap();
+        let (l, r) = open_pair(
+            &SourceSpec::parse(&archive.display().to_string()),
+            &SourceSpec::parse(&target.path().display().to_string()),
+            SourceOptions::default(),
+            false,
+        )
+        .unwrap();
+        for child in l.vfs.list(&l.path("")).unwrap() {
+            parallax_core::ops::copy(&l, &r, &child.name).unwrap();
+        }
+        assert_eq!(fs::read_to_string(target.path().join("b/three.txt")).unwrap(), "333");
+        assert_eq!(fs::read(target.path().join("empty.txt")).unwrap(), b"");
+        let list =
+            compare::flatten(&compare::compare(&l, &r, &CompareOptions::default(), &Control::default()).unwrap().root);
+        assert_eq!(list.len(), 6, "{list:?}");
+        assert!(list.iter().all(|(_, s)| *s == Status::Same), "solid: {solid}, {list:?}");
+    }
+}
+
+#[test]
+fn copy_into_folder_with_gitignore_updates_the_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q"]);
+    write(&repo, &[(".gitignore", "*.log\n"), ("keep.txt", "old")]);
+    let zip = dir.path().join("release.zip");
+    fs::write(
+        &zip,
+        zip_bytes(&[("new/deep/a.txt", "a"), ("keep.txt", "new"), ("x.log", "log"), (".gitignore", "*.log\n")]),
+    )
+    .unwrap();
+    let (l, r) = open_pair(
+        &SourceSpec::parse(&zip.display().to_string()),
+        &SourceSpec::parse(&repo.display().to_string()),
+        SourceOptions::default(),
+        false,
+    )
+    .unwrap();
+    let refresh = |path: &str| {
+        compare::compare_path(&l, &r, path, &CompareOptions::default(), &Control::default()).unwrap().root.status
+    };
+    assert_eq!(refresh("new"), Status::LeftOnly);
+    // A file in a folder that does not exist yet on the right.
+    parallax_core::ops::copy(&l, &r, "new/deep/a.txt").unwrap();
+    assert_eq!(refresh("new"), Status::Same);
+    parallax_core::ops::copy(&l, &r, "keep.txt").unwrap();
+    assert_eq!(refresh("keep.txt"), Status::Same);
+    // Ignore rules still hide what they match.
+    parallax_core::ops::copy(&l, &r, "x.log").unwrap();
+    assert!(repo.join("x.log").exists());
+    assert_eq!(refresh("x.log"), Status::LeftOnly);
+    parallax_core::ops::delete(&r, "new").unwrap();
+    assert_eq!(refresh("new"), Status::LeftOnly);
+}
+
 #[cfg(unix)]
 #[test]
 fn symlinks_compare_by_target() {

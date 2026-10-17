@@ -5,9 +5,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 
-use super::{Data, Entry, EntryKind, Vfs, root_entry, split_parent};
+use super::{Data, Entry, EntryKind, Vfs, find_entry, root_entry, split_parent};
 use crate::{Error, Result};
 
 /// Files below this size are read into memory; larger ones are memory-mapped.
@@ -16,7 +16,8 @@ const MMAP_THRESHOLD: u64 = 256 * 1024;
 pub struct LocalFs {
     root: PathBuf,
     /// When set, the tree was walked once up front with `.gitignore` rules applied.
-    snapshot: Option<HashMap<String, Vec<Entry>>>,
+    /// Copies and deletes update it through [`Vfs::changed`].
+    snapshot: Option<RwLock<HashMap<String, Vec<Entry>>>>,
 }
 
 impl LocalFs {
@@ -31,44 +32,11 @@ impl LocalFs {
     /// they are shown even when an ignore rule matches them.
     pub fn with_gitignore(root: impl Into<PathBuf>, tracked: &[String]) -> Result<Self> {
         let root = root.into();
-        let dirs: Mutex<HashMap<String, Vec<Entry>>> = Mutex::new(HashMap::new());
-        dirs.lock().insert(String::new(), Vec::new());
-
-        let walker = ignore::WalkBuilder::new(&root)
-            .hidden(false)
-            .git_global(false)
-            .require_git(true)
-            .filter_entry(|e| e.file_name() != ".git")
-            .build_parallel();
-        walker.run(|| {
-            let dirs = &dirs;
-            let root = &root;
-            Box::new(move |result| {
-                let Ok(dent) = result else {
-                    return ignore::WalkState::Continue;
-                };
-                if dent.depth() == 0 {
-                    return ignore::WalkState::Continue;
-                }
-                let Ok(rel) = dent.path().strip_prefix(root) else {
-                    return ignore::WalkState::Continue;
-                };
-                let rel = path_to_rel(rel);
-                let Some(entry) = entry_from_path(dent.path(), dent.file_name().to_string_lossy().into_owned()) else {
-                    return ignore::WalkState::Continue;
-                };
-                let (parent, _) = split_parent(&rel);
-                let mut dirs = dirs.lock();
-                if entry.kind == EntryKind::Dir {
-                    dirs.entry(rel.clone()).or_default();
-                }
-                dirs.entry(parent.to_string()).or_default().push(entry);
-                ignore::WalkState::Continue
-            })
-        });
-        let mut dirs = dirs.into_inner();
+        let mut dirs: HashMap<String, Vec<Entry>> = HashMap::new();
+        dirs.insert(String::new(), Vec::new());
+        insert_walked(&mut dirs, walk(&root, &root, None));
         add_tracked(&root, &mut dirs, tracked);
-        Ok(LocalFs { root, snapshot: Some(dirs) })
+        Ok(LocalFs { root, snapshot: Some(RwLock::new(dirs)) })
     }
 
     pub fn root(&self) -> &Path {
@@ -79,6 +47,47 @@ impl LocalFs {
         let mut p = self.root.clone();
         p.extend(path.split('/').filter(|p| !p.is_empty()));
         p
+    }
+}
+
+/// Walks the tree below `start` (a folder inside `root`) in parallel with ignore
+/// rules applied, returning each entry with its path relative to `root`.
+fn walk(root: &Path, start: &Path, max_depth: Option<usize>) -> Vec<(String, Entry)> {
+    let found = Mutex::new(Vec::new());
+    let walker = ignore::WalkBuilder::new(start)
+        .hidden(false)
+        .git_global(false)
+        .require_git(true)
+        .max_depth(max_depth)
+        .filter_entry(|e| e.file_name() != ".git")
+        .build_parallel();
+    walker.run(|| {
+        let found = &found;
+        Box::new(move |result| {
+            let Ok(dent) = result else {
+                return ignore::WalkState::Continue;
+            };
+            if dent.depth() == 0 {
+                return ignore::WalkState::Continue;
+            }
+            let Ok(rel) = dent.path().strip_prefix(root) else {
+                return ignore::WalkState::Continue;
+            };
+            if let Some(entry) = entry_from_path(dent.path(), dent.file_name().to_string_lossy().into_owned()) {
+                found.lock().push((path_to_rel(rel), entry));
+            }
+            ignore::WalkState::Continue
+        })
+    });
+    found.into_inner()
+}
+
+fn insert_walked(dirs: &mut HashMap<String, Vec<Entry>>, walked: Vec<(String, Entry)>) {
+    for (rel, entry) in walked {
+        if entry.kind == EntryKind::Dir {
+            dirs.entry(rel.clone()).or_default();
+        }
+        dirs.entry(split_parent(&rel).0.to_string()).or_default().push(entry);
     }
 }
 
@@ -152,7 +161,7 @@ impl Vfs for LocalFs {
 
     fn list(&self, dir: &str) -> Result<Vec<Entry>> {
         if let Some(snapshot) = &self.snapshot {
-            return snapshot.get(dir).cloned().ok_or_else(|| Error::NotFound(dir.to_string()));
+            return snapshot.read().get(dir).cloned().ok_or_else(|| Error::NotFound(dir.to_string()));
         }
         let abs = self.abs(dir);
         let rd = fs::read_dir(&abs).map_err(|e| Error::io(abs.display().to_string(), e))?;
@@ -171,8 +180,8 @@ impl Vfs for LocalFs {
         if path.is_empty() {
             return Ok(root_entry());
         }
-        if self.snapshot.is_some() {
-            return super::stat_via_list(self, path);
+        if let Some(snapshot) = &self.snapshot {
+            return find_entry(&snapshot.read(), path);
         }
         let (_, name) = split_parent(path);
         entry_from_path(&self.abs(path), name.to_string()).ok_or_else(|| Error::NotFound(path.to_string()))
@@ -200,5 +209,46 @@ impl Vfs for LocalFs {
 
     fn local_path(&self, path: &str) -> Option<PathBuf> {
         Some(self.abs(path))
+    }
+
+    /// Updates the snapshot at `path` from disk, with the same ignore rules as the first walk.
+    fn changed(&self, path: &str) {
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        if path.is_empty() {
+            return;
+        }
+        let (parent, name) = split_parent(path);
+        let was_listed = {
+            let dirs = snapshot.read();
+            if !dirs.contains_key(parent) {
+                // The parent folder was created as well.
+                drop(dirs);
+                return self.changed(parent);
+            }
+            dirs[parent].iter().any(|e| e.name == name)
+        };
+        // Listing the parent tells whether ignore rules hide `path`. An entry that was
+        // already shown stays (Git-tracked files are shown even when ignored).
+        let entry = walk(&self.root, &self.abs(parent), Some(1))
+            .into_iter()
+            .find(|(rel, _)| rel == path)
+            .map(|(_, e)| e)
+            .or_else(|| was_listed.then(|| entry_from_path(&self.abs(path), name.to_string())).flatten());
+        let below = match &entry {
+            Some(e) if e.kind == EntryKind::Dir => walk(&self.root, &self.abs(path), None),
+            _ => Vec::new(),
+        };
+
+        let mut dirs = snapshot.write();
+        let prefix = format!("{path}/");
+        dirs.retain(|dir, _| dir != path && !dir.starts_with(&prefix));
+        let siblings = dirs.entry(parent.to_string()).or_default();
+        siblings.retain(|e| e.name != name);
+        if let Some(entry) = entry {
+            insert_walked(&mut dirs, vec![(path.to_string(), entry)]);
+            insert_walked(&mut dirs, below);
+        }
     }
 }

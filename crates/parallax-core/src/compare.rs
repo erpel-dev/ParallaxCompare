@@ -21,8 +21,7 @@ use serde::{Deserialize, Serialize};
 use crate::convert;
 use crate::source::Source;
 use crate::text::is_binary;
-use crate::vfs::git::blob_id;
-use crate::vfs::{Entry, EntryKind, QuickId, join};
+use crate::vfs::{Entry, EntryKind, join};
 use crate::{Error, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -349,12 +348,12 @@ impl<'a> Engine<'a> {
         }
         let read_left = || self.left.vfs.read(&self.left.path(rel));
         let read_right = || self.right.vfs.read(&self.right.path(rel));
-        // A Git object on one side, a plain file on the other: hash the plain file
-        // the way Git would instead of inflating the object.
+        // A Git object or archive entry on one side, a plain file on the other: hash the
+        // plain file the way the id was made instead of inflating the stored data.
         let (left_data, right_data) = match (&l.quick_id, &r.quick_id) {
-            (Some(QuickId::GitOid(oid)), None) => {
+            (Some(id), None) => {
                 let data = read_right()?;
-                if l.size == r.size && blob_id(&data).as_ref() == Some(oid) {
+                if l.size == r.size && id.matches_data(&data) {
                     return SAME;
                 }
                 if !must_read {
@@ -362,9 +361,9 @@ impl<'a> Engine<'a> {
                 }
                 (read_left()?, data)
             }
-            (None, Some(QuickId::GitOid(oid))) => {
+            (None, Some(id)) => {
                 let data = read_left()?;
-                if l.size == r.size && blob_id(&data).as_ref() == Some(oid) {
+                if l.size == r.size && id.matches_data(&data) {
                     return SAME;
                 }
                 if !must_read {
