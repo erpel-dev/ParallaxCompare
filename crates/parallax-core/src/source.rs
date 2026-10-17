@@ -154,7 +154,7 @@ impl SourceSpec {
                 let git = GitRepo::discover(repo)?;
                 let workdir =
                     git.workdir().ok_or_else(|| Error::InvalidSource(format!("{repo} is a bare repository")))?;
-                let local: Arc<dyn Vfs> = Arc::new(LocalFs::with_gitignore(&workdir)?);
+                let local: Arc<dyn Vfs> = Arc::new(LocalFs::with_gitignore(&workdir, &git.tracked_paths()?)?);
                 Ok(Source {
                     spec: self.clone(),
                     vfs: Arc::new(ArchiveMount::new(local, opts.expand_archives)),
@@ -197,10 +197,9 @@ fn open_local(spec: &SourceSpec, path: &str, opts: SourceOptions) -> Result<Sour
     }
     // A gitignore snapshot only pays off for folders; for a single file it would
     // walk the whole parent folder.
-    let local: Arc<dyn Vfs> = if opts.respect_gitignore && meta.is_dir() && inside_git_repo(&dir) {
-        Arc::new(LocalFs::with_gitignore(&dir)?)
-    } else {
-        Arc::new(LocalFs::new(&dir))
+    let local: Arc<dyn Vfs> = match (opts.respect_gitignore && meta.is_dir()).then(|| tracked_below(&dir)).flatten() {
+        Some(tracked) => Arc::new(LocalFs::with_gitignore(&dir, &tracked)?),
+        None => Arc::new(LocalFs::new(&dir)),
     };
     let vfs: Arc<dyn Vfs> = Arc::new(ArchiveMount::new(local, opts.expand_archives));
     let in_archive = inner.is_some() || (!meta.is_dir() && crate::vfs::archive::detect_format(&root).is_some());
@@ -224,8 +223,22 @@ fn open_local(spec: &SourceSpec, path: &str, opts: SourceOptions) -> Result<Sour
     Ok(source)
 }
 
-fn inside_git_repo(dir: &Path) -> bool {
-    dir.ancestors().any(|d| d.join(".git").exists())
+/// For a folder inside a Git worktree: the tracked files below it, relative to it.
+/// `None` when the folder is not in a worktree.
+fn tracked_below(dir: &Path) -> Option<Vec<String>> {
+    if !dir.ancestors().any(|d| d.join(".git").exists()) {
+        return None;
+    }
+    let git = GitRepo::discover(dir).ok()?;
+    let workdir = std::fs::canonicalize(git.workdir()?).ok()?;
+    let rel = std::fs::canonicalize(dir).ok()?.strip_prefix(&workdir).ok()?.to_path_buf();
+    let prefix = rel.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
+    let tracked = git.tracked_paths().ok()?;
+    if prefix.is_empty() {
+        return Some(tracked);
+    }
+    let prefix = format!("{prefix}/");
+    Some(tracked.into_iter().filter_map(|p| p.strip_prefix(&prefix).map(str::to_string)).collect())
 }
 
 /// Opens both sides of a comparison. With `merge_base`, a Git revision on the left

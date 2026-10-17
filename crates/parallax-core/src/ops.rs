@@ -28,7 +28,17 @@ pub fn copy(from: &Source, to: &Source, rel: &str) -> Result<u64> {
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).map_err(|e| Error::io(parent.display().to_string(), e))?;
     }
-    fs::write(&target, &*data).map_err(|e| Error::io(target.display().to_string(), e))?;
+    let io_err = |e| Error::io(target.display().to_string(), e);
+    if entry.kind == EntryKind::Symlink {
+        // The data of a symlink is its target path.
+        if fs::symlink_metadata(&target).is_ok() {
+            fs::remove_file(&target).map_err(io_err)?;
+        }
+        let link_to = String::from_utf8_lossy(&data).into_owned();
+        make_symlink(&link_to, &target).map_err(io_err)?;
+        return Ok(1);
+    }
+    fs::write(&target, &*data).map_err(io_err)?;
     if let Some(mtime) = entry.mtime.filter(|t| *t >= 0) {
         let time = SystemTime::UNIX_EPOCH + Duration::from_secs(mtime as u64);
         if let Ok(file) = fs::File::options().write(true).open(&target) {
@@ -47,4 +57,21 @@ pub fn delete(source: &Source, rel: &str) -> Result<()> {
     let meta = fs::symlink_metadata(&path).map_err(|e| Error::io(path.display().to_string(), e))?;
     let result = if meta.is_dir() { fs::remove_dir_all(&path) } else { fs::remove_file(&path) };
     result.map_err(|e| Error::io(path.display().to_string(), e))
+}
+
+#[cfg(unix)]
+fn make_symlink(link_to: &str, at: &std::path::Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(link_to, at)
+}
+
+/// Windows needs developer mode or admin rights for symlinks; the error is reported as is.
+#[cfg(windows)]
+fn make_symlink(link_to: &str, at: &std::path::Path) -> std::io::Result<()> {
+    let target = link_to.replace('/', "\\");
+    let resolved = at.parent().map(|p| p.join(&target));
+    if resolved.is_some_and(|p| p.is_dir()) {
+        std::os::windows::fs::symlink_dir(target, at)
+    } else {
+        std::os::windows::fs::symlink_file(target, at)
+    }
 }

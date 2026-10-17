@@ -87,6 +87,19 @@ impl GitRepo {
         self.shared.work_dir().map(Path::to_path_buf)
     }
 
+    /// Paths of all files in the index (tracked files), relative to the worktree root.
+    pub fn tracked_paths(&self) -> Result<Vec<String>> {
+        self.with(|repo| {
+            let index = match repo.open_index() {
+                Ok(index) => index,
+                // A fresh repository without an index tracks nothing yet.
+                Err(_) if !repo.git_dir().join("index").exists() => return Ok(Vec::new()),
+                Err(e) => return Err(Error::git(e)),
+            };
+            Ok(index.entries().iter().map(|e| e.path(&index).to_str_lossy().into_owned()).collect())
+        })
+    }
+
     pub fn git_dir(&self) -> PathBuf {
         self.shared.git_dir().to_path_buf()
     }

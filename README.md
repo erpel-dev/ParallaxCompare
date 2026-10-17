@@ -35,7 +35,18 @@ All of the work happens in a multi-threaded Rust core; the UI only renders the r
 - **Local files:** parallel walking (rayon), files are memory-mapped, and size mismatches short-circuit.
 - **Text views:** rows, intra-line marks and syntax colours are produced only for the visible window. Highlighter state is checkpointed every 128 lines, so jumping to line 900 000 does not re-parse the file from the top.
 
-Example: comparing the tags `tokio-1.40.0` and `tokio-1.53.3` of the tokio repository (~880 files) takes about 12 ms with the CLI.
+Measured with the CLI on two Linux kernel releases (v6.11 and v6.12, ~87 000 files, 1.6 GB per tree). The machine is a 4-core cloud VM, the OS file cache was warm, and each time is the full wall-clock run including output:
+
+| Comparison | 1 thread | 4 threads |
+|---|---|---|
+| Git tag vs. Git tag (read from the object database) | 1.9 s | 0.51 s |
+| Folder vs. folder, by content | 2.0 s | 0.59 s |
+| Folder vs. folder, nearly identical (all 1.6 GB read) | 1.8 s | 0.58 s |
+| Folder vs. folder, quick (size and date) | 0.62 s | 0.23 s |
+| Worktree vs. `HEAD` (one file edited) | 2.2 s | 0.69 s |
+| Text diff, 1 million lines (55 MB), 2 500 changed lines | 0.41 s | — |
+
+Folder compares use every core: with 4 threads they run 3.5–3.8× faster, at about 370 % CPU. A text diff of a single file runs on one core; the desktop app only renders and highlights the visible rows.
 
 ## Usage
 
