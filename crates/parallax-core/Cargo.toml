@@ -39,6 +39,18 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 pdf-extract = "0.12"
 crc32fast = "1"
 cafebabe = "0.9"
+memchr = "2"
+yaml-rust2 = { version = "0.13", default-features = false }
+toml = { version = "1", default-features = false, features = ["std", "parse", "display", "serde"] }
+x509-parser = "0.18"
+sha2 = "0.10"
+base64 = "0.22"
+aes = "0.8"
+cbc = "0.1"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+hmac = "0.12"
+mail-parser = { version = "0.11", features = ["full_encoding"] }
+cfb = "0.7"
 
 [dev-dependencies]
 sevenz-rust2 = { version = "0.24", default-features = false, features = ["compress", "util"] }

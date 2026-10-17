@@ -1,0 +1,39 @@
+# Shop stack for local development.
+x-service: &service
+  restart: unless-stopped
+  environment: &env
+    TZ: Europe/Berlin
+    LOG_LEVEL: info
+  logging:
+    driver: json-file
+    options: { max-size: 10m }
+
+services:
+  web:
+    <<: *service
+    image: nginx:1.27
+    ports:
+      - "8080:80"   # public
+    depends_on: [api]
+  api:
+    <<: *service
+    image: shop/api:2.4.1
+    environment:
+      <<: *env
+      DATABASE_URL: postgres://shop@db/shop
+      WORKERS: 4
+    command: >-
+      gunicorn app:create_app()
+      --workers 4
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+  db:
+    image: postgres:16
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_PASSWORD: example
+      POSTGRES_DB: shop
+volumes:
+  db-data: {}

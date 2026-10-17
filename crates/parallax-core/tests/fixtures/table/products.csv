@@ -1,0 +1,51 @@
+id,name,price,material
+1000,Bolt M3,0.05,steel
+1001,"Washer, ""heavy""",0.10,brass
+1002,"Nut
+self-locking",0.15,
+1003,Spring,0.20,nylon
+1004,Bolt M7,0.25,steel
+1005,"Washer, ""heavy""",0.30,brass
+1006,"Nut
+self-locking",0.35,
+1007,Spring,0.40,nylon
+1008,Bolt M11,0.45,steel
+1009,"Washer, ""heavy""",0.50,brass
+1010,"Nut
+self-locking",0.55,
+1011,Spring,0.60,nylon
+1012,Bolt M15,0.65,steel
+1013,"Washer, ""heavy""",0.70,brass
+1014,"Nut
+self-locking",0.75,
+1015,Spring,0.80,nylon
+1016,Bolt M19,0.85,steel
+1017,"Washer, ""heavy""",0.90,brass
+1018,"Nut
+self-locking",0.95,
+1019,Spring,1.00,nylon
+1020,Bolt M23,1.05,steel
+1021,"Washer, ""heavy""",1.10,brass
+1022,"Nut
+self-locking",1.15,
+1023,Spring,1.20,nylon
+1024,Bolt M27,1.25,steel
+1025,"Washer, ""heavy""",1.30,brass
+1026,"Nut
+self-locking",1.35,
+1027,Spring,1.40,nylon
+1028,Bolt M31,1.45,steel
+1029,"Washer, ""heavy""",1.50,brass
+1030,"Nut
+self-locking",1.55,
+1031,Spring,1.60,nylon
+1032,Bolt M35,1.65,steel
+1033,"Washer, ""heavy""",1.70,brass
+1034,"Nut
+self-locking",1.75,
+1035,Spring,1.80,nylon
+1036,Bolt M39,1.85,steel
+1037,"Washer, ""heavy""",1.90,brass
+1038,"Nut
+self-locking",1.95,
+1039,Spring,2.00,nylon

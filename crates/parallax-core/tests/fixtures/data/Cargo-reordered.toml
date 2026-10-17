@@ -1,0 +1,195 @@
+[package]
+name = "parallax-core"
+description = "UI-agnostic compare engine of ParallaxCompare: virtual file system, folder compare, text diff, highlighting"
+
+[package.version]
+workspace = true
+
+[package.rust-version]
+workspace = true
+
+[package.repository]
+workspace = true
+
+[package.edition]
+workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+tar = "0.4"
+flate2 = "1"
+
+[dev-dependencies.zip]
+version = "9"
+features = [
+    "deflate",
+]
+default-features = false
+
+[dev-dependencies.sevenz-rust2]
+version = "0.24"
+features = [
+    "compress",
+    "util",
+]
+default-features = false
+
+[dev-dependencies.image]
+version = "0.25"
+features = [
+    "png",
+]
+default-features = false
+
+[dev-dependencies.anyhow]
+workspace = true
+
+[dependencies]
+x509-parser = "0.18"
+trash = "5"
+thiserror = "2"
+tar = "0.4"
+similar = "3"
+sha2 = "0.10"
+ruzstd = "0.9"
+rayon = "1"
+quick-xml = "0.42"
+pdf-extract = "0.12"
+parking_lot = "0.12"
+notify = "8"
+memmap2 = "0.9"
+memchr = "2"
+lzma-rust2 = "0.22"
+imara-diff = "0.2"
+ignore = "0.4"
+hmac = "0.12"
+globset = "0.4"
+flate2 = "1"
+encoding_rs = "0.8"
+crc32fast = "1"
+chardetng = "1"
+cfb = "0.7"
+cbc = "0.1"
+cafebabe = "0.9"
+bzip2 = "0.6"
+base64 = "0.22"
+aes = "0.8"
+
+[dependencies.zip]
+version = "9"
+features = [
+    "deflate",
+    "deflate64",
+    "bzip2",
+    "lzma",
+    "time",
+    "unreserved",
+]
+default-features = false
+
+[dependencies.yaml-rust2]
+version = "0.13"
+default-features = false
+
+[dependencies.two-face]
+version = "0.5"
+features = [
+    "syntect-fancy",
+]
+default-features = false
+
+[dependencies.toml]
+version = "1"
+features = [
+    "std",
+    "parse",
+    "display",
+    "serde",
+]
+default-features = false
+
+[dependencies.syntect]
+version = "5.3"
+features = [
+    "default-fancy",
+]
+default-features = false
+
+[dependencies.sevenz-rust2]
+version = "0.24"
+features = [
+    "bzip2",
+    "ppmd",
+    "util",
+    "compress",
+]
+default-features = false
+
+[dependencies.serde_json]
+workspace = true
+features = [
+    "preserve_order",
+]
+
+[dependencies.serde]
+workspace = true
+
+[dependencies.pbkdf2]
+version = "0.12"
+features = [
+    "hmac",
+]
+default-features = false
+
+[dependencies.object]
+version = "0.40"
+features = [
+    "read",
+    "std",
+]
+default-features = false
+
+[dependencies.minijinja-contrib]
+version = "2"
+features = [
+    "pycompat",
+]
+
+[dependencies.minijinja]
+version = "2"
+features = [
+    "loop_controls",
+    "json",
+    "preserve_order",
+    "fuel",
+    "builtins",
+    "macros",
+]
+
+[dependencies.mail-parser]
+version = "0.11"
+features = [
+    "full_encoding",
+]
+
+[dependencies.image]
+version = "0.25"
+features = [
+    "png",
+    "jpeg",
+    "gif",
+    "bmp",
+    "webp",
+    "tiff",
+    "ico",
+]
+default-features = false
+
+[dependencies.gix]
+version = "0.89"
+features = [
+    "revision",
+    "max-performance-safe",
+    "sha1",
+]
+default-features = false
