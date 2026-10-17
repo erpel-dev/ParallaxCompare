@@ -18,11 +18,13 @@ pub struct LocalFs {
     /// When set, the tree was walked once up front with `.gitignore` rules applied.
     /// Copies and deletes update it through [`Vfs::changed`].
     snapshot: Option<RwLock<HashMap<String, Vec<Entry>>>>,
+    /// Files Git tracks, shown even where ignore rules match, for walking again.
+    tracked: Vec<String>,
 }
 
 impl LocalFs {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        LocalFs { root: root.into(), snapshot: None }
+        LocalFs { root: root.into(), snapshot: None, tracked: Vec::new() }
     }
 
     /// Walks the whole tree in parallel, honouring `.gitignore`, `.git/info/exclude`
@@ -32,11 +34,8 @@ impl LocalFs {
     /// they are shown even when an ignore rule matches them.
     pub fn with_gitignore(root: impl Into<PathBuf>, tracked: &[String]) -> Result<Self> {
         let root = root.into();
-        let mut dirs: HashMap<String, Vec<Entry>> = HashMap::new();
-        dirs.insert(String::new(), Vec::new());
-        insert_walked(&mut dirs, walk(&root, &root, None));
-        add_tracked(&root, &mut dirs, tracked);
-        Ok(LocalFs { root, snapshot: Some(RwLock::new(dirs)) })
+        let dirs = snapshot_of(&root, tracked);
+        Ok(LocalFs { root, snapshot: Some(RwLock::new(dirs)), tracked: tracked.to_vec() })
     }
 
     pub fn root(&self) -> &Path {
@@ -48,6 +47,14 @@ impl LocalFs {
         p.extend(path.split('/').filter(|p| !p.is_empty()));
         p
     }
+}
+
+fn snapshot_of(root: &Path, tracked: &[String]) -> HashMap<String, Vec<Entry>> {
+    let mut dirs: HashMap<String, Vec<Entry>> = HashMap::new();
+    dirs.insert(String::new(), Vec::new());
+    insert_walked(&mut dirs, walk(root, root, None));
+    add_tracked(root, &mut dirs, tracked);
+    dirs
 }
 
 /// Walks the tree below `start` (a folder inside `root`) in parallel with ignore
@@ -215,8 +222,10 @@ impl Vfs for LocalFs {
         true
     }
 
-    fn apply(&self, changes: Vec<Change>) -> Result<()> {
+    fn apply(&self, changes: Vec<Change>, progress: &crate::progress::Progress) -> Result<()> {
+        progress.expect(changes.len() as u64);
         for change in changes {
+            progress.check()?;
             let path = change.path().to_string();
             let abs = self.abs(&path);
             let io_err = |e| Error::io(abs.display().to_string(), e);
@@ -237,6 +246,7 @@ impl Vfs for LocalFs {
             };
             self.changed(&path);
             result?;
+            progress.advance(1)?;
         }
         Ok(())
     }
@@ -247,6 +257,8 @@ impl Vfs for LocalFs {
             return;
         };
         if path.is_empty() {
+            let dirs = snapshot_of(&self.root, &self.tracked);
+            *snapshot.write() = dirs;
             return;
         }
         let (parent, name) = split_parent(path);

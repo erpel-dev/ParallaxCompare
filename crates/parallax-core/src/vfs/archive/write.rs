@@ -13,6 +13,7 @@ use std::num::NonZeroU64;
 use std::time::{Duration, SystemTime};
 
 use super::{ArchiveFormat, ArchiveFs, Backend, civil_to_unix, tar_reader};
+use crate::progress::Progress;
 use crate::vfs::{Change, Data, EntryKind, normalize};
 use crate::{Error, Result};
 
@@ -22,12 +23,17 @@ const LZMA_LEVEL: u32 = 5;
 impl ArchiveFs {
     /// The archive with `changes` applied, in the same format. Paths are relative to
     /// the archive root and must not enter archives nested in it.
-    pub fn rewritten(&self, changes: Vec<Change>) -> Result<Vec<u8>> {
+    /// `progress` counts entries; cancelling stops before the new archive is complete.
+    pub fn rewritten(&self, changes: Vec<Change>, progress: &Progress) -> Result<Vec<u8>> {
         let edits = Edits::new(changes);
+        progress.expect(edits.puts.len() as u64);
         match &self.backend {
-            Backend::Zip { archive, .. } => write_zip(archive, &edits),
-            Backend::SevenZ { data, archive, .. } => write_7z(data, archive, &edits),
-            Backend::Tar { data, format, .. } => write_tar(data, *format, &edits),
+            Backend::Zip { archive, .. } => write_zip(archive, &edits, progress),
+            Backend::SevenZ { data, archive, .. } => write_7z(data, archive, &edits, progress),
+            Backend::Tar { data, format, contents } => {
+                progress.expect(contents.len() as u64);
+                write_tar(data, *format, &edits, progress)
+            }
         }
     }
 }
@@ -86,16 +92,19 @@ fn threads() -> u32 {
     std::thread::available_parallelism().map_or(1, |n| n.get() as u32)
 }
 
-fn write_zip(archive: &zip::ZipArchive<Cursor<Data>>, edits: &Edits) -> Result<Vec<u8>> {
+fn write_zip(archive: &zip::ZipArchive<Cursor<Data>>, edits: &Edits, progress: &Progress) -> Result<Vec<u8>> {
     let mut old = archive.clone();
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    progress.expect(old.len() as u64);
     for i in 0..old.len() {
+        progress.advance(1)?;
         let file = old.by_index_raw(i).map_err(Error::archive)?;
         if !file.name().is_ok_and(|n| edits.drops(&n)) {
             zip.raw_copy_file(file).map_err(Error::archive)?;
         }
     }
     for put in &edits.puts {
+        progress.advance(1)?;
         let mut options = zip::write::SimpleFileOptions::default().large_file(put.data.len() as u64 >= u32::MAX as u64);
         if let Some(time) = put.mtime.and_then(zip_time) {
             options = options.last_modified_time(time);
@@ -136,7 +145,7 @@ fn unix_to_civil(secs: i64) -> (i64, u32, u32, u32, u32, u32) {
     (y, m, d, rest / 3600, rest % 3600 / 60, rest % 60)
 }
 
-fn write_7z(data: &Data, archive: &sevenz_rust2::Archive, edits: &Edits) -> Result<Vec<u8>> {
+fn write_7z(data: &Data, archive: &sevenz_rust2::Archive, edits: &Edits, progress: &Progress) -> Result<Vec<u8>> {
     use sevenz_rust2::{ArchiveEntry, ArchiveWriter, BlockDecoder, Password, SourceReader};
 
     let mut writer = ArchiveWriter::new(Cursor::new(Vec::new())).map_err(Error::archive)?;
@@ -146,18 +155,20 @@ fn write_7z(data: &Data, archive: &sevenz_rust2::Archive, edits: &Edits) -> Resu
     let dropped = |entry: &ArchiveEntry| edits.drops(&entry.name);
     let block_of = &archive.stream_map.file_block_index;
     let mut changed = vec![false; archive.blocks.len()];
+    let mut files_in = vec![0u64; archive.blocks.len()];
     for (file, block) in archive.files.iter().zip(block_of) {
-        if let Some(block) = block
-            && dropped(file)
-        {
-            changed[*block] = true;
+        if let Some(block) = block {
+            files_in[*block] += 1;
+            changed[*block] |= dropped(file);
         }
     }
+    progress.expect(files_in.iter().sum());
 
     let password = Password::empty();
     let mut source = Cursor::new(&**data);
     for (block, &changed) in changed.iter().enumerate() {
         if !changed {
+            progress.advance(files_in[block])?;
             writer.push_raw_block(archive, block, &mut source, |e| e.name.clone()).map_err(Error::archive)?;
             continue;
         }
@@ -165,6 +176,9 @@ fn write_7z(data: &Data, archive: &sevenz_rust2::Archive, edits: &Edits) -> Resu
         let mut readers = Vec::new();
         BlockDecoder::new(threads(), block, archive, &password, &mut source)
             .for_each_entries(&mut |entry, r| {
+                if progress.advance(1).is_err() {
+                    return Ok(false);
+                }
                 if dropped(entry) {
                     // Read past it: the next file's data follows in the same stream.
                     io::copy(r, &mut io::sink())?;
@@ -172,13 +186,16 @@ fn write_7z(data: &Data, archive: &sevenz_rust2::Archive, edits: &Edits) -> Resu
                     let mut buf = Vec::with_capacity(entry.size as usize);
                     r.read_to_end(&mut buf)?;
                     kept.push(entry.clone());
-                    readers.push(SourceReader::new(Cursor::new(buf)));
+                    readers.push(SourceReader::new(Counted::new(Cursor::new(buf), progress)));
                 }
                 Ok(true)
             })
             .map_err(Error::archive)?;
+        progress.check()?;
         if !kept.is_empty() {
-            writer.push_archive_entries(kept, readers).map_err(Error::archive)?;
+            // Encoding is the slow part: it is counted and can be cancelled per file.
+            progress.expect(kept.len() as u64);
+            writer.push_archive_entries(kept, readers).map_err(|e| cancelled_or(progress, e))?;
         }
     }
     // Folders and empty files belong to no block. They are written folders first:
@@ -194,6 +211,7 @@ fn write_7z(data: &Data, archive: &sevenz_rust2::Archive, edits: &Edits) -> Resu
     let mut entries = Vec::new();
     let mut readers = Vec::new();
     for put in &edits.puts {
+        progress.advance(1)?;
         let mut entry = match put.kind {
             EntryKind::Dir => ArchiveEntry::new_directory(&put.path),
             _ => ArchiveEntry::new_file(&put.path),
@@ -215,7 +233,7 @@ fn write_7z(data: &Data, archive: &sevenz_rust2::Archive, edits: &Edits) -> Resu
             no_data.push(entry);
         } else if archive.is_solid {
             entries.push(entry);
-            readers.push(SourceReader::new(Cursor::new(put.data.clone())));
+            readers.push(SourceReader::new(Counted::new(Cursor::new(put.data.clone()), progress)));
         } else {
             writer.push_archive_entry(entry, Some(Cursor::new(put.data.clone()))).map_err(Error::archive)?;
         }
@@ -225,15 +243,49 @@ fn write_7z(data: &Data, archive: &sevenz_rust2::Archive, edits: &Edits) -> Resu
         writer.push_archive_entry(entry, None::<&[u8]>).map_err(Error::archive)?;
     }
     if !entries.is_empty() {
-        writer.push_archive_entries(entries, readers).map_err(Error::archive)?;
+        progress.expect(entries.len() as u64);
+        writer.push_archive_entries(entries, readers).map_err(|e| cancelled_or(progress, e))?;
     }
     Ok(writer.finish().map_err(Error::archive)?.into_inner())
 }
 
-fn write_tar(data: &Data, format: ArchiveFormat, edits: &Edits) -> Result<Vec<u8>> {
+/// Reads a file's data for the encoder, counting the file once it is read and
+/// stopping the encoder when the operation is cancelled.
+struct Counted<'a, R> {
+    inner: R,
+    progress: &'a Progress,
+    counted: bool,
+}
+
+impl<'a, R> Counted<'a, R> {
+    fn new(inner: R, progress: &'a Progress) -> Self {
+        Counted { inner, progress, counted: false }
+    }
+}
+
+impl<R: io::Read> io::Read for Counted<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.progress.check().is_err() {
+            return Err(io::Error::other("cancelled"));
+        }
+        let n = self.inner.read(buf)?;
+        if n == 0 && !buf.is_empty() && !self.counted {
+            self.counted = true;
+            self.progress.done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(n)
+    }
+}
+
+fn cancelled_or(progress: &Progress, e: impl std::fmt::Display) -> Error {
+    progress.check().err().unwrap_or_else(|| Error::archive(e))
+}
+
+fn write_tar(data: &Data, format: ArchiveFormat, edits: &Edits, progress: &Progress) -> Result<Vec<u8>> {
     let mut old = tar::Archive::new(tar_reader(data, format)?);
     let mut tar = tar::Builder::new(Vec::new());
     for entry in old.entries().map_err(Error::archive)? {
+        progress.advance(1)?;
         let mut entry = entry.map_err(Error::archive)?;
         let path = entry.path().map_err(Error::archive)?.into_owned();
         let entry_type = entry.header().entry_type();
@@ -257,6 +309,7 @@ fn write_tar(data: &Data, format: ArchiveFormat, edits: &Edits) -> Result<Vec<u8
 
     let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     for put in &edits.puts {
+        progress.advance(1)?;
         let mut header = tar::Header::new_gnu();
         header.set_mtime(put.mtime.map_or(now, |t| t.max(0) as u64));
         match put.kind {
@@ -282,6 +335,7 @@ fn write_tar(data: &Data, format: ArchiveFormat, edits: &Edits) -> Result<Vec<u8
         .map_err(Error::archive)?;
     }
     let tar = tar.into_inner().map_err(Error::archive)?;
+    progress.check()?;
     compress(tar, format).map_err(Error::archive)
 }
 

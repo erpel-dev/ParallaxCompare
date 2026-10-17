@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { ask } from "@tauri-apps/plugin-dialog";
   import FolderView from "./lib/FolderView.svelte";
   import NewCompare from "./lib/NewCompare.svelte";
   import TextView from "./lib/TextView.svelte";
@@ -16,7 +18,7 @@
   type Tab =
     | { key: number; kind: "new"; title: string }
     | { key: number; kind: "folder"; title: string; session: SessionInfo; request: Request }
-    | { key: number; kind: "text"; title: string; session: SessionInfo; path: string; ownsSession: boolean };
+    | { key: number; kind: "text"; title: string; session: SessionInfo; path: string; ownsSession: boolean; dirty?: boolean };
 
   let tabs = $state<Tab[]>([]);
   let active = $state(0);
@@ -54,10 +56,24 @@
     }
   }
 
-  function close(key: number) {
+  /** File tabs with unsaved edits among those that closing `tab` closes. */
+  function unsaved(tab: Tab): Tab[] {
+    if (tab.kind === "text") return tab.dirty ? [tab] : [];
+    if (tab.kind !== "folder") return [];
+    return tabs.filter((t) => t.kind === "text" && t.dirty && !t.ownsSession && t.session.id === tab.session.id);
+  }
+
+  async function confirmDiscard(dirty: Tab[]): Promise<boolean> {
+    if (!dirty.length) return true;
+    const names = dirty.map((t) => t.title).join(", ");
+    return ask(`Discard the unsaved changes in ${names}?`, { title: "Unsaved changes", kind: "warning", okLabel: "Discard", cancelLabel: "Keep editing" });
+  }
+
+  async function close(key: number) {
     const index = tabs.findIndex((t) => t.key === key);
     if (index < 0) return;
     const tab = tabs[index];
+    if (!(await confirmDiscard(unsaved(tab)))) return;
     if (tab.kind === "folder") {
       api.closeSession(tab.session.id);
       // File tabs opened from this comparison share its session.
@@ -96,6 +112,9 @@
   }
 
   onMount(async () => {
+    getCurrentWindow().onCloseRequested(async (e) => {
+      if (!(await confirmDiscard(tabs.filter((t) => t.kind === "text" && t.dirty)))) e.preventDefault();
+    });
     const startup = await api.startupRequest().catch(() => null);
     if (startup) {
       await start({
@@ -116,7 +135,7 @@
     {#each tabs as tab (tab.key)}
       <div class="tab" class:on={tab.key === active}>
         <button class="label" onclick={() => (active = tab.key)} title={tab.title}>
-          <span>{tab.kind === "folder" ? "📁" : tab.kind === "text" ? "📄" : "＋"}</span>{tab.title}
+          <span>{tab.kind === "folder" ? "📁" : tab.kind === "text" ? "📄" : "＋"}</span>{tab.title}{tab.kind === "text" && tab.dirty ? " ●" : ""}
         </button>
         <button class="x" onclick={() => close(tab.key)} title="Close (Ctrl+W)">×</button>
       </div>
@@ -139,7 +158,7 @@
         {:else if tab.kind === "folder"}
           <FolderView session={tab.session} onOpenFile={(p) => openFile(tab.session, p)} onSwap={() => swap(tab)} />
         {:else}
-          <TextView session={tab.session} path={tab.path} />
+          <TextView session={tab.session} path={tab.path} onDirty={(d) => (tab.dirty = d)} />
         {/if}
       </section>
     {/each}

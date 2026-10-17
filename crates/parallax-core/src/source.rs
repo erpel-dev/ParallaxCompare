@@ -83,6 +83,17 @@ pub struct Source {
     /// Path of the compared root inside `vfs`.
     pub root: String,
     pub info: SourceInfo,
+    /// What to watch on disk for changes made outside the app.
+    pub watch: Option<WatchRoot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WatchRoot {
+    /// A folder whose contents map to compare paths relative to it; with
+    /// `gitignore`, what `.gitignore` hides is not compared and need not be watched.
+    Tree { dir: PathBuf, gitignore: bool },
+    /// One file (an archive or a compared file): any change to it changes everything.
+    File(PathBuf),
 }
 
 impl Source {
@@ -140,6 +151,7 @@ impl SourceSpec {
                     spec: self.clone(),
                     vfs,
                     root,
+                    watch: None,
                     info: SourceInfo {
                         kind: SourceKind::GitRev,
                         display: repo.clone(),
@@ -159,6 +171,7 @@ impl SourceSpec {
                     spec: self.clone(),
                     vfs: Arc::new(ArchiveMount::new(local, opts.expand_archives)),
                     root: String::new(),
+                    watch: Some(WatchRoot::Tree { dir: workdir.clone(), gitignore: true }),
                     info: SourceInfo {
                         kind: SourceKind::GitWorktree,
                         display: workdir.display().to_string(),
@@ -197,16 +210,20 @@ fn open_local(spec: &SourceSpec, path: &str, opts: SourceOptions) -> Result<Sour
     }
     // A gitignore snapshot only pays off for folders; for a single file it would
     // walk the whole parent folder.
-    let local: Arc<dyn Vfs> = match (opts.respect_gitignore && meta.is_dir()).then(|| tracked_below(&dir)).flatten() {
+    let tracked = (opts.respect_gitignore && meta.is_dir()).then(|| tracked_below(&dir)).flatten();
+    let gitignore = tracked.is_some();
+    let local: Arc<dyn Vfs> = match tracked {
         Some(tracked) => Arc::new(LocalFs::with_gitignore(&dir, &tracked)?),
         None => Arc::new(LocalFs::new(&dir)),
     };
     let vfs: Arc<dyn Vfs> = Arc::new(ArchiveMount::new(local, opts.expand_archives));
     let in_archive = inner.is_some() || (!meta.is_dir() && crate::vfs::archive::detect_format(&root).is_some());
+    let watch = Some(if meta.is_dir() { WatchRoot::Tree { dir, gitignore } } else { WatchRoot::File(outer_path) });
     let source = Source {
         spec: spec.clone(),
         vfs,
         root,
+        watch,
         info: SourceInfo {
             kind: if in_archive { SourceKind::Archive } else { SourceKind::Folder },
             display: path.to_string(),

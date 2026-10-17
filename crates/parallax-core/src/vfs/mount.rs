@@ -12,6 +12,7 @@ use parking_lot::Mutex;
 
 use super::archive::{ArchiveFs, detect_format};
 use super::{Change, Data, Entry, EntryKind, Vfs, join, split_parent};
+use crate::progress::Progress;
 use crate::{Error, Result};
 
 pub struct ArchiveMount {
@@ -116,7 +117,7 @@ impl Vfs for ArchiveMount {
         // An archive that was overwritten or deleted, or one inside a changed folder,
         // is opened again on next use.
         let prefix = format!("{path}/");
-        self.cache.lock().retain(|outer, _| outer != path && !outer.starts_with(&prefix));
+        self.cache.lock().retain(|outer, _| !path.is_empty() && outer != path && !outer.starts_with(&prefix));
         self.base.changed(path);
     }
 
@@ -124,7 +125,7 @@ impl Vfs for ArchiveMount {
         self.base.writable()
     }
 
-    fn apply(&self, changes: Vec<Change>) -> Result<()> {
+    fn apply(&self, changes: Vec<Change>, progress: &Progress) -> Result<()> {
         if !self.base.writable() {
             return Err(Error::Unsupported(format!("{} is read-only", self.label())));
         }
@@ -132,11 +133,11 @@ impl Vfs for ArchiveMount {
         let (mut direct, nested) = split_by_archive(&*self.base, changes);
         for (outer, inner) in nested {
             let archive = self.open_archive(&*self.base, &outer, &outer, archive_format(&outer))?;
-            let data = Data::from_vec(rewrite(&archive, inner)?);
+            let data = Data::from_vec(rewrite(&archive, inner, progress)?);
             direct.push(Change::Put { path: outer, kind: EntryKind::File, data, mtime: None });
         }
         let paths: Vec<String> = direct.iter().map(|c| c.path().to_string()).collect();
-        let result = self.base.apply(direct);
+        let result = self.base.apply(direct, progress);
         for path in paths {
             self.changed(&path);
         }
@@ -179,13 +180,13 @@ fn split_by_archive(vfs: &dyn Vfs, changes: Vec<Change>) -> (Vec<Change>, BTreeM
 }
 
 /// The bytes of `archive` with `changes` applied, which may enter nested archives.
-fn rewrite(archive: &ArchiveFs, changes: Vec<Change>) -> Result<Vec<u8>> {
+fn rewrite(archive: &ArchiveFs, changes: Vec<Change>, progress: &Progress) -> Result<Vec<u8>> {
     let (mut direct, nested) = split_by_archive(archive, changes);
     for (outer, inner) in nested {
         let label = join(&archive.label(), &outer);
         let child = ArchiveFs::open(archive.read(&outer)?, archive_format(&outer), label)?;
-        let data = Data::from_vec(rewrite(&child, inner)?);
+        let data = Data::from_vec(rewrite(&child, inner, progress)?);
         direct.push(Change::Put { path: outer, kind: EntryKind::File, data, mtime: None });
     }
-    archive.rewritten(direct)
+    archive.rewritten(direct, progress)
 }

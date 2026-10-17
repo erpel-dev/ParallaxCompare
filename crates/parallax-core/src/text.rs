@@ -25,6 +25,9 @@ pub struct TextDoc {
     pub encoding: &'static str,
     pub bom: bool,
     pub line_ending: LineEnding,
+    /// Terminator for lines added by editing: the file's own, the most common one
+    /// in a mixed file, `\n` when there is none yet.
+    pub newline: &'static str,
 }
 
 impl TextDoc {
@@ -38,6 +41,79 @@ impl TextDoc {
 
     pub fn is_empty(&self) -> bool {
         self.lines.is_empty()
+    }
+
+    /// An empty document saved like `other`: same encoding, BOM and line terminator.
+    pub fn empty_like(other: &TextDoc) -> TextDoc {
+        TextDoc { text: String::new(), lines: Vec::new(), line_ending: LineEnding::None, ..*other }
+    }
+
+    /// Byte offset of a position given as line and UTF-16 column (the unit of
+    /// JavaScript strings). Columns past the end of the line, and lines past the
+    /// end of the document, are clamped.
+    pub fn offset(&self, line: usize, col: u32) -> usize {
+        let Some(range) = self.lines.get(line) else {
+            return self.text.len();
+        };
+        let mut units = 0u32;
+        for (i, c) in self.text[range.clone()].char_indices() {
+            if units >= col {
+                return range.start + i;
+            }
+            units += c.len_utf16() as u32;
+        }
+        range.end
+    }
+
+    /// Start of line `line` including what precedes it, or the end of the text.
+    pub fn line_start(&self, line: usize) -> usize {
+        self.lines.get(line).map_or(self.text.len(), |r| r.start)
+    }
+
+    /// Whether the last line ends with a terminator.
+    pub fn ends_with_newline(&self) -> bool {
+        self.text.ends_with(['\n', '\r'])
+    }
+
+    /// Replaces a byte range of the text and returns what was there.
+    pub fn splice(&mut self, range: Range<usize>, with: &str) -> String {
+        let removed = self.text[range.clone()].to_string();
+        self.text.replace_range(range, with);
+        let (lines, line_ending, _) = split_lines(&self.text);
+        self.lines = lines;
+        self.line_ending = line_ending;
+        removed
+    }
+
+    /// The bytes to save: the text in the document's encoding, with its BOM.
+    /// Fails when the encoding cannot represent a character of the text.
+    pub fn encode(&self) -> Result<Vec<u8>, String> {
+        let encoding = encoding_rs::Encoding::for_label(self.encoding.as_bytes()).unwrap_or(encoding_rs::UTF_8);
+        let mut out = Vec::with_capacity(self.text.len() + 3);
+        if encoding == encoding_rs::UTF_16LE || encoding == encoding_rs::UTF_16BE {
+            let le = encoding == encoding_rs::UTF_16LE;
+            if self.bom {
+                out.extend_from_slice(if le { &[0xFF, 0xFE] } else { &[0xFE, 0xFF] });
+            }
+            for unit in self.text.encode_utf16() {
+                out.extend_from_slice(&if le { unit.to_le_bytes() } else { unit.to_be_bytes() });
+            }
+            return Ok(out);
+        }
+        if self.bom && encoding == encoding_rs::UTF_8 {
+            out.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+        }
+        let (bytes, _, unmappable) = encoding.encode(&self.text);
+        if unmappable {
+            let bad = self.text.chars().find(|c| encoding.encode(c.encode_utf8(&mut [0; 4])).2);
+            return Err(format!(
+                "{} cannot store the character {}",
+                encoding.name(),
+                bad.map_or(String::new(), |c| format!("'{c}' (U+{:04X})", c as u32))
+            ));
+        }
+        out.extend_from_slice(&bytes);
+        Ok(out)
     }
 }
 
@@ -68,11 +144,12 @@ pub fn decode(data: &[u8]) -> TextDoc {
     };
     let (text, _) = encoding.decode_without_bom_handling(&data[bom_len..]);
     let text = text.into_owned();
-    let (lines, line_ending) = split_lines(&text);
-    TextDoc { text, lines, encoding: encoding.name(), bom: bom_len > 0, line_ending }
+    let (lines, line_ending, newline) = split_lines(&text);
+    TextDoc { text, lines, encoding: encoding.name(), bom: bom_len > 0, line_ending, newline }
 }
 
-fn split_lines(text: &str) -> (Vec<Range<usize>>, LineEnding) {
+/// Line ranges, the line ending style, and the most common terminator.
+fn split_lines(text: &str) -> (Vec<Range<usize>>, LineEnding, &'static str) {
     let bytes = text.as_bytes();
     let mut lines = Vec::with_capacity(bytes.len() / 40 + 1);
     let (mut lf, mut crlf, mut cr) = (0usize, 0usize, 0usize);
@@ -111,7 +188,14 @@ fn split_lines(text: &str) -> (Vec<Range<usize>>, LineEnding) {
         (1, _, _) => LineEnding::Cr,
         _ => LineEnding::Mixed,
     };
-    (lines, ending)
+    let newline = if crlf > lf && crlf >= cr {
+        "\r\n"
+    } else if cr > lf && cr > crlf {
+        "\r"
+    } else {
+        "\n"
+    };
+    (lines, ending, newline)
 }
 
 /// Length of a string in UTF-16 code units, the unit JavaScript string offsets use.
@@ -131,6 +215,36 @@ mod tests {
         assert_eq!(decode(b"a\nb\r\n").line_ending, LineEnding::Mixed);
         assert_eq!(decode(b"a\n").len(), 1);
         assert_eq!(decode(b"").len(), 0);
+    }
+
+    #[test]
+    fn offsets_and_splices() {
+        let mut doc = decode("añ😀b\r\nc".as_bytes());
+        assert_eq!(doc.newline, "\r\n");
+        // "ñ" is one UTF-16 unit, the emoji two.
+        assert_eq!(doc.offset(0, 2), 3);
+        assert_eq!(doc.offset(0, 4), 7);
+        assert_eq!(doc.offset(0, 99), 8);
+        assert_eq!(doc.offset(5, 0), doc.text.len());
+        let removed = doc.splice(doc.lines[0].end..doc.lines[1].start, "");
+        assert_eq!(removed, "\r\n");
+        assert_eq!((doc.len(), doc.line(0)), (1, "añ😀bc"));
+    }
+
+    #[test]
+    fn encode_round_trips() {
+        for data in [
+            &b"plain\nascii\n"[..],
+            b"\xEF\xBB\xBFbom \xC3\xA4\r\n",
+            b"Gr\xFC\xDFe aus K\xF6ln, sch\xF6ne Gr\xFC\xDFe\n",
+            b"\xFF\xFEh\x00i\x00\n\x00",
+            b"\xFE\xFF\x00h\x00i",
+        ] {
+            assert_eq!(decode(data).encode().unwrap(), data);
+        }
+        let mut latin1 = decode(b"Gr\xFC\xDFe aus K\xF6ln, sch\xF6ne Gr\xFC\xDFe");
+        latin1.splice(0..0, "😀");
+        assert!(latin1.encode().unwrap_err().contains("U+1F600"));
     }
 
     #[test]

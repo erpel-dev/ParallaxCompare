@@ -121,6 +121,40 @@ pub struct CompareResult {
     pub summary: Summary,
 }
 
+/// Exclude patterns, matched against entry names and relative paths.
+pub struct Excludes(GlobSet);
+
+impl Excludes {
+    pub fn new(patterns: &[String]) -> Result<Self> {
+        let mut builder = GlobSetBuilder::new();
+        for pattern in patterns {
+            builder.add(Glob::new(pattern).map_err(|e| Error::InvalidSource(format!("exclude pattern: {e}")))?);
+        }
+        builder.build().map(Excludes).map_err(|e| Error::InvalidSource(format!("exclude pattern: {e}")))
+    }
+
+    /// Whether the entry at `rel`, named `name`, is excluded.
+    pub fn matches(&self, rel: &str, name: &str) -> bool {
+        !self.0.is_empty() && (self.0.is_match(name) || self.0.is_match(rel))
+    }
+
+    /// Whether `rel` or a folder above it is excluded, so the compare never sees it.
+    pub fn covers(&self, rel: &str) -> bool {
+        if self.0.is_empty() {
+            return false;
+        }
+        let mut end = 0;
+        for part in rel.split('/') {
+            end += part.len();
+            if self.matches(&rel[..end], part) {
+                return true;
+            }
+            end += 1;
+        }
+        false
+    }
+}
+
 /// Cancellation and progress shared with the caller.
 #[derive(Debug, Default)]
 pub struct Control {
@@ -143,7 +177,7 @@ struct Engine<'a> {
     left: &'a Source,
     right: &'a Source,
     opts: &'a CompareOptions,
-    excludes: GlobSet,
+    excludes: Excludes,
     control: &'a Control,
     counters: Counters,
 }
@@ -201,17 +235,12 @@ fn as_container(mut e: Entry) -> Entry {
 
 impl<'a> Engine<'a> {
     fn new(left: &'a Source, right: &'a Source, opts: &'a CompareOptions, control: &'a Control) -> Result<Self> {
-        let mut builder = GlobSetBuilder::new();
-        for pattern in &opts.excludes {
-            let glob = Glob::new(pattern).map_err(|e| Error::InvalidSource(format!("exclude pattern: {e}")))?;
-            builder.add(glob);
-        }
-        let excludes = builder.build().map_err(|e| Error::InvalidSource(format!("exclude pattern: {e}")))?;
+        let excludes = Excludes::new(&opts.excludes)?;
         Ok(Engine { left, right, opts, excludes, control, counters: Counters::default() })
     }
 
     fn excluded(&self, rel: &str, name: &str) -> bool {
-        !self.excludes.is_empty() && (self.excludes.is_match(name) || self.excludes.is_match(rel))
+        self.excludes.matches(rel, name)
     }
 
     fn node(&self, rel: &str, name: String, l: Option<Entry>, r: Option<Entry>, is_root: bool) -> Node {

@@ -125,7 +125,7 @@ export function replaceNode(root: Node, path: string, replacement: Node | null):
   if (replacement) {
     replacement.name = name;
     if (index >= 0) children[index] = replacement;
-    else children.push(replacement);
+    else children.splice(insertionIndex(children, replacement), 0, replacement);
   } else if (index >= 0) {
     children.splice(index, 1);
   }
@@ -141,6 +141,42 @@ export function replaceNode(root: Node, path: string, replacement: Node | null):
           : "different";
     }
   }
+}
+
+/** Where a new child goes in the order the compare engine uses: folders first, then by name. */
+function insertionIndex(children: Node[], node: Node): number {
+  const key = (n: Node): [number, string, string] => [isContainer(n) ? 0 : 1, n.name.toLowerCase(), n.name];
+  const k = key(node);
+  const i = children.findIndex((c) => {
+    const ck = key(c);
+    return ck[0] > k[0] || (ck[0] === k[0] && (ck[1] > k[1] || (ck[1] === k[1] && ck[2] > k[2])));
+  });
+  return i < 0 ? children.length : i;
+}
+
+/**
+ * The path to compare again so that a change at `path` shows: the path itself
+ * when its parent's children are loaded, otherwise the deepest loaded ancestor.
+ */
+export function refreshTarget(root: Node, path: string): string {
+  let node = root;
+  let at = "";
+  for (const part of path.split("/").filter(Boolean)) {
+    if (node.unexpanded || !node.children) return at;
+    const here = joinPath(at, part);
+    const child = node.children.find((c) => c.name === part);
+    // New: compared as a whole and inserted.
+    if (!child) return here;
+    node = child;
+    at = here;
+  }
+  return path;
+}
+
+/** Files below `node` (or `node` itself), with their paths. */
+export function filesBelow(node: Node, path: string): { node: Node; path: string }[] {
+  if (!isContainer(node) || node.unexpanded) return [{ node, path }];
+  return (node.children ?? []).flatMap((c) => filesBelow(c, joinPath(path, c.name)));
 }
 
 export function findNode(root: Node, path: string): Node | undefined {
