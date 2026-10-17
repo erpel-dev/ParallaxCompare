@@ -9,23 +9,29 @@ mod a2l;
 mod android;
 mod binary;
 mod cdfx;
+mod cert;
 mod chat;
 mod class;
+mod data;
 mod dbc;
 mod dotnet;
 mod dwarf;
+mod email;
 pub mod gguf;
 mod image_diff;
 mod image_meta;
 mod linkmap;
+mod lockfile;
 mod mdf;
 mod media;
+mod notebook;
 mod office;
 mod onnx;
 mod parquet;
 mod pretty;
 mod safetensors;
 mod sqlite;
+mod table;
 mod wasm;
 
 use serde::{Deserialize, Serialize};
@@ -106,6 +112,22 @@ pub enum View {
     ImageMetadata,
     /// Audio and video files: container, duration, tracks, tags, chapters, attachments.
     MediaSummary,
+    /// Lockfile: one line per pinned package and version.
+    Dependencies,
+    /// Certificates, requests, CRLs and keys (PEM, DER, PKCS#12), decoded.
+    Certificate,
+    /// E-mail (.eml, .msg): main headers, body text and attachments.
+    Email,
+    /// CSV/TSV: the header, then the rows sorted by the key column.
+    Table,
+    /// Jupyter notebook: cell sources and outputs in short form.
+    Notebook,
+    /// Jupyter notebook: cell sources only.
+    NotebookCode,
+    /// YAML with keys sorted and one layout.
+    NormalizedYaml,
+    /// TOML with keys sorted and one layout.
+    NormalizedToml,
 }
 
 impl View {
@@ -145,6 +167,14 @@ impl View {
             View::Calibration => "Calibration values",
             View::ImageMetadata => "Image metadata",
             View::MediaSummary => "Media summary",
+            View::Dependencies => "Dependencies",
+            View::Certificate => "Certificate",
+            View::Email => "E-mail",
+            View::Table => "Table, sorted by key",
+            View::Notebook => "Notebook",
+            View::NotebookCode => "Notebook, code only",
+            View::NormalizedYaml => "Normalized YAML",
+            View::NormalizedToml => "Normalized TOML",
         }
     }
 }
@@ -186,6 +216,16 @@ enum Kind {
     /// HEIF and AVIF images: metadata only, the pixels are not decoded.
     Heif,
     Media,
+    Notebook,
+    Lockfile,
+    Yaml,
+    Toml,
+    Table,
+    Pem,
+    DerCert,
+    Pkcs12,
+    Eml,
+    Msg,
 }
 
 fn extension(name: &str) -> String {
@@ -234,11 +274,20 @@ fn kind_of(name: &str, data: &[u8]) -> Kind {
             return Kind::Odf;
         }
     }
+    if email::is_msg(&ext, data) {
+        return Kind::Msg;
+    }
     if starts(&[0xD0, 0xCF, 0x11, 0xE0]) && matches!(ext.as_str(), "doc" | "xls" | "ppt" | "dot" | "xlt" | "pot") {
         return Kind::LegacyOffice;
     }
     if starts(b"MZ") && dotnet::is_managed(data) {
         return Kind::DotNet;
+    }
+    if cert::is_pkcs12(&ext, data) {
+        return Kind::Pkcs12;
+    }
+    if cert::is_der(&ext, data) {
+        return Kind::DerCert;
     }
     if starts(b"\x7FELF")
         || starts(b"MZ")
@@ -280,6 +329,27 @@ fn kind_of(name: &str, data: &[u8]) -> Kind {
     }
     if matches!(ext.as_str(), "cdfx" | "cdf") && cdfx::is_cdfx(data) {
         return Kind::Cdfx;
+    }
+    if cert::is_pem(&ext, data) {
+        return Kind::Pem;
+    }
+    if email::is_eml(&ext) {
+        return Kind::Eml;
+    }
+    if lockfile::format_of(name).is_some() {
+        return Kind::Lockfile;
+    }
+    if notebook::is_notebook(&ext, data) {
+        return Kind::Notebook;
+    }
+    if matches!(ext.as_str(), "yaml" | "yml") {
+        return Kind::Yaml;
+    }
+    if ext == "toml" {
+        return Kind::Toml;
+    }
+    if table::is_table(&ext) {
+        return Kind::Table;
     }
     if crate::highlight::is_xml_name(name) || data.starts_with(b"<?xml") {
         return Kind::Xml;
@@ -325,6 +395,15 @@ pub fn views_for(name: &str, data: &[u8]) -> Vec<View> {
         Kind::LinkMap => vec![View::MemoryMap, View::Text],
         Kind::Mdf => vec![View::Measurement],
         Kind::Cdfx => vec![View::Calibration, View::Text, View::PrettyXml],
+        Kind::Notebook => vec![View::Notebook, View::NotebookCode, View::Text],
+        Kind::Lockfile => vec![View::Dependencies, View::Text],
+        Kind::Yaml => vec![View::Text, View::NormalizedYaml],
+        Kind::Toml => vec![View::Text, View::NormalizedToml],
+        Kind::Table => vec![View::Text, View::Table],
+        Kind::Pem => vec![View::Certificate, View::Text],
+        Kind::DerCert | Kind::Pkcs12 => vec![View::Certificate],
+        Kind::Eml => vec![View::Email, View::Text],
+        Kind::Msg => vec![View::Email],
     };
     views.push(View::Hex);
     views
@@ -385,53 +464,84 @@ pub fn render(view: View, name: &str, data: &[u8]) -> Result<String> {
         View::Calibration => cdfx::values(&text::decode(data).text),
         View::ImageMetadata => image_meta::metadata(data),
         View::MediaSummary => media::summary(&extension(name), data),
+        View::Dependencies => lockfile::dependencies(name, data),
+        View::Certificate => match kind_of(name, data) {
+            Kind::Pem => cert::pem(data),
+            Kind::DerCert => cert::der(data),
+            Kind::Pkcs12 => cert::pkcs12(data),
+            _ => Err(Error::Unsupported(format!("{name} is not a certificate or key"))),
+        },
+        View::Email => email::render(&extension(name), data),
+        View::Table => table::sorted(&extension(name), data),
+        View::Notebook => notebook::render(data, true),
+        View::NotebookCode => notebook::render(data, false),
+        View::NormalizedYaml => data::normalized_yaml(data),
+        View::NormalizedToml => data::normalized_toml(data),
     }
 }
 
 /// Whether [`content_equal`] can apply to a file, judged by its name alone.
 pub fn has_content_rule(name: &str) -> bool {
-    matches!(
-        extension(name).as_str(),
-        "pdf"
-            | "docx"
-            | "docm"
-            | "xlsx"
-            | "xlsm"
-            | "pptx"
-            | "pptm"
-            | "odt"
-            | "ods"
-            | "odp"
-            | "png"
-            | "jpg"
-            | "jpeg"
-            | "gif"
-            | "bmp"
-            | "webp"
-            | "tif"
-            | "tiff"
-            | "ico"
-            | "class"
-            | "db"
-            | "sqlite"
-            | "sqlite3"
-            | "db3"
-            | "safetensors"
-            | "wasm"
-            | "dll"
-            | "exe"
-            | "winmd"
-            | "dbc"
-            | "a2l"
-            | "cdfx"
-            | "cdf"
-            | "mp3"
-            | "flac"
-            | "wav"
-            | "aif"
-            | "aiff"
-            | "aifc"
-    )
+    lockfile::format_of(name).is_some()
+        || matches!(
+            extension(name).as_str(),
+            "a2l"
+                | "aif"
+                | "aifc"
+                | "aiff"
+                | "bmp"
+                | "cdf"
+                | "cdfx"
+                | "cer"
+                | "cert"
+                | "class"
+                | "crl"
+                | "crt"
+                | "csr"
+                | "csv"
+                | "db"
+                | "db3"
+                | "dbc"
+                | "der"
+                | "dll"
+                | "docm"
+                | "docx"
+                | "eml"
+                | "exe"
+                | "flac"
+                | "gif"
+                | "ico"
+                | "ipynb"
+                | "jpeg"
+                | "jpg"
+                | "key"
+                | "mp3"
+                | "msg"
+                | "odp"
+                | "ods"
+                | "odt"
+                | "pdf"
+                | "pem"
+                | "png"
+                | "pptm"
+                | "pptx"
+                | "pub"
+                | "safetensors"
+                | "sqlite"
+                | "sqlite3"
+                | "tif"
+                | "tiff"
+                | "toml"
+                | "tsv"
+                | "wasm"
+                | "wav"
+                | "webp"
+                | "winmd"
+                | "xlsm"
+                | "xlsx"
+                | "yaml"
+                | "yml"
+        )
 }
 
 /// Whether two byte-different files have equal content, for formats where
@@ -440,6 +550,15 @@ pub fn has_content_rule(name: &str) -> bool {
 /// has no such notion.
 pub fn content_equal(name: &str, left: &[u8], right: &[u8]) -> Option<&'static str> {
     let (kl, kr) = (kind_of(name, left), kind_of(name, right));
+    // The same certificate as PEM on one side and DER on the other.
+    if matches!(kl, Kind::Pem | Kind::DerCert) && matches!(kr, Kind::Pem | Kind::DerCert) {
+        let same = cert::same_objects((left, kl == Kind::Pem), (right, kr == Kind::Pem))?;
+        return same.then_some(if kl == kr {
+            "same certificates and keys, different PEM text"
+        } else {
+            "same certificates, different encoding"
+        });
+    }
     if kl != kr {
         return None;
     }
@@ -472,6 +591,24 @@ pub fn content_equal(name: &str, left: &[u8], right: &[u8]) -> Option<&'static s
         Kind::Cdfx => {
             return cdfx::same_values(&text::decode(left).text, &text::decode(right).text)?
                 .then_some("same values, only order or formatting differ");
+        }
+        Kind::Lockfile => {
+            return lockfile::same_packages(name, left, right)?
+                .then_some("same packages and versions, only order or formatting differ");
+        }
+        Kind::Notebook => {
+            return notebook::same_cells(left, right)?.then_some("same cells, only outputs or metadata differ");
+        }
+        Kind::Eml | Kind::Msg => {
+            return email::same_message(&extension(name), left, right)?
+                .then_some("same message, only transport headers or encoding differ");
+        }
+        Kind::Table => return table::same_rows(&extension(name), left, right),
+        Kind::Yaml => {
+            return data::same_yaml(left, right)?.then_some("same data, only formatting, order or comments differ");
+        }
+        Kind::Toml => {
+            return data::same_toml(left, right)?.then_some("same data, only formatting, order or comments differ");
         }
         _ => false,
     };
@@ -553,5 +690,74 @@ mod tests {
             Some("same tensors, only metadata differs")
         );
         assert_eq!(content_equal("m.safetensors", st, fixture!("safetensors/tiny-v2.safetensors")), None);
+    }
+
+    #[test]
+    fn detects_developer_formats() {
+        let fixture = |p: &str| std::fs::read(format!("{}/tests/fixtures/{p}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let first = |name: &str, data: &[u8]| views_for(name, data)[0];
+        assert_eq!(first("a.ipynb", &fixture("notebook/analysis-v1.ipynb")), View::Notebook);
+        assert_eq!(
+            first("a.json", &fixture("notebook/analysis-v1.ipynb")),
+            View::Text,
+            "a notebook needs its extension"
+        );
+        assert_eq!(first("a.ipynb", b"{\"cells\": 1}"), View::Text);
+        assert_eq!(first("web/package-lock.json", &fixture("lockfile/npm-v3/package-lock.json")), View::Dependencies);
+        assert_eq!(first("package.json", &fixture("lockfile/npm-v3/package.json")), View::Text);
+        assert_eq!(first("Cargo.lock", b"\x00\x01"), View::Hex, "binary data is never a lockfile");
+        assert_eq!(views_for("x.yaml", b"a: 1\n"), vec![View::Text, View::NormalizedYaml, View::Hex]);
+        assert_eq!(views_for("pnpm-lock.yaml", b"lockfileVersion: '9.0'\n")[0], View::Dependencies);
+        assert_eq!(views_for("Cargo.toml", b"[a]\n"), vec![View::Text, View::NormalizedToml, View::Hex]);
+        assert_eq!(views_for("t.csv", b"a,b\n1,2\n"), vec![View::Text, View::Table, View::Hex]);
+        assert_eq!(first("s.pem", &fixture("cert/server.pem")), View::Certificate);
+        assert_eq!(first("s.txt", &fixture("cert/server.pem")), View::Certificate);
+        assert_eq!(first("s.der", &fixture("cert/server.der")), View::Certificate);
+        assert_eq!(first("s.bin", &fixture("cert/server.der")), View::Hex);
+        assert_eq!(first("b.p12", &fixture("cert/bundle.p12")), View::Certificate);
+        assert_eq!(first("m.eml", &fixture("email/order.eml")), View::Email);
+        assert_eq!(first("m.msg", &fixture("email/order.msg")), View::Email);
+        assert_eq!(first("m.doc", &fixture("email/order.msg")), views_for("m.doc", b"\xD0\xCF\x11\xE0")[0]);
+    }
+
+    #[test]
+    fn similar_rules_of_developer_formats() {
+        let fixture = |p: &str| std::fs::read(format!("{}/tests/fixtures/{p}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let eq = |name: &str, a: &str, b: &str| content_equal(name, &fixture(a), &fixture(b));
+        assert_eq!(
+            eq("a.ipynb", "notebook/analysis-v1.ipynb", "notebook/analysis-v1-rerun.ipynb"),
+            Some("same cells, only outputs or metadata differ")
+        );
+        assert_eq!(eq("a.ipynb", "notebook/analysis-v1.ipynb", "notebook/analysis-v2.ipynb"), None);
+        assert_eq!(
+            eq("package-lock.json", "lockfile/npm-v2/package-lock.json", "lockfile/npm-v3/package-lock.json"),
+            Some("same packages and versions, only order or formatting differ")
+        );
+        assert_eq!(
+            eq("c.yaml", "data/compose.yaml", "data/compose-reformatted.yaml"),
+            Some("same data, only formatting, order or comments differ")
+        );
+        assert_eq!(
+            eq("Cargo.toml", "data/Cargo.toml", "data/Cargo-reordered.toml"),
+            Some("same data, only formatting, order or comments differ")
+        );
+        assert_eq!(
+            eq("p.csv", "table/products.csv", "table/products-shuffled.csv"),
+            Some("same rows, different order")
+        );
+        assert_eq!(eq("s.crt", "cert/server.pem", "cert/server.der"), Some("same certificates, different encoding"));
+        assert_eq!(
+            eq("s.pem", "cert/server.pem", "cert/server-with-text.pem"),
+            Some("same certificates and keys, different PEM text")
+        );
+        assert_eq!(eq("s.pem", "cert/server.pem", "cert/server-renewed.pem"), None);
+        assert_eq!(
+            eq("m.eml", "email/order.eml", "email/order-base64.eml"),
+            Some("same message, only transport headers or encoding differ")
+        );
+        for name in ["a.ipynb", "Cargo.lock", "go.sum", "a.yml", "a.toml", "a.tsv", "a.crt", "a.eml", "a.msg"] {
+            assert!(has_content_rule(name), "{name}");
+        }
+        assert!(!has_content_rule("a.p12"));
     }
 }

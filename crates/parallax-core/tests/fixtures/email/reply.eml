@@ -1,0 +1,14 @@
+From: Shop Team <team@example.org>
+To: =?utf-8?q?J=C3=BCrgen_M=C3=BCller?= <juergen@example.com>
+Subject: Re: Bestellung Nr. 4711 =?utf-8?q?=E2=80=93_=C3=84nderung?=
+Date: Thu, 01 Oct 2026 10:30:00 +0200
+Message-ID: <reply-4711@example.org>
+In-Reply-To: <order-4711@example.com>
+References: <order-4711@example.com>
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+MIME-Version: 1.0
+
+Erledigt.
+
+> bitte die Menge auf 12 Stück ändern.
