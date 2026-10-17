@@ -2,6 +2,10 @@
 //!
 //! Exit status follows `diff`: 0 identical, 1 different, 2 error.
 
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
 

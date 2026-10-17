@@ -1,29 +1,85 @@
 name: Release
 
-# Builds installers for Windows (MSI, NSIS) and Linux (deb, rpm, AppImage)
-# and attaches them to a draft GitHub release for the pushed tag.
+# Builds standalone executables and publishes them as a GitHub release:
+#   Windows: the app as one portable .exe and the CLI, static C runtime
+#   Linux:   the app as an AppImage and the CLI as a static (musl) binary
+# Tags with a pre-release suffix or a 0.x.y version are published as pre-releases.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build and release, e.g. v0.0.1
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
-  bundle:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-22.04, windows-latest]
-    runs-on: ${{ matrix.os }}
-    permissions:
-      contents: write
+  linux:
+    runs-on: ubuntu-22.04
+    env:
+      # linuxdeploy is itself an AppImage; runners have no FUSE.
+      APPIMAGE_EXTRACT_AND_RUN: 1
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
 
-      - name: Install Linux dependencies
-        if: runner.os == 'Linux'
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev musl-tools
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+        working-directory: app
+
+      - name: Build CLI (static)
+        run: cargo build --release --locked -p parallax-cli --target x86_64-unknown-linux-musl
+
+      - name: Build AppImage
+        working-directory: app
+        run: npm run tauri build -- --bundles appimage
+
+      - name: Stage files
+        run: |
+          mkdir dist
+          cp target/release/bundle/appimage/*.AppImage "dist/ParallaxCompare-${TAG}-linux-x86_64.AppImage"
+          cp target/x86_64-unknown-linux-musl/release/parallax "dist/parallax-${TAG}-linux-x86_64"
+          chmod +x dist/*
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    env:
+      # Link the C runtime statically so the executables need no VC++ redistributable.
+      # Set per target (with --target below) so build scripts and proc-macros are unaffected.
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -33,30 +89,54 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: app/package-lock.json
-
       - run: npm ci
         working-directory: app
 
       - name: Build CLI
-        run: cargo build --release -p parallax-cli
+        run: cargo build --release --locked -p parallax-cli --target x86_64-pc-windows-msvc
 
-      - uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          projectPath: app
-          tagName: ${{ github.ref_name }}
-          releaseName: ParallaxCompare ${{ github.ref_name }}
-          releaseDraft: true
+      - name: Build app
+        working-directory: app
+        run: npm run tauri build -- --no-bundle --target x86_64-pc-windows-msvc
 
-      - name: Attach CLI
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Stage files
         shell: bash
+        run: |
+          mkdir dist
+          cp target/x86_64-pc-windows-msvc/release/parallax-compare.exe "dist/ParallaxCompare-${TAG}-windows-x64.exe"
+          cp target/x86_64-pc-windows-msvc/release/parallax.exe "dist/parallax-${TAG}-windows-x64.exe"
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum * | tee SHA256SUMS.txt
+
+      - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          exe=target/release/parallax
-          [ "$RUNNER_OS" = "Windows" ] && exe=target/release/parallax.exe
-          name="parallax-${{ github.ref_name }}-${RUNNER_OS,,}$([ "$RUNNER_OS" = "Windows" ] && echo .exe)"
-          cp "$exe" "$name"
-          gh release upload "${{ github.ref_name }}" "$name" --clobber
+          notes="docs/releases/${TAG}.md"
+          [ -f "$notes" ] || { echo "Release ${TAG}" > /tmp/notes.md; notes=/tmp/notes.md; }
+          prerelease=""
+          case "$TAG" in v0.*|*-*) prerelease="--prerelease" ;; esac
+          gh release create "$TAG" dist/* --verify-tag $prerelease \
+            --title "ParallaxCompare ${TAG#v}" --notes-file "$notes"
