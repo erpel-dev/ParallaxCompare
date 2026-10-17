@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from "svelte";
-  import { api, defaultDiffOptions, theme, type FileDiffInfo, type LineView, type RowView, type SessionInfo } from "./api";
+  import { api, defaultDiffOptions, theme, type FileDiffInfo, type LineView, type RowView, type SessionInfo, type View } from "./api";
+  import ImagePanel from "./ImagePanel.svelte";
   import PathBar from "./PathBar.svelte";
   import { formatSize } from "./format";
 
@@ -12,6 +13,7 @@
 
   let options = $state(defaultDiffOptions());
   let syntaxOverride = $state<string>("");
+  let view = $state<View | null>(null);
   let syntaxNames = $state<string[]>([]);
   let info = $state<FileDiffInfo | null>(null);
   let error = $state("");
@@ -48,7 +50,8 @@
     error = "";
     const previous = info?.id;
     try {
-      info = await api.openFileDiff(session.id, path, $state.snapshot(options), syntaxOverride || null);
+      info = await api.openFileDiff(session.id, path, $state.snapshot(options), syntaxOverride || null, view);
+      view = info.view;
       cache = new Map();
       pending = new Set();
       cacheVersion++;
@@ -159,8 +162,12 @@
     return out;
   }
 
-  const eolLabel = (s: FileDiffInfo["left"]) =>
-    !s.exists ? "missing" : s.binary ? `binary · ${formatSize(s.size)}` : `${s.encoding}${s.bom ? " BOM" : ""} · ${s.lineEnding}`;
+  const eolLabel = (s: FileDiffInfo["left"]) => {
+    if (!s.exists) return "missing";
+    if (info?.view === "image") return formatSize(s.size);
+    const kind = info?.view === "text" ? `${s.encoding}${s.bom ? " BOM" : ""} · ${s.lineEnding}` : s.encoding;
+    return `${kind} · ${formatSize(s.size)} · ${s.lines.toLocaleString()} lines`;
+  };
 
   onMount(() => {
     load();
@@ -182,6 +189,15 @@
 
 <div class="view">
   <div class="toolbar">
+    {#if info && info.views.length > 1}
+      <select bind:value={view} onchange={() => { syntaxOverride = ""; load(); }} title="How the files are shown">
+        {#each info.views as v (v.id)}
+          <option value={v.id}>{v.label}</option>
+        {/each}
+      </select>
+      <span class="sep"></span>
+    {/if}
+{#if info?.view !== "image"}
     <button onclick={() => next(-1)} disabled={!info?.sections.length} title="Previous difference (F7)">◀ Prev</button>
     <button onclick={() => next(1)} disabled={!info?.sections.length} title="Next difference (F8)">Next ▶</button>
     {#if info}
@@ -194,7 +210,8 @@
       <option value="ignoreAll">Whitespace: ignore all</option>
     </select>
     <button class:on={options.ignoreCase} onclick={() => { options.ignoreCase = !options.ignoreCase; load(); }}>Ignore case</button>
-    <button class:on={options.minimal} onclick={() => { options.minimal = !options.minimal; load(); }} title="Myers (minimal) instead of histogram">Minimal diff</button>
+    <button class:on={options.histogram} onclick={() => { options.histogram = !options.histogram; load(); }} title="Histogram diff instead of Myers: can read better for moved code, slower on files with many repeated lines">Histogram</button>
+    {#if info?.view === "text" || info?.view === "prettyXml" || info?.view === "prettyJson"}
     <span class="sep"></span>
     <select bind:value={syntaxOverride} onchange={load} title="Syntax highlighting">
       <option value="">Syntax: auto{info?.syntax && !syntaxOverride ? ` (${info.syntax})` : ""}</option>
@@ -202,6 +219,8 @@
         <option value={name}>{name}</option>
       {/each}
     </select>
+    {/if}
+    {/if}
   </div>
 
   <div class="pathbars">
@@ -217,16 +236,19 @@
 
   {#if error}
     <div class="banner err">{error}</div>
-  {:else if info?.left.binary || info?.right.binary}
-    <div class="banner">
-      Binary files {info.identical ? "are identical" : "differ"} ({formatSize(info.left.size)} vs {formatSize(info.right.size)}).
-    </div>
-  {:else if info?.identical}
+  {:else if info?.note}
+    <div class="banner">{info.note}</div>
+  {:else if info?.identical && info.view !== "image"}
     <div class="banner ok">The files are identical.</div>
-  {:else if info && !info.sections.length && !loading}
-    <div class="banner ok">No differences under the current rules{info.stats.minor ? ` (${info.stats.minor} lines differ only in ignored whitespace or case)` : ""}.</div>
+  {:else if info && info.view !== "image" && !info.sections.length && !loading}
+    <div class="banner ok">
+      No differences in this view{info.view !== "text" ? " — the files differ only in bytes this view does not show" : ""}{info.stats.minor ? ` (${info.stats.minor} lines differ only in ignored whitespace or case)` : ""}.
+    </div>
   {/if}
 
+  {#if info?.view === "image" && info.image}
+    <ImagePanel image={info.image} />
+  {:else}
   <div class="body">
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <div class="overview" onclick={overviewClick} title="Overview: click to jump">
@@ -259,7 +281,7 @@
                 {/if}
                 {#if line}
                   <div class="ln">{line.n + 1}</div>
-                  <div class="code"><span style:transform="translateX({-hscroll}px)">{#each segments(line) as seg, si (si)}<span class:mk={seg.mark} style:color={seg.color}>{seg.text}</span>{/each}</span></div>
+                  <div class="code"><span style:transform="translateX({-hscroll}px)">{#each segments(line) as seg, si (si)}<span class:mk={seg.mark} style:color={seg.color}>{seg.text}</span>{/each}{#if line.x}<span class="cut" title="The line is cut for display">… {line.x.toLocaleString()} more characters</span>{/if}</span></div>
                 {:else if row}
                   <div class="ln fill"></div>
                   <div class="code fill"></div>
@@ -275,7 +297,9 @@
     </div>
   </div>
 
-  <div class="detail mono">
+  {/if}
+
+  <div class="detail mono" hidden={info?.view === "image"}>
     {#each [["Left", selectedRow?.l], ["Right", selectedRow?.r]] as const as [label, line] (label)}
       <div class="dline">
         <span class="lbl">{label}</span>
@@ -287,13 +311,15 @@
   <div class="status">
     {#if loading}
       <span>Comparing…</span>
+    {:else if info?.view === "image"}
+      <span>{info.views.find((v) => v.id === info?.view)?.label}</span>
     {:else if info}
       <span><b>{info.sections.length}</b> difference sections</span>
       <span class="c-diff">{info.stats.changed} changed</span>
       <span class="c-add">{info.stats.added} added</span>
       <span class="c-rem">{info.stats.removed} removed</span>
       {#if selected !== null}<span>Row {selected + 1} of {total}</span>{/if}
-      <span>{info.syntax ?? "Plain text"}</span>
+      <span>{info.view === "text" ? (info.syntax ?? "Plain text") : info.views.find((v) => v.id === info?.view)?.label}</span>
       <span class="hint">F7 / F8: previous / next difference · Shift+wheel: scroll sideways</span>
     {/if}
   </div>
@@ -455,6 +481,18 @@
   .mk {
     background: var(--mark);
     border-radius: 2px;
+  }
+  .cut {
+    margin-left: 8px;
+    padding: 0 6px;
+    border-radius: 3px;
+    background: var(--panel);
+    color: var(--dim);
+    font-family: var(--ui);
+    font-size: 11px;
+  }
+  .detail[hidden] {
+    display: none;
   }
   .detail {
     border-top: 1px solid var(--line);

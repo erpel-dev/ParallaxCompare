@@ -28,7 +28,7 @@ export interface SessionInfo {
 }
 
 export type EntryKind = "file" | "dir" | "archive" | "symlink" | "submodule";
-export type Status = "same" | "different" | "leftOnly" | "rightOnly" | "error";
+export type Status = "same" | "similar" | "different" | "leftOnly" | "rightOnly" | "error";
 
 export interface Side {
   kind: EntryKind;
@@ -49,6 +49,7 @@ export interface Node {
 export interface Summary {
   files: number;
   same: number;
+  similar: number;
   different: number;
   leftOnly: number;
   rightOnly: number;
@@ -66,12 +67,13 @@ export interface CompareOptions {
   mode: "quick" | "content";
   ignoreLineEndings: boolean;
   excludes: string[];
+  compareContents: boolean;
 }
 
 export interface DiffOptions {
   whitespace: "exact" | "normalize" | "ignoreAll";
   ignoreCase: boolean;
-  minimal: boolean;
+  histogram: boolean;
 }
 
 export type RowKind = "equal" | "minor" | "changed" | "removed" | "added";
@@ -83,6 +85,8 @@ export interface LineView {
   s: [number, number, number][];
   /** Changed character ranges. */
   m: [number, number][];
+  /** Characters cut from the end of a very long line. */
+  x?: number;
 }
 
 export interface RowView {
@@ -101,6 +105,24 @@ export interface FileSide {
   lines: number;
 }
 
+export type View = "text" | "document" | "executable" | "firmware" | "prettyXml" | "prettyJson" | "hex" | "image";
+
+export interface ImageSideView {
+  url: string;
+  width: number;
+  height: number;
+  format: string;
+}
+
+export interface ImageView {
+  left: ImageSideView | null;
+  right: ImageSideView | null;
+  mask: string | null;
+  differentPixels: number;
+  totalPixels: number;
+  bounds: [number, number, number, number] | null;
+}
+
 export interface FileDiffInfo {
   id: number;
   rows: number;
@@ -110,6 +132,10 @@ export interface FileDiffInfo {
   right: FileSide;
   syntax: string | null;
   identical: boolean;
+  view: View;
+  views: { id: View; label: string }[];
+  image: ImageView | null;
+  note: string | null;
 }
 
 export interface RefInfo {
@@ -149,9 +175,10 @@ export const defaultCompareOptions = (): CompareOptions => ({
   mode: "content",
   ignoreLineEndings: true,
   excludes: [".git", ".svn", ".hg"],
+  compareContents: true,
 });
 
-export const defaultDiffOptions = (): DiffOptions => ({ whitespace: "exact", ignoreCase: false, minimal: false });
+export const defaultDiffOptions = (): DiffOptions => ({ whitespace: "exact", ignoreCase: false, histogram: false });
 
 export const api = {
   startupRequest: () => invoke<StartupRequest | null>("startup_request"),
@@ -167,8 +194,8 @@ export const api = {
     invoke<Node>("copy_entry", { id, path, toRight, options }),
   deleteEntry: (id: number, path: string, left: boolean, options: CompareOptions) =>
     invoke<Node | null>("delete_entry", { id, path, left, options }),
-  openFileDiff: (id: number, path: string, options: DiffOptions, syntax: string | null) =>
-    invoke<FileDiffInfo>("open_file_diff", { id, path, options, syntax }),
+  openFileDiff: (id: number, path: string, options: DiffOptions, syntax: string | null, view: View | null) =>
+    invoke<FileDiffInfo>("open_file_diff", { id, path, options, syntax, view }),
   fileRows: (id: number, start: number, count: number, theme: "dark" | "light") =>
     invoke<RowView[]>("file_rows", { id, start, count, theme }),
   closeFileDiff: (id: number) => invoke<void>("close_file_diff", { id }),

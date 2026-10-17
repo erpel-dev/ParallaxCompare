@@ -3,13 +3,18 @@
 //! Uses syntect with the extended grammar set of `bat` (TypeScript, TOML,
 //! Dockerfile, … on top of the Sublime defaults). Parser state is check-pointed
 //! every [`CHECKPOINT_EVERY`] lines, so scrolling anywhere in a large file only
-//! parses from the nearest checkpoint instead of from the top.
+//! parses from the nearest checkpoint instead of from the top. A jump far past
+//! the parsed region starts a fresh parse shortly before the target instead,
+//! which is exact for almost all code and keeps the first paint fast.
+//!
+//! Extra grammars for automotive and embedded formats (A2L, DBC, Intel HEX,
+//! S-record) and for the generated content views live in `src/syntaxes`.
 
 use std::sync::LazyLock;
 
 use serde::Serialize;
 use syntect::highlighting::{Color, HighlightIterator, HighlightState, Highlighter, Theme};
-use syntect::parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet};
+use syntect::parsing::{ParseState, ScopeStack, SyntaxDefinition, SyntaxReference, SyntaxSet};
 
 use crate::text::{TextDoc, utf16_len};
 
@@ -19,7 +24,33 @@ const MAX_LINE_LEN: usize = 5_000;
 /// Documents larger than this are shown without highlighting.
 pub const MAX_DOC_BYTES: usize = 32 * 1024 * 1024;
 
-static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(two_face::syntax::extra_newlines);
+/// Parsing more than this many lines to reach a far target is replaced by a fresh
+/// parse [`RESYNC_LINES`] before it.
+const FAR_JUMP: usize = 3_000;
+const RESYNC_LINES: usize = 200;
+
+const CUSTOM_SYNTAXES: &[&str] = &[
+    include_str!("syntaxes/a2l.sublime-syntax"),
+    include_str!("syntaxes/dbc.sublime-syntax"),
+    include_str!("syntaxes/intel-hex.sublime-syntax"),
+    include_str!("syntaxes/srec.sublime-syntax"),
+    include_str!("syntaxes/parallax-views.sublime-syntax"),
+];
+
+/// XML dialects that the bundled XML grammar does not list.
+const XML_EXTENSIONS: &[&str] = &[
+    "arxml", "odx", "odx-d", "odx-c", "odx-v", "odx-f", "odx-e", "odx-cs", "odx-m", "cdd", "cdfx", "fibex", "xdm",
+    "epc", "ecuc", "svg", "xsd", "xsl", "xslt", "xaml", "plist", "resx", "nuspec", "props", "targets", "csproj",
+    "vcxproj", "xlf", "wsdl", "kml", "gpx", "xmi", "uml", "aird", "launch", "xml",
+];
+
+static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(|| {
+    let mut builder = two_face::syntax::extra_newlines().into_builder();
+    for source in CUSTOM_SYNTAXES {
+        builder.add(SyntaxDefinition::load_from_str(source, true, None).expect("bundled syntax definitions are valid"));
+    }
+    builder.build()
+});
 static THEMES: LazyLock<two_face::theme::EmbeddedLazyThemeSet> = LazyLock::new(two_face::theme::extra);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize, Default)]
@@ -46,10 +77,22 @@ pub struct Span(pub u32, pub u32, pub u32);
 pub fn detect_syntax(path: &str, first_line: &str) -> Option<&'static SyntaxReference> {
     let name = path.rsplit('/').next().unwrap_or(path);
     let ss = &*SYNTAXES;
+    let ext = name.rsplit_once('.').map(|(_, ext)| ext.to_ascii_lowercase());
     ss.find_syntax_by_extension(name)
-        .or_else(|| name.rsplit_once('.').and_then(|(_, ext)| ss.find_syntax_by_extension(ext)))
+        .or_else(|| ext.as_deref().and_then(|ext| ss.find_syntax_by_extension(ext)))
+        .or_else(|| ext.as_deref().filter(|e| XML_EXTENSIONS.contains(e)).and_then(|_| ss.find_syntax_by_name("XML")))
         .or_else(|| ss.find_syntax_by_first_line(first_line))
         .filter(|s| s.name != "Plain Text")
+}
+
+/// Whether a file name denotes XML, including dialects like ARXML or ODX.
+pub fn is_xml_name(path: &str) -> bool {
+    detect_syntax(path, "").is_some_and(|s| s.name == "XML")
+}
+
+/// The grammar for text produced by the content views.
+pub fn view_syntax() -> &'static SyntaxReference {
+    SYNTAXES.find_syntax_by_name("Parallax View").expect("bundled view syntax")
 }
 
 pub fn syntax_names() -> Vec<String> {
@@ -93,14 +136,19 @@ impl DocHighlighter {
         let default_fg = theme.settings.foreground.unwrap_or(Color::WHITE);
 
         let cp = (start / CHECKPOINT_EVERY).min(self.checkpoints.len());
-        let (mut parse, mut hl) = match cp {
-            0 => (ParseState::new(syntax), HighlightState::new(&highlighter, ScopeStack::new())),
-            n => self.checkpoints[n - 1].clone(),
+        let fresh = || (ParseState::new(syntax), HighlightState::new(&highlighter, ScopeStack::new()));
+        // Far beyond the exactly parsed region: resync shortly before the target and
+        // do not record checkpoints from this approximate state.
+        let resync = start - cp * CHECKPOINT_EVERY > FAR_JUMP;
+        let (first_line, (mut parse, mut hl)) = match (resync, cp) {
+            (true, _) => (start.saturating_sub(RESYNC_LINES), fresh()),
+            (false, 0) => (0, fresh()),
+            (false, n) => (n * CHECKPOINT_EVERY, self.checkpoints[n - 1].clone()),
         };
         let mut out = Vec::with_capacity(end - start);
         let mut line_buf = String::new();
-        for i in (cp * CHECKPOINT_EVERY)..end {
-            if i % CHECKPOINT_EVERY == 0 && i > 0 && self.checkpoints.len() < i / CHECKPOINT_EVERY {
+        for i in first_line..end {
+            if !resync && i % CHECKPOINT_EVERY == 0 && i > 0 && self.checkpoints.len() < i / CHECKPOINT_EVERY {
                 self.checkpoints.push((parse.clone(), hl.clone()));
             }
             let line = doc.line(i);
@@ -153,6 +201,11 @@ mod tests {
         assert_eq!(name("Cargo.toml", "").as_deref(), Some("TOML"));
         assert_eq!(name("script", "#!/bin/bash").as_deref(), Some("Bourne Again Shell (bash)"));
         assert_eq!(name("notes.unknownext", ""), None);
+        assert_eq!(name("system.arxml", "").as_deref(), Some("XML"));
+        assert_eq!(name("ecu.a2l", "").as_deref(), Some("A2L"));
+        assert_eq!(name("fw.hex", "").as_deref(), Some("Intel HEX"));
+        assert_eq!(name("fw.s19", "").as_deref(), Some("Motorola S-record"));
+        assert_eq!(name("can.dbc", "").as_deref(), Some("DBC"));
     }
 
     #[test]
@@ -166,5 +219,16 @@ mod tests {
         // Same result when reached from a checkpoint instead of from the top.
         let again = h.highlight(&doc, 900, 902);
         assert_eq!(late, again);
+    }
+
+    #[test]
+    fn far_jumps_resync_without_parsing_from_the_top() {
+        let src: String = (0..10_000).map(|i| format!("let x{i} = \"s\"; // c\n")).collect();
+        let doc = decode(src.as_bytes());
+        let mut far = DocHighlighter::new(detect_syntax("a.rs", ""), ThemeKind::Dark);
+        let jumped = far.highlight(&doc, 9_000, 9_002);
+        assert!(far.checkpoints.is_empty(), "approximate states are not cached");
+        let mut exact = DocHighlighter::new(detect_syntax("a.rs", ""), ThemeKind::Dark);
+        assert_eq!(jumped, exact.highlight(&doc, 0, 9_002)[9_000..].to_vec());
     }
 }

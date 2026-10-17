@@ -1,0 +1,21 @@
+%YAML 1.2
+---
+# Vector CAN database.
+name: DBC
+file_extensions: [dbc]
+scope: source.dbc
+contexts:
+  main:
+    - match: '"'
+      push: string
+    - match: ^\s*(BO_TX_BU_|BA_DEF_DEF_|BA_DEF_|BA_|BO_|SG_|BU_|VAL_TABLE_|VAL_|CM_|EV_|NS_|BS_|VERSION|SIG_VALTYPE_|SIG_GROUP_|SG_MUL_VAL_)\b
+      captures:
+        1: keyword.control.dbc
+    - match: \b(BO_|SG_|BU_|EV_)\b
+      scope: keyword.other.dbc
+    - match: (?<![\w.])-?[0-9]+(?:\.[0-9]+)?(?:[eE][-+]?[0-9]+)?\b
+      scope: constant.numeric.dbc
+  string:
+    - meta_scope: string.quoted.double.dbc
+    - match: '"'
+      pop: true

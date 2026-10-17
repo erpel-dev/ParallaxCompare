@@ -1,0 +1,22 @@
+%YAML 1.2
+---
+name: Intel HEX
+file_extensions: [hex, ihex, ihx, h86, mcs, a43]
+scope: source.intelhex
+contexts:
+  main:
+    - match: ^(:)([0-9A-Fa-f]{2})([0-9A-Fa-f]{4})(0[1-5])([0-9A-Fa-f]*?)([0-9A-Fa-f]{2})\s*$
+      captures:
+        1: punctuation.separator.intelhex
+        2: constant.numeric.intelhex
+        3: entity.name.tag.intelhex
+        4: keyword.control.intelhex
+        5: string.unquoted.intelhex
+        6: comment.line.intelhex
+    - match: ^(:)([0-9A-Fa-f]{2})([0-9A-Fa-f]{4})(00)([0-9A-Fa-f]*?)([0-9A-Fa-f]{2})\s*$
+      captures:
+        1: punctuation.separator.intelhex
+        2: constant.numeric.intelhex
+        3: entity.name.tag.intelhex
+        4: comment.line.intelhex
+        6: comment.line.intelhex

@@ -14,6 +14,7 @@
   --btn: #33363c;
   --btn-border: #45484f;
   --diff: #ff8a80;
+  --similar: #e5c07b;
   --left-only: #c9a6ff;
   --right-only: #7fd3f0;
   --error: #ff5c5c;
@@ -49,6 +50,7 @@
     --btn: #ffffff;
     --btn-border: #c9cdd3;
     --diff: #c2362f;
+    --similar: #a26d00;
     --left-only: #7b3fc4;
     --right-only: #0a7ea4;
     --error: #c2362f;

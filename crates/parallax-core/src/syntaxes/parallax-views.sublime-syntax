@@ -1,0 +1,26 @@
+%YAML 1.2
+---
+# Text produced by the content views (document text, executable summary, hex dumps).
+name: Parallax View
+scope: text.parallax
+hidden: true
+contexts:
+  main:
+    - match: ^=== .* ===$
+      scope: markup.heading.parallax entity.name.section.parallax
+    - match: ^--- .* ---$
+      scope: markup.heading.parallax entity.name.tag.parallax
+    - match: ^! .*$
+      scope: invalid.parallax markup.deleted.parallax
+    - match: ^([0-9A-F]{8})(  )
+      captures:
+        1: constant.numeric.address.parallax
+    - match: (\|)([^|]*)(\|)$
+      captures:
+        1: punctuation.parallax comment.parallax
+        2: string.unquoted.parallax
+        3: punctuation.parallax comment.parallax
+    - match: \b0x[0-9a-fA-F]+\b
+      scope: constant.numeric.hex.parallax
+    - match: ^[A-Z][A-Za-z ]+:(?=\s)
+      scope: keyword.other.parallax

@@ -28,3 +28,15 @@ fn folders_and_files() {
     let (code, _) = parallax(&["/definitely/missing", a.path().to_str().unwrap()]);
     assert_eq!(code, 2);
 }
+
+#[test]
+fn hunk_headers_follow_unified_diff() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (dir.path().join("a.txt"), dir.path().join("b.txt"));
+    fs::write(&a, "1\n2\n3\n").unwrap();
+    fs::write(&b, "1\n2\n3\n4\n").unwrap();
+    let (_, out) = parallax(&[a.to_str().unwrap(), b.to_str().unwrap(), "-U", "0"]);
+    assert!(out.contains("@@ -3,0 +4,1 @@\n+4\n"), "{out}");
+    let (_, out) = parallax(&[b.to_str().unwrap(), a.to_str().unwrap(), "-U", "0"]);
+    assert!(out.contains("@@ -4,1 +3,0 @@\n-4\n"), "{out}");
+}
