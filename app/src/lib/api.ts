@@ -125,7 +125,9 @@ export type View =
   | "tensors"
   | "classOutline"
   | "bytecode"
-  | "bytecodeLines";
+  | "bytecodeLines"
+  | "imageMetadata"
+  | "mediaSummary";
 
 export interface ImageSideView {
   url: string;
