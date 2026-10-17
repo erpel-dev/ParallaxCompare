@@ -5,11 +5,17 @@
 //! a minified XML file is one 5 MB line. Each [`View`] renders a file into text
 //! (or, for images, pixels) that the normal diff machinery can align.
 
+mod a2l;
 mod binary;
+mod cdfx;
 mod chat;
 mod class;
+mod dbc;
+mod dwarf;
 pub mod gguf;
 mod image_diff;
+mod linkmap;
+mod mdf;
 mod office;
 mod pretty;
 
@@ -57,6 +63,18 @@ pub enum View {
     Bytecode,
     /// Java class: the instructions with the source line numbers.
     BytecodeLines,
+    /// DBC: messages sorted by id with their signals, comments, attributes and value tables.
+    CanDatabase,
+    /// A2L: characteristics, measurements, conversions and the other objects, sorted by kind and name.
+    A2lObjects,
+    /// GNU ld / lld map: memory regions, output sections, size by object, symbols.
+    MemoryMap,
+    /// ELF with DWARF: global and static variables with types, functions with address ranges.
+    DebugSymbols,
+    /// MDF 3/4 measurement: header, channel groups and channels from the block tree.
+    Measurement,
+    /// CDFX calibration data: every instance's values, one per line, sorted by name.
+    Calibration,
 }
 
 impl View {
@@ -79,6 +97,12 @@ impl View {
             View::ClassOutline => "Class outline",
             View::Bytecode => "Bytecode",
             View::BytecodeLines => "Bytecode with line numbers",
+            View::CanDatabase => "CAN database",
+            View::A2lObjects => "A2L objects",
+            View::MemoryMap => "Memory map",
+            View::DebugSymbols => "Debug symbols",
+            View::Measurement => "Measurement summary",
+            View::Calibration => "Calibration values",
         }
     }
 }
@@ -105,6 +129,11 @@ enum Kind {
     Binary,
     Gguf,
     JavaClass,
+    Dbc,
+    A2l,
+    LinkMap,
+    Mdf,
+    Cdfx,
 }
 
 fn extension(name: &str) -> String {
@@ -120,6 +149,9 @@ fn kind_of(name: &str, data: &[u8]) -> Kind {
     }
     if starts(gguf::MAGIC) {
         return Kind::Gguf;
+    }
+    if mdf::is_mdf(data) {
+        return Kind::Mdf;
     }
     if class::is_class(data) {
         return Kind::JavaClass;
@@ -158,6 +190,18 @@ fn kind_of(name: &str, data: &[u8]) -> Kind {
     if matches!(ext.as_str(), "s19" | "s28" | "s37" | "srec" | "mot" | "sx" | "s") && first_char == Some(b'S') {
         return Kind::Srec;
     }
+    if ext == "dbc" {
+        return Kind::Dbc;
+    }
+    if ext == "a2l" {
+        return Kind::A2l;
+    }
+    if ext == "map" && linkmap::detect(data).is_some() {
+        return Kind::LinkMap;
+    }
+    if matches!(ext.as_str(), "cdfx" | "cdf") && cdfx::is_cdfx(data) {
+        return Kind::Cdfx;
+    }
     if crate::highlight::is_xml_name(name) || data.starts_with(b"<?xml") {
         return Kind::Xml;
     }
@@ -174,6 +218,7 @@ pub fn views_for(name: &str, data: &[u8]) -> Vec<View> {
         Kind::Pdf | Kind::Ooxml | Kind::Odf => vec![View::Document],
         Kind::LegacyOffice if office::soffice().is_some() => vec![View::Document],
         Kind::LegacyOffice | Kind::Binary => vec![],
+        Kind::Executable if dwarf::has_debug_info(data) => vec![View::Executable, View::DebugSymbols],
         Kind::Executable => vec![View::Executable],
         Kind::Raster => vec![View::Image],
         Kind::Svg => vec![View::Text, View::PrettyXml, View::Image],
@@ -187,6 +232,11 @@ pub fn views_for(name: &str, data: &[u8]) -> Vec<View> {
             vec![View::Model, View::ChatTemplate, View::ChatPreview, View::Metadata, View::Tokenizer, View::Tensors]
         }
         Kind::JavaClass => vec![View::ClassOutline, View::Bytecode, View::BytecodeLines],
+        Kind::Dbc => vec![View::CanDatabase, View::Text],
+        Kind::A2l => vec![View::A2lObjects, View::Text],
+        Kind::LinkMap => vec![View::MemoryMap, View::Text],
+        Kind::Mdf => vec![View::Measurement],
+        Kind::Cdfx => vec![View::Calibration, View::Text, View::PrettyXml],
     };
     views.push(View::Hex);
     views
@@ -228,6 +278,12 @@ pub fn render(view: View, name: &str, data: &[u8]) -> Result<String> {
         View::ClassOutline => class::outline(data),
         View::Bytecode => class::bytecode(data, false),
         View::BytecodeLines => class::bytecode(data, true),
+        View::CanDatabase => dbc::summary(&text::decode(data).text),
+        View::A2lObjects => a2l::objects(&text::decode(data).text),
+        View::MemoryMap => linkmap::memory_map(&text::decode(data).text),
+        View::DebugSymbols => dwarf::debug_symbols(data),
+        View::Measurement => mdf::summary(data),
+        View::Calibration => cdfx::values(&text::decode(data).text),
     }
 }
 
@@ -255,6 +311,10 @@ pub fn has_content_rule(name: &str) -> bool {
             | "tiff"
             | "ico"
             | "class"
+            | "dbc"
+            | "a2l"
+            | "cdfx"
+            | "cdf"
     )
 }
 
@@ -275,6 +335,18 @@ pub fn content_equal(name: &str, left: &[u8], right: &[u8]) -> Option<&'static s
         Kind::JavaClass => {
             return class::same_code(left, right)?
                 .then_some("same code, only debug info or constant pool layout differ");
+        }
+        Kind::Dbc => {
+            return dbc::same_database(&text::decode(left).text, &text::decode(right).text)
+                .then_some("same messages and signals, only order or formatting differ");
+        }
+        Kind::A2l => {
+            return a2l::same_objects(&text::decode(left).text, &text::decode(right).text)?
+                .then_some("same objects, only order or formatting differ");
+        }
+        Kind::Cdfx => {
+            return cdfx::same_values(&text::decode(left).text, &text::decode(right).text)?
+                .then_some("same values, only order or formatting differ");
         }
         _ => false,
     };
