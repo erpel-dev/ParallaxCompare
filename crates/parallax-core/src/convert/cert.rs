@@ -919,7 +919,8 @@ fn safe_bag(out: &mut String, bag: Der) {
         let Some(value) = a.next().and_then(|set| tlv(set.body)).map(|(v, _)| v) else { continue };
         match oid.as_str() {
             "1.2.840.113549.1.9.20" => {
-                let units: Vec<u16> = value.body.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+                let units: Vec<u16> =
+                    value.body.as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
                 line(out, "Friendly name", String::from_utf16_lossy(&units));
             }
             "1.2.840.113549.1.9.21" => line(out, "Local key id", hex_colons(value.body)),

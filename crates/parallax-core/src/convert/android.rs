@@ -73,7 +73,7 @@ impl<'a> Strings<'a> {
             let (len, skip) =
                 if first & 0x8000 != 0 { ((((first & 0x7FFF) << 16) | u16_at(d, 2)? as usize), 4) } else { (first, 2) };
             let bytes = d.get(skip..skip + len.checked_mul(2)?)?;
-            let units: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            let units: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
             Some(String::from_utf16_lossy(&units))
         }
     }
@@ -170,8 +170,12 @@ pub fn to_xml(data: &[u8]) -> Result<String> {
         match kind {
             0x0001 => strings = Some(Strings::parse(chunk).ok_or_else(|| bad("corrupt string pool"))?),
             0x0180 => {
-                resource_ids =
-                    chunk[header..].chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+                resource_ids = chunk[header..]
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect()
             }
             0x0100 => {
                 let (prefix, uri) =

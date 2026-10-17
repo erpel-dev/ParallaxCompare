@@ -244,7 +244,8 @@ fn read_props(file: &mut Cfb, storage: &str, header: usize) -> Props {
             let Some(data) = read_stream(file, &path) else { continue };
             match kind {
                 0x001F => {
-                    let units: Vec<u16> = data.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                    let units: Vec<u16> =
+                        data.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
                     props.strings.push((id, String::from_utf16_lossy(&units).trim_end_matches('\0').to_string()));
                 }
                 0x001E => props.strings.push((id, crate::text::decode(&data).text.trim_end_matches('\0').to_string())),
@@ -254,7 +255,7 @@ fn read_props(file: &mut Cfb, storage: &str, header: usize) -> Props {
         } else if name == "__properties_version1.0"
             && let Some(data) = read_stream(file, &path)
         {
-            for entry in data.get(header..).unwrap_or_default().chunks_exact(16) {
+            for entry in data.get(header..).unwrap_or_default().as_chunks::<16>().0.iter() {
                 let tag = u32::from_le_bytes([entry[0], entry[1], entry[2], entry[3]]);
                 let value: [u8; 8] = entry[8..16].try_into().unwrap_or_default();
                 props.fixed.push(((tag >> 16) as u16, tag as u16, value));

@@ -128,7 +128,7 @@ fn push_varints(value: Wire, out: &mut Vec<i64>) -> Result<()> {
 /// A repeated float field, packed or not.
 fn push_floats(value: Wire, out: &mut Vec<f32>) {
     match value {
-        Wire::Bytes(b) => out.extend(b.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap()))),
+        Wire::Bytes(b) => out.extend(b.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c))),
         Wire::Fixed32(v) => out.push(f32::from_bits(v)),
         _ => {}
     }
@@ -257,18 +257,13 @@ impl<'a> Tensor<'a> {
                 (9, t) => {
                     let b = v.bytes();
                     match t {
-                        1 => items.extend(
-                            b.chunks_exact(4).map(|c| format!("{:?}", f32::from_le_bytes(c.try_into().unwrap()))),
-                        ),
-                        11 => items.extend(
-                            b.chunks_exact(8).map(|c| format!("{:?}", f64::from_le_bytes(c.try_into().unwrap()))),
-                        ),
-                        7 => items
-                            .extend(b.chunks_exact(8).map(|c| i64::from_le_bytes(c.try_into().unwrap()).to_string())),
-                        6 => items
-                            .extend(b.chunks_exact(4).map(|c| i32::from_le_bytes(c.try_into().unwrap()).to_string())),
-                        12 => items
-                            .extend(b.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap()).to_string())),
+                        1 => items.extend(b.as_chunks::<4>().0.iter().map(|c| format!("{:?}", f32::from_le_bytes(*c)))),
+                        11 => {
+                            items.extend(b.as_chunks::<8>().0.iter().map(|c| format!("{:?}", f64::from_le_bytes(*c))))
+                        }
+                        7 => items.extend(b.as_chunks::<8>().0.iter().map(|c| i64::from_le_bytes(*c).to_string())),
+                        6 => items.extend(b.as_chunks::<4>().0.iter().map(|c| i32::from_le_bytes(*c).to_string())),
+                        12 => items.extend(b.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c).to_string())),
                         2 => items.extend(b.iter().map(u8::to_string)),
                         3 => items.extend(b.iter().map(|&x| (x as i8).to_string())),
                         9 => items.extend(b.iter().map(|&x| (x != 0).to_string())),
@@ -286,8 +281,9 @@ impl<'a> Tensor<'a> {
                     items.extend(i.iter().map(|x| if t == 9 { (*x != 0).to_string() } else { x.to_string() }));
                 }
                 (10, _) => match v {
-                    Wire::Bytes(b) => items
-                        .extend(b.chunks_exact(8).map(|c| format!("{:?}", f64::from_le_bytes(c.try_into().unwrap())))),
+                    Wire::Bytes(b) => {
+                        items.extend(b.as_chunks::<8>().0.iter().map(|c| format!("{:?}", f64::from_le_bytes(*c))))
+                    }
                     Wire::Fixed64(x) => items.push(format!("{:?}", f64::from_bits(*x))),
                     _ => {}
                 },
