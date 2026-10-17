@@ -125,7 +125,12 @@ export type View =
   | "tensors"
   | "classOutline"
   | "bytecode"
-  | "bytecodeLines";
+  | "bytecodeLines"
+  | "wasmOutline"
+  | "wasmText"
+  | "assemblyOutline"
+  | "il"
+  | "androidXml";
 
 export interface ImageSideView {
   url: string;

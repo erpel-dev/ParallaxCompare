@@ -725,7 +725,7 @@ pub async fn open_file_diff(
         let syntax = match chosen {
             View::Text => syntax
                 .or_else(|| highlight::detect_syntax(&name, first_line.unwrap_or_default()).map(|s| s.name.clone())),
-            View::PrettyXml => Some("XML".into()),
+            View::PrettyXml | View::AndroidXml => Some("XML".into()),
             View::PrettyJson => Some("JSON".into()),
             View::ChatTemplate => syntax.or_else(|| Some("Jinja2".into())),
             View::Image => None,

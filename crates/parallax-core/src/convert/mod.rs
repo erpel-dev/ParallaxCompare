@@ -5,13 +5,16 @@
 //! a minified XML file is one 5 MB line. Each [`View`] renders a file into text
 //! (or, for images, pixels) that the normal diff machinery can align.
 
+mod android;
 mod binary;
 mod chat;
 mod class;
+mod dotnet;
 pub mod gguf;
 mod image_diff;
 mod office;
 mod pretty;
+mod wasm;
 
 use serde::{Deserialize, Serialize};
 
@@ -57,6 +60,16 @@ pub enum View {
     Bytecode,
     /// Java class: the instructions with the source line numbers.
     BytecodeLines,
+    /// WebAssembly module: imports, exports, data, and each function's signature and code checksum.
+    WasmOutline,
+    /// WebAssembly module: the instructions of every function.
+    WasmText,
+    /// .NET assembly: identity, references, types and members, with a checksum of each method's IL.
+    AssemblyOutline,
+    /// .NET assembly: the IL of every method.
+    Il,
+    /// Android binary XML (manifest, resources) decoded to XML text.
+    AndroidXml,
 }
 
 impl View {
@@ -79,6 +92,11 @@ impl View {
             View::ClassOutline => "Class outline",
             View::Bytecode => "Bytecode",
             View::BytecodeLines => "Bytecode with line numbers",
+            View::WasmOutline => "Module outline",
+            View::WasmText => "WebAssembly text",
+            View::AssemblyOutline => "Assembly outline",
+            View::Il => "IL",
+            View::AndroidXml => "Android XML",
         }
     }
 }
@@ -105,6 +123,9 @@ enum Kind {
     Binary,
     Gguf,
     JavaClass,
+    Wasm,
+    DotNet,
+    AndroidXml,
 }
 
 fn extension(name: &str) -> String {
@@ -124,6 +145,12 @@ fn kind_of(name: &str, data: &[u8]) -> Kind {
     if class::is_class(data) {
         return Kind::JavaClass;
     }
+    if wasm::is_wasm(data) {
+        return Kind::Wasm;
+    }
+    if ext == "xml" && android::is_binary_xml(data) {
+        return Kind::AndroidXml;
+    }
     if starts(b"PK\x03\x04") {
         if matches!(ext.as_str(), "docx" | "docm" | "dotx" | "xlsx" | "xlsm" | "xltx" | "pptx" | "pptm" | "potx") {
             return Kind::Ooxml;
@@ -134,6 +161,9 @@ fn kind_of(name: &str, data: &[u8]) -> Kind {
     }
     if starts(&[0xD0, 0xCF, 0x11, 0xE0]) && matches!(ext.as_str(), "doc" | "xls" | "ppt" | "dot" | "xlt" | "pot") {
         return Kind::LegacyOffice;
+    }
+    if starts(b"MZ") && dotnet::is_managed(data) {
+        return Kind::DotNet;
     }
     if starts(b"\x7FELF")
         || starts(b"MZ")
@@ -187,6 +217,9 @@ pub fn views_for(name: &str, data: &[u8]) -> Vec<View> {
             vec![View::Model, View::ChatTemplate, View::ChatPreview, View::Metadata, View::Tokenizer, View::Tensors]
         }
         Kind::JavaClass => vec![View::ClassOutline, View::Bytecode, View::BytecodeLines],
+        Kind::Wasm => vec![View::WasmOutline, View::WasmText],
+        Kind::DotNet => vec![View::AssemblyOutline, View::Il, View::Executable],
+        Kind::AndroidXml => vec![View::AndroidXml],
     };
     views.push(View::Hex);
     views
@@ -228,6 +261,11 @@ pub fn render(view: View, name: &str, data: &[u8]) -> Result<String> {
         View::ClassOutline => class::outline(data),
         View::Bytecode => class::bytecode(data, false),
         View::BytecodeLines => class::bytecode(data, true),
+        View::WasmOutline => wasm::outline(data),
+        View::WasmText => wasm::text(data),
+        View::AssemblyOutline => dotnet::outline(data),
+        View::Il => dotnet::il(data),
+        View::AndroidXml => android::to_xml(data),
     }
 }
 
@@ -255,6 +293,10 @@ pub fn has_content_rule(name: &str) -> bool {
             | "tiff"
             | "ico"
             | "class"
+            | "wasm"
+            | "dll"
+            | "exe"
+            | "winmd"
     )
 }
 
@@ -276,6 +318,8 @@ pub fn content_equal(name: &str, left: &[u8], right: &[u8]) -> Option<&'static s
             return class::same_code(left, right)?
                 .then_some("same code, only debug info or constant pool layout differ");
         }
+        Kind::Wasm => return wasm::same_code(left, right)?.then_some("same code, only custom sections differ"),
+        Kind::DotNet => return dotnet::same_code(left, right)?.then_some("same code, only build identity differs"),
         _ => false,
     };
     equal.then_some("same content, the file bytes differ")
