@@ -26,13 +26,15 @@ pub enum WhitespaceMode {
 pub struct DiffOptions {
     pub whitespace: WhitespaceMode,
     pub ignore_case: bool,
-    /// Histogram is fast and gives readable results; Myers finds the minimal diff.
-    pub minimal: bool,
+    /// Histogram can give more readable results for moved code, but it slows down
+    /// sharply on files with many repeated lines (A2L, generated XML); Myers, the
+    /// algorithm Git uses by default, does not.
+    pub histogram: bool,
 }
 
 impl Default for DiffOptions {
     fn default() -> Self {
-        DiffOptions { whitespace: WhitespaceMode::Exact, ignore_case: false, minimal: false }
+        DiffOptions { whitespace: WhitespaceMode::Exact, ignore_case: false, histogram: false }
     }
 }
 
@@ -134,7 +136,7 @@ pub fn diff_docs(left: &TextDoc, right: &TextDoc, opts: &DiffOptions) -> TextDif
     let before = (0..left.len()).map(|i| interner.intern(Key(normalize_line(left.line(i), opts)))).collect();
     let after = (0..right.len()).map(|i| interner.intern(Key(normalize_line(right.line(i), opts)))).collect();
     let input = InternedInput { before, after, interner };
-    let algorithm = if opts.minimal { Algorithm::Myers } else { Algorithm::Histogram };
+    let algorithm = if opts.histogram { Algorithm::Histogram } else { Algorithm::Myers };
     let mut diff = Diff::compute(algorithm, &input);
     diff.postprocess_lines(&input);
 

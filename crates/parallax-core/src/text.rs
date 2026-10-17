@@ -55,8 +55,14 @@ pub fn decode(data: &[u8]) -> TextDoc {
         Some((enc, len)) => (enc, len),
         None if std::str::from_utf8(data).is_ok() => (encoding_rs::UTF_8, 0),
         None => {
+            // The detector costs about 200 ns per byte; a window starting at the first
+            // non-ASCII byte decides as well as the whole file does.
+            const SAMPLE: usize = 256 * 1024;
+            let first = data.iter().position(|b| !b.is_ascii()).unwrap_or(0);
+            let start = first.saturating_sub(1024);
+            let sample = &data[start..data.len().min(start + SAMPLE)];
             let mut detector = chardetng::EncodingDetector::new(chardetng::Iso2022JpDetection::Deny);
-            detector.feed(data, true);
+            detector.feed(sample, sample.len() == data.len() - start);
             (detector.guess(None, chardetng::Utf8Detection::Allow), 0)
         }
     };

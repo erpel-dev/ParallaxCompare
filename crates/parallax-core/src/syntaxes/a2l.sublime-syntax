@@ -1,0 +1,37 @@
+%YAML 1.2
+---
+# ASAM MCD-2 MC (ASAP2) calibration descriptions.
+name: A2L
+file_extensions: [a2l, aml]
+scope: source.a2l
+contexts:
+  main:
+    - match: /\*
+      scope: punctuation.definition.comment.a2l
+      push: block_comment
+    - match: //.*$
+      scope: comment.line.a2l
+    - match: '"'
+      scope: punctuation.definition.string.begin.a2l
+      push: string
+    - match: (/(?:begin|end))\s+([A-Za-z_][A-Za-z0-9_]*)
+      captures:
+        1: keyword.control.a2l
+        2: entity.name.tag.a2l
+    - match: \b0[xX][0-9a-fA-F]+\b
+      scope: constant.numeric.hex.a2l
+    - match: (?<![\w.])-?[0-9]+(?:\.[0-9]+)?(?:[eE][-+]?[0-9]+)?\b
+      scope: constant.numeric.a2l
+    - match: \b[A-Z][A-Z0-9_]{2,}\b
+      scope: support.type.a2l
+  string:
+    - meta_scope: string.quoted.double.a2l
+    - match: \\.
+      scope: constant.character.escape.a2l
+    - match: '"'
+      scope: punctuation.definition.string.end.a2l
+      pop: true
+  block_comment:
+    - meta_scope: comment.block.a2l
+    - match: \*/
+      pop: true

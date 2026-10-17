@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use parallax_core::compare::{self, CompareOptions, CompareResult, Control, Node};
+use parallax_core::convert::{self, View};
 use parallax_core::highlight::{self, DocHighlighter, Span, ThemeKind};
 use parallax_core::source::{Source, SourceInfo, SourceOptions, SourceSpec, open_pair};
 use parallax_core::text::{self, LineEnding, TextDoc};
@@ -281,10 +282,39 @@ pub struct SideInfo {
     exists: bool,
     size: u64,
     binary: bool,
+    /// Encoding of the shown text; for converted views, the view's name.
     encoding: String,
     line_ending: LineEnding,
     bom: bool,
     lines: u32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewOption {
+    id: View,
+    label: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageSideView {
+    /// `data:` URL the web view can show directly.
+    url: String,
+    width: u32,
+    height: u32,
+    format: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageView {
+    left: Option<ImageSideView>,
+    right: Option<ImageSideView>,
+    mask: Option<String>,
+    different_pixels: u64,
+    total_pixels: u64,
+    bounds: Option<[u32; 4]>,
 }
 
 #[derive(Serialize)]
@@ -299,24 +329,31 @@ pub struct FileDiffInfo {
     syntax: Option<String>,
     /// Byte-identical files.
     identical: bool,
+    /// The view shown and the views that can be chosen for this pair.
+    view: View,
+    views: Vec<ViewOption>,
+    image: Option<ImageView>,
+    /// Something the user should know, e.g. why a requested view is not shown.
+    note: Option<String>,
+}
+
+fn missing_side() -> SideInfo {
+    SideInfo {
+        exists: false,
+        size: 0,
+        binary: false,
+        encoding: String::new(),
+        line_ending: LineEnding::None,
+        bom: false,
+        lines: 0,
+    }
 }
 
 fn load_side(source: &Source, path: &str) -> CmdResult<(SideInfo, Option<Vec<u8>>)> {
     let full = source.path(path);
     let entry = match source.vfs.stat(&full) {
         Ok(entry) => entry,
-        Err(parallax_core::Error::NotFound(_)) => {
-            let info = SideInfo {
-                exists: false,
-                size: 0,
-                binary: false,
-                encoding: String::new(),
-                line_ending: LineEnding::None,
-                bom: false,
-                lines: 0,
-            };
-            return Ok((info, None));
-        }
+        Err(parallax_core::Error::NotFound(_)) => return Ok((missing_side(), None)),
         Err(e) => return Err(err(e)),
     };
     let data = source.vfs.read(&full).map_err(err)?;
@@ -324,16 +361,43 @@ fn load_side(source: &Source, path: &str) -> CmdResult<(SideInfo, Option<Vec<u8>
         exists: true,
         size: entry.size.max(data.len() as u64),
         binary: text::is_binary(&data),
-        encoding: String::new(),
-        line_ending: LineEnding::None,
-        bom: false,
-        lines: 0,
+        ..missing_side()
     };
     Ok((info, Some(data.to_vec())))
 }
 
 fn empty_doc() -> TextDoc {
     text::decode(b"")
+}
+
+fn data_url(mime: &str, bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+/// Explains why byte-different files show no differences in the text view.
+fn invisible_difference(left: &TextDoc, right: &TextDoc, l: &[u8], r: &[u8], minor: u32) -> String {
+    let mut reasons = Vec::new();
+    if left.encoding != right.encoding {
+        reasons.push(format!("encoding ({} vs {})", left.encoding, right.encoding));
+    }
+    if left.bom != right.bom {
+        reasons.push("byte order mark".to_string());
+    }
+    if left.line_ending != right.line_ending {
+        reasons.push(format!("line endings ({:?} vs {:?})", left.line_ending, right.line_ending));
+    }
+    if l.ends_with(b"\n") != r.ends_with(b"\n") {
+        reasons.push("newline at end of file".to_string());
+    }
+    if minor > 0 {
+        reasons.push(format!("{minor} lines with whitespace or case differences that the current rules ignore"));
+    }
+    if reasons.is_empty() {
+        "The files differ in bytes that the text view does not show.".into()
+    } else {
+        format!("The files differ only in: {}.", reasons.join(", "))
+    }
 }
 
 #[tauri::command]
@@ -343,39 +407,125 @@ pub async fn open_file_diff(
     path: String,
     options: DiffOptions,
     syntax: Option<String>,
+    view: Option<View>,
 ) -> CmdResult<FileDiffInfo> {
     let session = state.session(id)?;
     let (info, file_diff) = blocking(move || {
         let (mut left_info, left_data) = load_side(&session.left, &path)?;
         let (mut right_info, right_data) = load_side(&session.right, &path)?;
         let identical = left_data.is_some() && left_data == right_data;
-        let binary = left_info.binary || right_info.binary;
-        let decode = |data: &Option<Vec<u8>>, info: &mut SideInfo| -> TextDoc {
-            match data {
-                Some(bytes) if !binary => {
-                    let doc = text::decode(bytes);
-                    info.encoding = doc.encoding.to_string();
-                    info.line_ending = doc.line_ending;
-                    info.bom = doc.bom;
-                    info.lines = doc.len() as u32;
-                    doc
-                }
-                _ => empty_doc(),
-            }
-        };
-        let left = decode(&left_data, &mut left_info);
-        let right = decode(&right_data, &mut right_info);
-        let diff = textdiff::diff_docs(&left, &right, &options);
-        // The name to pick a grammar from: the compared path, or the root file name.
-        let syntax_path = if path.is_empty() {
+        // The name to pick views and grammars from: the compared path, or the root file name.
+        let name = if path.is_empty() {
             let root = if session.left.root.is_empty() { &session.right.root } else { &session.left.root };
             split_parent(root).1.to_string()
         } else {
             path.clone()
         };
+        let views = convert::views_for_pair(
+            left_data.as_deref().map(|d| (name.as_str(), d)),
+            right_data.as_deref().map(|d| (name.as_str(), d)),
+        );
+        let mut chosen = view.filter(|v| views.contains(v)).unwrap_or(views[0]);
+        let mut note = None;
+        let view_options = views.iter().map(|&v| ViewOption { id: v, label: v.label() }).collect();
+
+        let mut image = None;
+        if chosen == View::Image {
+            match convert::image_diff(&name, left_data.as_deref(), right_data.as_deref()) {
+                Ok(d) => {
+                    let side = |s: &Option<convert::ImageSide>| {
+                        s.as_ref().map(|s| ImageSideView {
+                            url: data_url(&s.mime, &s.bytes),
+                            width: s.width,
+                            height: s.height,
+                            format: s.format.clone(),
+                        })
+                    };
+                    note = d.note.clone();
+                    image = Some(ImageView {
+                        left: side(&d.left),
+                        right: side(&d.right),
+                        mask: d.mask.as_deref().map(|m| data_url("image/png", m)),
+                        different_pixels: d.different_pixels,
+                        total_pixels: d.total_pixels,
+                        bounds: d.bounds,
+                    });
+                }
+                Err(e) => {
+                    note = Some(format!("The image could not be decoded ({e}); showing a hex dump."));
+                    chosen = View::Hex;
+                }
+            }
+        }
+
+        // Converted text for both sides; LibreOffice conversions take seconds, so the
+        // two sides run at the same time.
+        let render = |data: &Option<Vec<u8>>, view: View| -> Option<Result<String, String>> {
+            data.as_ref().map(|d| convert::render(view, &name, d).map_err(err))
+        };
+        let (mut left_text, mut right_text) = (None, None);
+        if !matches!(chosen, View::Image | View::Text) {
+            (left_text, right_text) = std::thread::scope(|s| {
+                let l = s.spawn(|| render(&left_data, chosen));
+                let r = render(&right_data, chosen);
+                (l.join().unwrap_or(None), r)
+            });
+            if let Some(Err(e)) = left_text.as_ref().or(right_text.as_ref()).filter(|r| r.is_err()) {
+                let fallback = if left_info.binary || right_info.binary { View::Hex } else { View::Text };
+                note = Some(format!("{} is not available: {e}. Showing {}.", chosen.label(), fallback.label()));
+                chosen = fallback;
+                (left_text, right_text) = if fallback == View::Hex {
+                    (render(&left_data, fallback), render(&right_data, fallback))
+                } else {
+                    (None, None)
+                };
+            }
+        }
+
+        let make_doc = |data: &Option<Vec<u8>>,
+                        converted: Option<Result<String, String>>,
+                        info: &mut SideInfo|
+         -> CmdResult<TextDoc> {
+            let doc = match (chosen, data, converted) {
+                (View::Image, _, _) | (_, None, _) => return Ok(empty_doc()),
+                (View::Text, Some(bytes), _) => {
+                    let doc = text::decode(bytes);
+                    info.encoding = doc.encoding.to_string();
+                    doc
+                }
+                (_, Some(_), Some(Ok(text))) => {
+                    info.encoding = chosen.label().to_string();
+                    text::decode(text.as_bytes())
+                }
+                (_, Some(_), Some(Err(e))) => return Err(e),
+                (_, Some(_), None) => empty_doc(),
+            };
+            info.line_ending = doc.line_ending;
+            info.bom = doc.bom;
+            info.lines = doc.len() as u32;
+            Ok(doc)
+        };
+        let left = make_doc(&left_data, left_text, &mut left_info)?;
+        let right = make_doc(&right_data, right_text, &mut right_info)?;
+        let diff = textdiff::diff_docs(&left, &right, &options);
+
         let first_line = if left.is_empty() { right.lines.first().map(|_| right.line(0)) } else { Some(left.line(0)) };
-        let syntax = syntax
-            .or_else(|| highlight::detect_syntax(&syntax_path, first_line.unwrap_or_default()).map(|s| s.name.clone()));
+        let syntax = match chosen {
+            View::Text => syntax
+                .or_else(|| highlight::detect_syntax(&name, first_line.unwrap_or_default()).map(|s| s.name.clone())),
+            View::PrettyXml => Some("XML".into()),
+            View::PrettyJson => Some("JSON".into()),
+            View::Image => None,
+            _ => Some(highlight::view_syntax().name.clone()),
+        };
+        if note.is_none()
+            && !identical
+            && diff.sections.is_empty()
+            && chosen == View::Text
+            && let (Some(l), Some(r)) = (&left_data, &right_data)
+        {
+            note = Some(invisible_difference(&left, &right, l, r, diff.stats.minor));
+        }
         let info = FileDiffInfo {
             id: 0,
             rows: diff.rows.len() as u32,
@@ -385,6 +535,10 @@ pub async fn open_file_diff(
             right: right_info,
             syntax: syntax.clone(),
             identical,
+            view: chosen,
+            views: view_options,
+            image,
+            note,
         };
         Ok((info, FileDiff { left, right, diff, syntax, highlighters: None }))
     })
@@ -393,6 +547,9 @@ pub async fn open_file_diff(
     state.diffs.lock().insert(diff_id, Arc::new(Mutex::new(file_diff)));
     Ok(FileDiffInfo { id: diff_id, ..info })
 }
+
+/// Longer lines are cut for display; the web view cannot lay out megabyte-long rows.
+const MAX_SHOWN_LINE: u32 = 10_000;
 
 #[derive(Serialize)]
 pub struct LineView {
@@ -403,6 +560,35 @@ pub struct LineView {
     s: Vec<Span>,
     /// Changed character ranges within a changed line.
     m: Vec<(u32, u32)>,
+    /// Number of UTF-16 units cut from the end of a very long line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    x: Option<u32>,
+}
+
+impl LineView {
+    fn new(n: u32, line: &str, spans: Vec<Span>, marks: Vec<(u32, u32)>) -> Self {
+        let total = text::utf16_len(line) as u32;
+        if total <= MAX_SHOWN_LINE {
+            return LineView { n, t: line.to_string(), s: spans, m: marks, x: None };
+        }
+        let mut units = 0u32;
+        let cut = line
+            .char_indices()
+            .find(|(_, c)| {
+                units += c.len_utf16() as u32;
+                units > MAX_SHOWN_LINE
+            })
+            .map_or(line.len(), |(i, _)| i);
+        let shown = text::utf16_len(&line[..cut]) as u32;
+        let clip = |(a, b): (u32, u32)| (a < shown).then(|| (a, b.min(shown)));
+        LineView {
+            n,
+            t: line[..cut].to_string(),
+            s: spans.into_iter().filter_map(|Span(a, b, c)| clip((a, b)).map(|(a, b)| Span(a, b, c))).collect(),
+            m: marks.into_iter().filter_map(clip).collect(),
+            x: Some(total - shown),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -443,11 +629,8 @@ pub async fn file_rows(
         };
         let (left_base, left_spans) = spans(hl_left, &fd.left, line_range(rows, |r| r.left));
         let (right_base, right_spans) = spans(hl_right, &fd.right, line_range(rows, |r| r.right));
-        let view = |doc: &TextDoc, n: u32, base: usize, all: &Vec<Vec<Span>>, marks: Vec<(u32, u32)>| LineView {
-            n,
-            t: doc.line(n as usize).to_string(),
-            s: all.get(n as usize - base).cloned().unwrap_or_default(),
-            m: marks,
+        let view = |doc: &TextDoc, n: u32, base: usize, all: &Vec<Vec<Span>>, marks: Vec<(u32, u32)>| {
+            LineView::new(n, doc.line(n as usize), all.get(n as usize - base).cloned().unwrap_or_default(), marks)
         };
         Ok(rows
             .iter()

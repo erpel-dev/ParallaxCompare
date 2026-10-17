@@ -214,7 +214,7 @@
   const canCopyRight = $derived(!!selectedRow?.node.left && session.right.writable);
   const canCopyLeft = $derived(!!selectedRow?.node.right && session.left.writable);
 
-  const glyph = { same: "=", different: "≠", leftOnly: "◀", rightOnly: "▶", error: "!" } as const;
+  const glyph = { same: "=", similar: "≈", different: "≠", leftOnly: "◀", rightOnly: "▶", error: "!" } as const;
 
   function icon(side: Side): string {
     switch (side.kind) {
@@ -237,7 +237,7 @@
     <button onclick={run} disabled={running} title="Compare again (F5)">⟳ Refresh</button>
     <button onclick={onSwap} title="Swap left and right">⇄ Swap</button>
     <span class="sep"></span>
-    {#each [["all", "All"], ["diffs", "Differences"], ["same", "Same"], ["orphans", "Orphans"]] as const as [id, label] (id)}
+    {#each [["all", "All"], ["diffs", "Diffs"], ["same", "Same"], ["orphans", "Orphans"]] as const as [id, label] (id)}
       <button class:on={filter === id} onclick={() => { filter = id; version++; }}>{label}</button>
     {/each}
     <span class="sep"></span>
@@ -246,14 +246,17 @@
     <span class="sep"></span>
     <button disabled={!canCopyRight} onclick={() => copy(true)} title="Copy the selection to the right side">Copy →</button>
     <button disabled={!canCopyLeft} onclick={() => copy(false)} title="Copy the selection to the left side">← Copy</button>
-    <button disabled={!selectedRow?.node.left || !session.left.writable} onclick={() => remove(true)}>Delete left</button>
-    <button disabled={!selectedRow?.node.right || !session.right.writable} onclick={() => remove(false)}>Delete right</button>
+    <button disabled={!selectedRow?.node.left || !session.left.writable} onclick={() => remove(true)} title="Delete the selection on the left side">Delete ◀</button>
+    <button disabled={!selectedRow?.node.right || !session.right.writable} onclick={() => remove(false)} title="Delete the selection on the right side">Delete ▶</button>
     <span class="sep"></span>
     <select bind:value={options.mode} onchange={run} title="Compare rule">
       <option value="content">Content</option>
       <option value="quick">Size &amp; date</option>
     </select>
-    <label class="check"><input type="checkbox" bind:checked={options.ignoreLineEndings} onchange={run} /> Ignore line endings</label>
+    <label class="check"><input type="checkbox" bind:checked={options.ignoreLineEndings} onchange={run} /> Ignore CRLF/LF</label>
+    <label class="check" title="Documents (PDF, Word, Excel, PowerPoint, OpenDocument) with the same text and images with the same pixels are marked ≈ instead of ≠">
+      <input type="checkbox" bind:checked={options.compareContents} onchange={run} /> By content
+    </label>
     <input
       type="text"
       class="excludes mono"
@@ -340,6 +343,7 @@
       {@const s = result.summary}
       <span><b>{counts.files.toLocaleString()}</b> files</span>
       <span class="c-same">{counts.same.toLocaleString()} same</span>
+      {#if counts.similar}<span class="c-similar" title="Equal content, different bytes">{counts.similar.toLocaleString()} similar</span>{/if}
       <span class="c-diff">{counts.different.toLocaleString()} different</span>
       <span class="c-left">{counts.leftOnly.toLocaleString()} left only</span>
       <span class="c-right">{counts.rightOnly.toLocaleString()} right only</span>
@@ -374,7 +378,7 @@
     margin: 0 4px;
   }
   .excludes {
-    width: 150px;
+    width: 130px;
   }
   .pathbars,
   .head {
@@ -472,6 +476,10 @@
   .different .mid {
     color: var(--diff);
   }
+  .similar .name,
+  .similar .mid {
+    color: var(--similar);
+  }
   .leftOnly .name,
   .leftOnly .mid {
     color: var(--left-only);
@@ -512,6 +520,9 @@
   }
   .c-diff {
     color: var(--diff);
+  }
+  .c-similar {
+    color: var(--similar);
   }
   .c-left {
     color: var(--left-only);

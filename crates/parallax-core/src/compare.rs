@@ -18,6 +18,7 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::convert;
 use crate::source::Source;
 use crate::text::is_binary;
 use crate::vfs::git::blob_id;
@@ -42,6 +43,9 @@ pub struct CompareOptions {
     pub ignore_line_endings: bool,
     /// Glob patterns matched against names and relative paths, e.g. `.git`, `*.o`, `build/**`.
     pub excludes: Vec<String>,
+    /// Documents (PDF, Office, OpenDocument) with equal text and images with equal
+    /// pixels count as similar even when their bytes differ.
+    pub compare_contents: bool,
 }
 
 impl Default for CompareOptions {
@@ -50,6 +54,7 @@ impl Default for CompareOptions {
             mode: CompareMode::Content,
             ignore_line_endings: true,
             excludes: vec![".git".into(), ".svn".into(), ".hg".into()],
+            compare_contents: true,
         }
     }
 }
@@ -58,6 +63,9 @@ impl Default for CompareOptions {
 #[serde(rename_all = "camelCase")]
 pub enum Status {
     Same,
+    /// The bytes differ but the content is equal under the active rules
+    /// (line endings, document text, image pixels).
+    Similar,
     Different,
     LeftOnly,
     RightOnly,
@@ -98,6 +106,7 @@ pub struct Node {
 pub struct Summary {
     pub files: u64,
     pub same: u64,
+    pub similar: u64,
     pub different: u64,
     pub left_only: u64,
     pub right_only: u64,
@@ -123,6 +132,7 @@ pub struct Control {
 #[derive(Default)]
 struct Counters {
     same: AtomicU64,
+    similar: AtomicU64,
     different: AtomicU64,
     left_only: AtomicU64,
     right_only: AtomicU64,
@@ -171,6 +181,7 @@ pub fn compare_path(
     let summary = Summary {
         files: control.files_done.load(Ordering::Relaxed),
         same: get(&c.same),
+        similar: get(&c.similar),
         different: get(&c.different),
         left_only: get(&c.left_only),
         right_only: get(&c.right_only),
@@ -243,9 +254,14 @@ impl<'a> Engine<'a> {
             node.status = folder_status(&node.children);
         } else if !lc && !rc {
             self.control.files_done.fetch_add(1, Ordering::Relaxed);
-            let same = self.files_equal(rel, l, r)?;
-            node.status = if same { Status::Same } else { Status::Different };
-            let counter = if same { &self.counters.same } else { &self.counters.different };
+            let (status, reason) = self.compare_files(rel, l, r)?;
+            node.status = status;
+            node.message = reason.map(str::to_string);
+            let counter = match status {
+                Status::Same => &self.counters.same,
+                Status::Similar => &self.counters.similar,
+                _ => &self.counters.different,
+            };
             counter.fetch_add(1, Ordering::Relaxed);
         } else {
             node.status = Status::Different;
@@ -304,25 +320,32 @@ impl<'a> Engine<'a> {
             .collect())
     }
 
-    fn files_equal(&self, rel: &str, l: &Entry, r: &Entry) -> Result<bool> {
-        let eol = self.opts.ignore_line_endings;
+    /// `Same`, `Different`, or `Similar` with the reason when the bytes differ but
+    /// the active rules consider the content equal.
+    fn compare_files(&self, rel: &str, l: &Entry, r: &Entry) -> Result<(Status, Option<&'static str>)> {
+        const SAME: Result<(Status, Option<&'static str>)> = Ok((Status::Same, None));
+        const DIFFERENT: Result<(Status, Option<&'static str>)> = Ok((Status::Different, None));
         if self.opts.mode == CompareMode::Quick
             && let (Some(a), Some(b)) = (l.mtime, r.mtime)
         {
-            return Ok(l.size == r.size && a == b);
+            return if l.size == r.size && a == b { SAME } else { DIFFERENT };
         }
+        let eol = self.opts.ignore_line_endings;
+        let content = self.opts.compare_contents && convert::has_content_rule(&l.name);
+        // Without content rules, differing ids or sizes settle it without reading.
+        let must_read = eol || content;
         if let (Some(a), Some(b)) = (&l.quick_id, &r.quick_id)
             && let Some(equal) = a.matches(b)
         {
             if equal && l.size == r.size {
-                return Ok(true);
+                return SAME;
             }
-            if !equal && !eol {
-                return Ok(false);
+            if !equal && !must_read {
+                return DIFFERENT;
             }
         }
-        if l.size != r.size && !eol {
-            return Ok(false);
+        if l.size != r.size && !must_read {
+            return DIFFERENT;
         }
         let read_left = || self.left.vfs.read(&self.left.path(rel));
         let read_right = || self.right.vfs.read(&self.right.path(rel));
@@ -332,34 +355,46 @@ impl<'a> Engine<'a> {
             (Some(QuickId::GitOid(oid)), None) => {
                 let data = read_right()?;
                 if l.size == r.size && blob_id(&data).as_ref() == Some(oid) {
-                    return Ok(true);
+                    return SAME;
                 }
-                if !eol {
-                    return Ok(false);
+                if !must_read {
+                    return DIFFERENT;
                 }
                 (read_left()?, data)
             }
             (None, Some(QuickId::GitOid(oid))) => {
                 let data = read_left()?;
                 if l.size == r.size && blob_id(&data).as_ref() == Some(oid) {
-                    return Ok(true);
+                    return SAME;
                 }
-                if !eol {
-                    return Ok(false);
+                if !must_read {
+                    return DIFFERENT;
                 }
                 (data, read_right()?)
             }
             _ => (read_left()?, read_right()?),
         };
         if *left_data == *right_data {
-            return Ok(true);
+            return SAME;
         }
-        Ok(eol && !is_binary(&left_data) && !is_binary(&right_data) && equal_ignoring_cr(&left_data, &right_data))
+        if eol && !is_binary(&left_data) && !is_binary(&right_data) && equal_ignoring_cr(&left_data, &right_data) {
+            return Ok((Status::Similar, Some("only line endings differ")));
+        }
+        if content && convert::content_equal(&l.name, &left_data, &right_data) == Some(true) {
+            return Ok((Status::Similar, Some("same content, the file bytes differ")));
+        }
+        DIFFERENT
     }
 }
 
 fn folder_status(children: &[Node]) -> Status {
-    if children.iter().all(|c| c.status == Status::Same) { Status::Same } else { Status::Different }
+    if children.iter().all(|c| c.status == Status::Same) {
+        Status::Same
+    } else if children.iter().all(|c| matches!(c.status, Status::Same | Status::Similar)) {
+        Status::Similar
+    } else {
+        Status::Different
+    }
 }
 
 /// Compares two byte strings treating `\r\n` and `\n` as equal.

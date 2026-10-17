@@ -21,9 +21,9 @@ function selfMatches(node: Node, filter: Filter): boolean {
     case "all":
       return true;
     case "diffs":
-      return node.status !== "same";
+      return node.status !== "same" && node.status !== "similar";
     case "same":
-      return node.status === "same";
+      return node.status === "same" || node.status === "similar";
     case "orphans":
       return node.status === "leftOnly" || node.status === "rightOnly";
   }
@@ -31,7 +31,7 @@ function selfMatches(node: Node, filter: Filter): boolean {
 
 function visible(node: Node, filter: Filter, memo: Map<Node, boolean>): boolean {
   if (filter === "all") return true;
-  if (filter === "diffs") return node.status !== "same";
+  if (filter === "diffs") return node.status !== "same" && node.status !== "similar";
   let hit = memo.get(node);
   if (hit === undefined) {
     hit = selfMatches(node, filter) || (node.children ?? []).some((c) => visible(c, filter, memo));
@@ -133,7 +133,12 @@ export function replaceNode(root: Node, path: string, replacement: Node | null):
   for (let i = chain.length - 1; i >= 1; i--) {
     const node = chain[i];
     if (node.left && node.right && isContainer(node)) {
-      node.status = (node.children ?? []).every((c) => c.status === "same") ? "same" : "different";
+      const children = node.children ?? [];
+      node.status = children.every((c) => c.status === "same")
+        ? "same"
+        : children.every((c) => c.status === "same" || c.status === "similar")
+          ? "similar"
+          : "different";
     }
   }
 }
@@ -149,6 +154,7 @@ export function findNode(root: Node, path: string): Node | undefined {
 export interface Counts {
   files: number;
   same: number;
+  similar: number;
   different: number;
   leftOnly: number;
   rightOnly: number;
@@ -157,7 +163,7 @@ export interface Counts {
 
 /** File counts of the current tree; stays correct after copy and delete. */
 export function countFiles(root: Node): Counts {
-  const c: Counts = { files: 0, same: 0, different: 0, leftOnly: 0, rightOnly: 0, errors: 0 };
+  const c: Counts = { files: 0, same: 0, similar: 0, different: 0, leftOnly: 0, rightOnly: 0, errors: 0 };
   const walk = (node: Node) => {
     for (const child of node.children ?? []) {
       if (isContainer(child) && child.status !== "error") {

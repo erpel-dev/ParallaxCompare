@@ -6,6 +6,7 @@
 //! those trees, so any source can be compared against any other source.
 
 pub mod compare;
+pub mod convert;
 pub mod error;
 pub mod highlight;
 pub mod ops;

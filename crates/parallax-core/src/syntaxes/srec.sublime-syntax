@@ -1,0 +1,13 @@
+%YAML 1.2
+---
+name: Motorola S-record
+file_extensions: [s19, s28, s37, srec, mot, sx]
+scope: source.srec
+contexts:
+  main:
+    - match: ^(S[0159])([0-9A-Fa-f]{2})([0-9A-Fa-f]{4})([0-9A-Fa-f]*?)([0-9A-Fa-f]{2})\s*$
+      captures: {1: keyword.control.srec, 2: constant.numeric.srec, 3: entity.name.tag.srec, 5: comment.line.srec}
+    - match: ^(S[28])([0-9A-Fa-f]{2})([0-9A-Fa-f]{6})([0-9A-Fa-f]*?)([0-9A-Fa-f]{2})\s*$
+      captures: {1: keyword.control.srec, 2: constant.numeric.srec, 3: entity.name.tag.srec, 5: comment.line.srec}
+    - match: ^(S[37])([0-9A-Fa-f]{2})([0-9A-Fa-f]{8})([0-9A-Fa-f]*?)([0-9A-Fa-f]{2})\s*$
+      captures: {1: keyword.control.srec, 2: constant.numeric.srec, 3: entity.name.tag.srec, 5: comment.line.srec}

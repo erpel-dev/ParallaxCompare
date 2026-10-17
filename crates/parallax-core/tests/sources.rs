@@ -48,7 +48,7 @@ fn local_folders() {
     let list = statuses(&a.path().display().to_string(), &b.path().display().to_string(), &CompareOptions::default());
     assert_eq!(status_of(&list, "same.txt"), Status::Same);
     assert_eq!(status_of(&list, "diff.txt"), Status::Different);
-    assert_eq!(status_of(&list, "crlf.txt"), Status::Same);
+    assert_eq!(status_of(&list, "crlf.txt"), Status::Similar);
     assert_eq!(status_of(&list, "only"), Status::LeftOnly);
     assert_eq!(status_of(&list, "only/left.txt"), Status::LeftOnly);
     assert_eq!(status_of(&list, "right.txt"), Status::RightOnly);
@@ -220,8 +220,9 @@ fn git_worktree_against_revision() {
     let result = compare::compare(&l, &r, &CompareOptions::default(), &Control::default()).unwrap();
     let list = compare::flatten(&result.root);
     assert_eq!(status_of(&list, "src/catalog/list.ts"), Status::Different);
-    assert_eq!(status_of(&list, "src/cart.ts"), Status::Same);
-    assert_eq!(status_of(&list, "build/keep.txt"), Status::Same);
+    // With core.autocrlf (the Windows default) checked-out files may have CRLF.
+    assert!(matches!(status_of(&list, "src/cart.ts"), Status::Same | Status::Similar));
+    assert!(matches!(status_of(&list, "build/keep.txt"), Status::Same | Status::Similar));
     assert!(!list.iter().any(|(p, _)| p == "build/out.bin" || p.starts_with(".git/")));
 
     // A folder opened directly is shown completely, even when it is ignored itself.
@@ -306,4 +307,63 @@ fn symlinks_compare_by_target() {
     .unwrap();
     parallax_core::ops::copy(&l, &r, "file-link").unwrap();
     assert_eq!(fs::read_link(copy.path().join("file-link")).unwrap(), Path::new("other.txt"));
+}
+
+fn docx(text: &str, minute: u8) -> Vec<u8> {
+    let mut buf = std::io::Cursor::new(Vec::new());
+    let mut zip = zip::ZipWriter::new(&mut buf);
+    let time = zip::DateTime::from_date_and_time(2026, 1, 1, 12, minute, 0).unwrap();
+    let opts = zip::write::SimpleFileOptions::default().last_modified_time(time);
+    zip.start_file("word/document.xml", opts).unwrap();
+    let xml = format!(
+        r#"<w:document xmlns:w="w"><w:body><w:p><w:r><w:t>{text}</w:t></w:r></w:p><w:p><w:r><w:t xml:space="preserve">A &amp; B</w:t></w:r></w:p></w:body></w:document>"#
+    );
+    zip.write_all(xml.as_bytes()).unwrap();
+    zip.finish().unwrap();
+    buf.into_inner()
+}
+
+fn png(compression: image::codecs::png::CompressionType, red: u8) -> Vec<u8> {
+    let img = image::RgbaImage::from_pixel(8, 8, image::Rgba([red, 10, 10, 255]));
+    let mut out = std::io::Cursor::new(Vec::new());
+    let encoder =
+        image::codecs::png::PngEncoder::new_with_quality(&mut out, compression, image::codecs::png::FilterType::Sub);
+    img.write_with_encoder(encoder).unwrap();
+    out.into_inner()
+}
+
+#[test]
+fn documents_and_images_compare_by_content() {
+    use image::codecs::png::CompressionType::{Best, Fast};
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    fs::write(a.path().join("same.docx"), docx("Hello", 1)).unwrap();
+    fs::write(b.path().join("same.docx"), docx("Hello", 2)).unwrap();
+    fs::write(a.path().join("changed.docx"), docx("Hello", 1)).unwrap();
+    fs::write(b.path().join("changed.docx"), docx("Hallo", 1)).unwrap();
+    fs::write(a.path().join("same.png"), png(Fast, 200)).unwrap();
+    fs::write(b.path().join("same.png"), png(Best, 200)).unwrap();
+    fs::write(a.path().join("changed.png"), png(Fast, 200)).unwrap();
+    fs::write(b.path().join("changed.png"), png(Fast, 201)).unwrap();
+    assert_ne!(fs::read(a.path().join("same.png")).unwrap(), fs::read(b.path().join("same.png")).unwrap());
+
+    let (pa, pb) = (a.path().display().to_string(), b.path().display().to_string());
+    let list = statuses(&pa, &pb, &CompareOptions::default());
+    assert_eq!(status_of(&list, "same.docx"), Status::Similar);
+    assert_eq!(status_of(&list, "changed.docx"), Status::Different);
+    assert_eq!(status_of(&list, "same.png"), Status::Similar);
+    assert_eq!(status_of(&list, "changed.png"), Status::Different);
+
+    let bytes_only = CompareOptions { compare_contents: false, ..Default::default() };
+    let list = statuses(&pa, &pb, &bytes_only);
+    assert_eq!(status_of(&list, "same.docx"), Status::Different);
+
+    // The document view shows the text, entities decoded.
+    let text = parallax_core::convert::render(
+        parallax_core::convert::View::Document,
+        "a.docx",
+        &fs::read(a.path().join("same.docx")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(text, "Hello\nA & B\n");
 }

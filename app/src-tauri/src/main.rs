@@ -5,6 +5,8 @@ mod commands;
 
 fn main() {
     let startup = commands::StartupRequest::from_args(std::env::args().skip(1));
+    // Loading the grammars takes a few hundred milliseconds; do it before the first file opens.
+    std::thread::spawn(parallax_core::highlight::view_syntax);
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(commands::AppState::new(startup))

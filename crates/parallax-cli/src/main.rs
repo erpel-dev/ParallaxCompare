@@ -8,6 +8,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use parallax_core::compare::{self, CompareMode, CompareOptions, Control, Node, Status};
+use parallax_core::convert::{self, View};
 use parallax_core::source::{Source, SourceOptions, SourceSpec, open_pair};
 use parallax_core::text;
 use parallax_core::textdiff::{self, DiffOptions, RowKind, WhitespaceMode};
@@ -34,6 +35,10 @@ struct Cli {
     /// Treat CRLF and LF line endings as different
     #[arg(long)]
     strict_eol: bool,
+
+    /// Compare documents and images by bytes only (no "similar" by text or pixels)
+    #[arg(long)]
+    bytes: bool,
 
     /// Exclude names or paths matching a glob (repeatable); replaces the default .git/.svn/.hg
     #[arg(long, short = 'x', value_name = "GLOB")]
@@ -62,6 +67,14 @@ struct Cli {
     /// Ignore case for file compare
     #[arg(long, short = 'i')]
     ignore_case: bool,
+
+    /// Use the histogram diff algorithm instead of Myers for file compare
+    #[arg(long)]
+    histogram: bool,
+
+    /// Compare files as raw text, without document, executable or firmware views
+    #[arg(long)]
+    raw: bool,
 
     /// Lines of context for file compare
     #[arg(long, short = 'U', default_value_t = 3)]
@@ -129,13 +142,15 @@ fn compare_folders(cli: &Cli, left: &Source, right: &Source, paint: &Paint) -> R
     let mut opts = CompareOptions {
         mode: if cli.quick { CompareMode::Quick } else { CompareMode::Content },
         ignore_line_endings: !cli.strict_eol,
+        compare_contents: !cli.bytes,
         ..Default::default()
     };
     if !cli.exclude.is_empty() {
         opts.excludes = cli.exclude.clone();
     }
     let result = compare::compare(left, right, &opts, &Control::default())?;
-    let identical = result.root.status == Status::Same;
+    // Like `diff`, only differences that count under the active rules make the exit status 1.
+    let identical = matches!(result.root.status, Status::Same | Status::Similar);
     let mut out = std::io::stdout().lock();
     if cli.json {
         serde_json::to_writer(&mut out, &result)?;
@@ -146,9 +161,10 @@ fn compare_folders(cli: &Cli, left: &Source, right: &Source, paint: &Paint) -> R
     let s = &result.summary;
     writeln!(
         out,
-        "\n{} files compared: {} same, {} different, {} left only, {} right only{}  ({} ms{})",
+        "\n{} files compared: {} same, {} similar, {} different, {} left only, {} right only{}  ({} ms{})",
         s.files,
         s.same,
+        paint.wrap("33", &s.similar.to_string()),
         paint.wrap("31", &s.different.to_string()),
         paint.wrap("35", &s.left_only.to_string()),
         paint.wrap("36", &s.right_only.to_string()),
@@ -173,6 +189,10 @@ fn print_tree(out: &mut impl Write, node: &Node, prefix: &str, all: bool, paint:
         let shown = if is_dir { format!("{path}/") } else { path.clone() };
         let line = match child.status {
             Status::Same => format!("  = {shown}"),
+            Status::Similar => paint.wrap(
+                "33",
+                &format!("  ≈ {shown}{}", child.message.as_deref().map(|m| format!("  ({m})")).unwrap_or_default()),
+            ),
             Status::Different => paint.wrap("31", &format!("  ≠ {shown}")),
             Status::LeftOnly => paint.wrap("35", &format!("  ← {shown}")),
             Status::RightOnly => paint.wrap("36", &format!("  → {shown}")),
@@ -182,7 +202,9 @@ fn print_tree(out: &mut impl Write, node: &Node, prefix: &str, all: bool, paint:
         };
         writeln!(out, "{line}")?;
         // Orphan folders are summarised by their top entry.
-        if matches!(child.status, Status::Different | Status::Error) || (all && child.status == Status::Same) {
+        if matches!(child.status, Status::Different | Status::Similar | Status::Error)
+            || (all && child.status == Status::Same)
+        {
             print_tree(out, child, &path, all, paint)?;
         }
     }
@@ -196,11 +218,35 @@ fn compare_files(cli: &Cli, left: &Source, right: &Source, paint: &Paint) -> Res
     if *left_data == *right_data {
         return Ok(true);
     }
-    if text::is_binary(&left_data) || text::is_binary(&right_data) {
+    // Documents, executables, firmware and images are compared through their content view.
+    let name = left.root.rsplit('/').next().unwrap_or_default();
+    let view = if cli.raw {
+        View::Text
+    } else {
+        convert::views_for_pair(Some((name, &left_data)), Some((name, &right_data)))[0]
+    };
+    if view == View::Image {
+        let d = convert::image_diff(name, Some(&left_data), Some(&right_data))?;
+        match (&d.note, d.different_pixels) {
+            (Some(note), _) => writeln!(out, "Images differ: {note}")?,
+            (None, 0) => writeln!(out, "Images have identical pixels; the files differ in encoding")?,
+            (None, n) => writeln!(out, "Images differ in {n} of {} pixels, area {:?}", d.total_pixels, d.bounds)?,
+        }
+        return Ok(d.note.is_none() && d.different_pixels == 0);
+    }
+    if view == View::Hex || (view == View::Text && (text::is_binary(&left_data) || text::is_binary(&right_data))) {
         writeln!(out, "Binary files differ ({} vs {} bytes)", left_data.len(), right_data.len())?;
         return Ok(false);
     }
-    let (a, b) = (text::decode(&left_data), text::decode(&right_data));
+    let (a, b) = if view == View::Text {
+        (text::decode(&left_data), text::decode(&right_data))
+    } else {
+        let render = |data: &[u8]| convert::render(view, name, data).with_context(|| format!("{} view", view.label()));
+        (text::decode(render(&left_data)?.as_bytes()), text::decode(render(&right_data)?.as_bytes()))
+    };
+    if view != View::Text && !cli.json {
+        writeln!(out, "Comparing as: {}", view.label())?;
+    }
     let opts = DiffOptions {
         whitespace: match cli.whitespace {
             Ws::Exact => WhitespaceMode::Exact,
@@ -208,7 +254,7 @@ fn compare_files(cli: &Cli, left: &Source, right: &Source, paint: &Paint) -> Res
             Ws::IgnoreAll => WhitespaceMode::IgnoreAll,
         },
         ignore_case: cli.ignore_case,
-        minimal: false,
+        histogram: cli.histogram,
     };
     let diff = textdiff::diff_docs(&a, &b, &opts);
     if cli.json {
@@ -243,10 +289,13 @@ fn compare_files(cli: &Cli, left: &Source, right: &Source, paint: &Paint) -> Res
     }
     for (start, end) in groups {
         let slice = &rows[start as usize..end as usize];
-        let first_l = slice.iter().find_map(|r| r.left).map_or(0, |l| l + 1);
-        let first_r = slice.iter().find_map(|r| r.right).map_or(0, |r| r + 1);
         let count_l = slice.iter().filter(|r| r.left.is_some()).count();
         let count_r = slice.iter().filter(|r| r.right.is_some()).count();
+        // Like `diff -u`: a side without lines in the hunk names the line before it.
+        let before_l = rows[..start as usize].iter().filter(|r| r.left.is_some()).count();
+        let before_r = rows[..start as usize].iter().filter(|r| r.right.is_some()).count();
+        let first_l = before_l + usize::from(count_l > 0);
+        let first_r = before_r + usize::from(count_r > 0);
         writeln!(out, "{}", paint.wrap("36", &format!("@@ -{first_l},{count_l} +{first_r},{count_r} @@")))?;
         // Within a section, print removed lines before added ones.
         let mut i = 0;
