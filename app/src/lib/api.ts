@@ -125,7 +125,15 @@ export type View =
   | "tensors"
   | "classOutline"
   | "bytecode"
-  | "bytecodeLines";
+  | "bytecodeLines"
+  | "dependencies"
+  | "notebook"
+  | "notebookCode"
+  | "normalizedYaml"
+  | "normalizedToml"
+  | "table"
+  | "certificate"
+  | "email";
 
 export interface ImageSideView {
   url: string;

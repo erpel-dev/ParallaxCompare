@@ -727,6 +727,8 @@ pub async fn open_file_diff(
                 .or_else(|| highlight::detect_syntax(&name, first_line.unwrap_or_default()).map(|s| s.name.clone())),
             View::PrettyXml => Some("XML".into()),
             View::PrettyJson => Some("JSON".into()),
+            View::NormalizedYaml => Some("YAML".into()),
+            View::NormalizedToml => Some("TOML".into()),
             View::ChatTemplate => syntax.or_else(|| Some("Jinja2".into())),
             View::Image => None,
             _ => Some(highlight::view_syntax().name.clone()),
