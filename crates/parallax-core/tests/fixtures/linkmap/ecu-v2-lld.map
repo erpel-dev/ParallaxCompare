@@ -1,0 +1,43 @@
+             VMA              LMA     Size Align Out     In      Symbol
+         8000000          8000000       20    32 .isr_vector
+         8000000          8000000       20    32         main.o:(.isr_vector)
+         8000000          8000000       20     1                 vectors
+         8000020          8000020      180    32 .text
+         8000020          8000020       76     1         main.o:(.text.reset_handler)
+         8000020          8000020       76     1                 reset_handler
+         8000096          8000096       5f     1         control.o:(.text.control_step)
+         8000096          8000096       5f     1                 control_step
+         80000f5          80000f5        d     1         control.o:(.text.sensor_read)
+         80000f5          80000f5        d     1                 sensor_read
+         8000102          8000102        b     1         diag.o:(.text.diag_poll)
+         8000102          8000102        b     1                 diag_poll
+         800010d          800010d       11     1         libdrivers.a(can.o):(.text.can_init)
+         800010d          800010d       11     1                 can_init
+         8000120          8000120       80    32         control.o:(.rodata.ignition_map)
+         8000120          8000120       80     1                 ignition_map
+         80001a0          80001a0        0     1         _etext = .
+        20000000          80001a0        4     4 .data
+        20000000          80001a0        0     1         _sdata = .
+        20000000          80001a0        4     4         main.o:(.data.engine_state)
+        20000000          80001a0        4     1                 engine_state
+        20000004          80001a4        0     1         _edata = .
+        20000004         20000004       10     4 .bss
+        20000004         20000004        0     1         _sbss = .
+        20000004         20000004        4     4         main.o:(.bss.tick_count)
+        20000004         20000004        4     1                 tick_count
+        20000008         20000008        4     4         control.o:(.bss.integrator)
+        20000008         20000008        4     1                 integrator
+        2000000c         2000000c        4     4         diag.o:(.bss.diag_requests)
+        2000000c         2000000c        4     1                 diag_requests
+        20000010         20000010        4     4         libdrivers.a(can.o):(.bss.can_bitrate)
+        20000010         20000010        4     1                 can_bitrate
+        20000014         20000014        0     1         _ebss = .
+        40024000         40024000        4     4 .backup
+        40024000         40024000        4     4         main.o:(.backup)
+        40024000         40024000        4     1                 reset_reason
+               0                0      228     8 .symtab
+               0                0      228     8         <internal>:(.symtab)
+               0                0       40     1 .shstrtab
+               0                0       40     1         <internal>:(.shstrtab)
+               0                0       d9     1 .strtab
+               0                0       d9     1         <internal>:(.strtab)

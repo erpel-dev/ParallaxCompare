@@ -125,7 +125,13 @@ export type View =
   | "tensors"
   | "classOutline"
   | "bytecode"
-  | "bytecodeLines";
+  | "bytecodeLines"
+  | "canDatabase"
+  | "a2lObjects"
+  | "memoryMap"
+  | "debugSymbols"
+  | "measurement"
+  | "calibration";
 
 export interface ImageSideView {
   url: string;

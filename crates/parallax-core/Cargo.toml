@@ -34,7 +34,8 @@ thiserror = "2"
 serde.workspace = true
 serde_json = { workspace = true, features = ["preserve_order"] }
 quick-xml = "0.42"
-object = { version = "0.40", default-features = false, features = ["read", "std"] }
+object = { version = "0.40", default-features = false, features = ["read", "std", "compression"] }
+gimli = { version = "0.34", default-features = false, features = ["read", "std"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp", "tiff", "ico"] }
 pdf-extract = "0.12"
 crc32fast = "1"
