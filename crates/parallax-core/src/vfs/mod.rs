@@ -120,6 +120,30 @@ impl fmt::Debug for Data {
     }
 }
 
+/// A write to a tree, for [`Vfs::apply`].
+#[derive(Debug, Clone)]
+pub enum Change {
+    /// Creates or replaces a file, a symlink (`data` is its target path) or a folder (no data).
+    Put { path: String, kind: EntryKind, data: Data, mtime: Option<i64> },
+    /// Deletes an entry, folders with their contents.
+    Remove { path: String },
+}
+
+impl Change {
+    pub fn path(&self) -> &str {
+        match self {
+            Change::Put { path, .. } | Change::Remove { path } => path,
+        }
+    }
+
+    pub(crate) fn with_path(mut self, new: String) -> Self {
+        match &mut self {
+            Change::Put { path, .. } | Change::Remove { path } => *path = new,
+        }
+        self
+    }
+}
+
 pub trait Vfs: Send + Sync {
     /// Human-readable description of the tree root.
     fn label(&self) -> String;
@@ -133,6 +157,14 @@ pub trait Vfs: Send + Sync {
     }
     /// Tells a provider that caches its tree that `path` was written or deleted.
     fn changed(&self, _path: &str) {}
+    /// Whether [`apply`](Self::apply) can write to this tree.
+    fn writable(&self) -> bool {
+        false
+    }
+    /// Writes `changes` in one go; for an archive, that is one rewrite of the archive.
+    fn apply(&self, _changes: Vec<Change>) -> Result<()> {
+        Err(crate::Error::Unsupported(format!("{} is read-only", self.label())))
+    }
 }
 
 pub fn join(dir: &str, name: &str) -> String {

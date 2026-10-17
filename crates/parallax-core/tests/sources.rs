@@ -439,3 +439,196 @@ fn documents_and_images_compare_by_content() {
     .unwrap();
     assert_eq!(text, "Hello\nA & B\n");
 }
+
+/// An archive of the given type holding `files`.
+fn archive_bytes(kind: &str, files: &[(&str, &str)]) -> Vec<u8> {
+    use std::io::Write as _;
+    if kind == "zip" {
+        return zip_bytes(files);
+    }
+    if kind.starts_with("7z") {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), files);
+        let mut writer = sevenz_rust2::ArchiveWriter::new(std::io::Cursor::new(Vec::new())).unwrap();
+        if kind == "7z" {
+            writer.push_source_path(dir.path(), |_| true).unwrap();
+        } else {
+            writer.push_source_path_non_solid(dir.path(), |_| true).unwrap();
+        }
+        return writer.finish().unwrap().into_inner();
+    }
+    let mut tar = tar::Builder::new(Vec::new());
+    for (path, content) in files {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(content.len() as u64);
+        header.set_mode(0o644);
+        tar.append_data(&mut header, path, content.as_bytes()).unwrap();
+    }
+    let raw = tar.into_inner().unwrap();
+    match kind {
+        "tar" => raw,
+        "tar.gz" => {
+            let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+            enc.write_all(&raw).unwrap();
+            enc.finish().unwrap()
+        }
+        "tar.bz2" => {
+            let mut enc = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::fast());
+            enc.write_all(&raw).unwrap();
+            enc.finish().unwrap()
+        }
+        "tar.xz" => {
+            let mut enc = lzma_rust2::XzWriter::new(Vec::new(), lzma_rust2::XzOptions::with_preset(1)).unwrap();
+            enc.write_all(&raw).unwrap();
+            enc.finish().unwrap()
+        }
+        "tar.zst" => ruzstd::encoding::compress_to_vec(&raw[..], ruzstd::encoding::CompressionLevel::Fastest),
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn copy_into_and_delete_from_archives() {
+    for kind in ["zip", "7z", "7z-non-solid", "tar", "tar.gz", "tar.bz2", "tar.xz", "tar.zst"] {
+        let dir = tempfile::tempdir().unwrap();
+        let ext = kind.trim_end_matches("-non-solid");
+        let archive = dir.path().join(format!("pack.{ext}"));
+        let original =
+            [("a/one.txt", "1"), ("a/two.txt", "22"), ("keep.txt", "k"), ("gone/x.txt", "x"), ("empty.txt", "")];
+        fs::write(&archive, archive_bytes(kind, &original)).unwrap();
+        let folder = dir.path().join("folder");
+        write(
+            &folder,
+            &[
+                ("a/one.txt", "1"),
+                ("a/two.txt", "changed"),
+                ("new/deep/n.txt", "n"),
+                ("other.txt", "o"),
+                ("empty.txt", ""),
+            ],
+        );
+
+        let spec = |p: &Path| SourceSpec::parse(&p.display().to_string());
+        let (l, r) = open_pair(&spec(&archive), &spec(&folder), SourceOptions::default(), false).unwrap();
+        let opts = CompareOptions::default();
+        let refresh = |path: &str| compare::compare_path(&l, &r, path, &opts, &Control::default()).unwrap().root.status;
+        assert!(l.info.writable, "{kind}");
+        assert_eq!(parallax_core::ops::copy(&r, &l, "a/two.txt").unwrap(), 1, "{kind}");
+        assert_eq!(refresh("a/two.txt"), Status::Same, "{kind}");
+        // An empty file first, then folders: see the 7z header check below.
+        parallax_core::ops::copy(&r, &l, "empty.txt").unwrap();
+        assert_eq!(parallax_core::ops::copy(&r, &l, "new").unwrap(), 1, "{kind}");
+        assert_eq!(refresh("new"), Status::Same, "{kind}");
+        parallax_core::ops::delete(&l, "gone").unwrap();
+        parallax_core::ops::delete(&l, "keep.txt").unwrap();
+
+        // A fresh look at the file on disk.
+        let list = statuses(&archive.display().to_string(), &folder.display().to_string(), &opts);
+        let expect = [
+            ("a/one.txt", Status::Same),
+            ("a/two.txt", Status::Same),
+            ("new/deep/n.txt", Status::Same),
+            ("other.txt", Status::RightOnly),
+        ];
+        for (path, status) in expect {
+            assert_eq!(status_of(&list, path), status, "{kind}: {path}");
+        }
+        assert!(!list.iter().any(|(p, _)| p.starts_with("gone") || p == "keep.txt"), "{kind}: {list:?}");
+        assert_eq!(status_of(&list, "empty.txt"), Status::Same, "{kind}");
+        if ext == "7z" {
+            // 7-Zip rejects the header when a folder follows the last empty file, since
+            // sevenz-rust2 then writes the empty-file vector too short.
+            let data = fs::read(&archive).unwrap();
+            let parsed =
+                sevenz_rust2::Archive::read(&mut std::io::Cursor::new(&data[..]), &sevenz_rust2::Password::empty())
+                    .unwrap();
+            let without_data: Vec<_> = parsed.files.iter().filter(|f| !f.has_stream).collect();
+            assert!(without_data.iter().any(|f| !f.is_directory), "{kind}: the empty file has no data");
+            assert!(!without_data.last().unwrap().is_directory, "{kind}: {}", without_data.last().unwrap().name);
+        }
+        let leftovers: Vec<_> = fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(leftovers.len(), 2, "{kind}: temporary files left: {leftovers:?}");
+    }
+}
+
+#[test]
+fn write_into_nested_archives() {
+    let dir = tempfile::tempdir().unwrap();
+    let left = dir.path().join("left");
+    write(&left, &[("lib/x.txt", "x")]);
+    let inner = archive_bytes("tar.gz", &[("x.txt", "old")]);
+    let outer = {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let mut zip = zip::ZipWriter::new(&mut buf);
+        zip.start_file("readme.md", zip::write::SimpleFileOptions::default()).unwrap();
+        zip.write_all(b"hi").unwrap();
+        zip.start_file("lib.tar.gz", zip::write::SimpleFileOptions::default()).unwrap();
+        zip.write_all(&inner).unwrap();
+        zip.finish().unwrap();
+        buf.into_inner()
+    };
+    let right = dir.path().join("right");
+    fs::create_dir_all(&right).unwrap();
+    fs::write(right.join("bundle.zip"), outer).unwrap();
+    // Left: a folder named like the right side's nested archive path.
+    fs::create_dir_all(left.join("bundle.zip")).unwrap();
+    fs::rename(left.join("lib"), left.join("bundle.zip/lib.tar.gz")).unwrap();
+
+    let spec = |p: &Path| SourceSpec::parse(&p.display().to_string());
+    let (l, r) = open_pair(&spec(&left), &spec(&right), SourceOptions::default(), false).unwrap();
+    parallax_core::ops::copy(&l, &r, "bundle.zip/lib.tar.gz/x.txt").unwrap();
+    let list = statuses(&left.display().to_string(), &right.display().to_string(), &CompareOptions::default());
+    assert_eq!(status_of(&list, "bundle.zip/lib.tar.gz/x.txt"), Status::Same);
+    assert_eq!(status_of(&list, "bundle.zip/readme.md"), Status::RightOnly);
+}
+
+#[test]
+fn git_revisions_stay_read_only() {
+    let repo = make_repo();
+    let other = tempfile::tempdir().unwrap();
+    write(other.path(), &[("new.txt", "n")]);
+    let (l, r) = open_pair(
+        &SourceSpec::parse(&format!("{}@main", repo.path().display())),
+        &SourceSpec::parse(&other.path().display().to_string()),
+        SourceOptions::default(),
+        false,
+    )
+    .unwrap();
+    assert!(!l.info.writable);
+    assert!(matches!(parallax_core::ops::copy(&r, &l, "new.txt"), Err(parallax_core::Error::Unsupported(_))));
+}
+
+#[test]
+fn zip_rewrite_keeps_entries_as_stored() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pack.zip");
+    let mut buf = std::io::Cursor::new(Vec::new());
+    let mut zip = zip::ZipWriter::new(&mut buf);
+    // Info-ZIP's Unix UID/GID field, which the `zip` tool writes for every entry.
+    let mut options = zip::write::FullFileOptions::default();
+    options.add_extra_field(0x7875, [1, 4, 0, 0, 0, 0, 4, 0, 0, 0, 0], false).unwrap();
+    zip.start_file("old.txt", options).unwrap();
+    zip.write_all(b"old").unwrap();
+    zip.set_comment("release 1").unwrap();
+    zip.finish().unwrap();
+    fs::write(&path, buf.into_inner()).unwrap();
+    let folder = dir.path().join("folder");
+    write(&folder, &[("new.txt", "new")]);
+
+    let (l, r) = open_pair(
+        &SourceSpec::parse(&path.display().to_string()),
+        &SourceSpec::parse(&folder.display().to_string()),
+        SourceOptions::default(),
+        false,
+    )
+    .unwrap();
+    parallax_core::ops::copy(&r, &l, "new.txt").unwrap();
+
+    let mut zip = zip::ZipArchive::new(fs::File::open(&path).unwrap()).unwrap();
+    assert_eq!(zip.comment(), b"release 1");
+    let old = zip.by_name("old.txt").unwrap();
+    let extra = old.extra_data().unwrap_or_default();
+    assert!(extra.windows(2).any(|w| w == [0x75, 0x78]), "{extra:?}");
+    drop(old);
+    assert_eq!(std::io::read_to_string(zip.by_name("new.txt").unwrap()).unwrap(), "new");
+}

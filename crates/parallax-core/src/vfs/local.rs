@@ -7,7 +7,7 @@ use std::time::SystemTime;
 
 use parking_lot::{Mutex, RwLock};
 
-use super::{Data, Entry, EntryKind, Vfs, find_entry, root_entry, split_parent};
+use super::{Change, Data, Entry, EntryKind, Vfs, find_entry, root_entry, split_parent};
 use crate::{Error, Result};
 
 /// Files below this size are read into memory; larger ones are memory-mapped.
@@ -211,6 +211,36 @@ impl Vfs for LocalFs {
         Some(self.abs(path))
     }
 
+    fn writable(&self) -> bool {
+        true
+    }
+
+    fn apply(&self, changes: Vec<Change>) -> Result<()> {
+        for change in changes {
+            let path = change.path().to_string();
+            let abs = self.abs(&path);
+            let io_err = |e| Error::io(abs.display().to_string(), e);
+            let result = match change {
+                Change::Put { kind: EntryKind::Dir, .. } => fs::create_dir_all(&abs).map_err(io_err),
+                Change::Put { kind: EntryKind::Symlink, data, .. } => {
+                    if fs::symlink_metadata(&abs).is_ok() {
+                        fs::remove_file(&abs).map_err(io_err)?;
+                    }
+                    make_symlink(&String::from_utf8_lossy(&data), &abs).map_err(io_err)
+                }
+                Change::Put { data, mtime, .. } => replace_file(&abs, &data, mtime).map_err(io_err),
+                Change::Remove { .. } => match fs::symlink_metadata(&abs) {
+                    Ok(meta) if meta.is_dir() => fs::remove_dir_all(&abs).map_err(io_err),
+                    Ok(_) => fs::remove_file(&abs).map_err(io_err),
+                    Err(_) => Ok(()),
+                },
+            };
+            self.changed(&path);
+            result?;
+        }
+        Ok(())
+    }
+
     /// Updates the snapshot at `path` from disk, with the same ignore rules as the first walk.
     fn changed(&self, path: &str) {
         let Some(snapshot) = &self.snapshot else {
@@ -250,5 +280,50 @@ impl Vfs for LocalFs {
             insert_walked(&mut dirs, vec![(path.to_string(), entry)]);
             insert_walked(&mut dirs, below);
         }
+    }
+}
+
+/// Writes a file through a temporary file in the same folder and renames it over
+/// the old one, so a failed write leaves the old file intact.
+fn replace_file(path: &Path, data: &[u8], mtime: Option<i64>) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let temp = path.with_file_name(format!(".{name}.{}.parallax-tmp", std::process::id()));
+    let result = (|| {
+        let mut file = fs::File::create(&temp)?;
+        file.write_all(data)?;
+        if let Some(mtime) = mtime.filter(|t| *t >= 0) {
+            file.set_modified(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(mtime as u64))?;
+        }
+        file.sync_all()?;
+        drop(file);
+        if let Ok(meta) = fs::metadata(path) {
+            fs::set_permissions(&temp, meta.permissions())?;
+        }
+        fs::rename(&temp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
+}
+
+#[cfg(unix)]
+pub(crate) fn make_symlink(link_to: &str, at: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(link_to, at)
+}
+
+/// Windows needs developer mode or admin rights for symlinks; the error is reported as is.
+#[cfg(windows)]
+pub(crate) fn make_symlink(link_to: &str, at: &Path) -> std::io::Result<()> {
+    let target = link_to.replace('/', "\\");
+    let resolved = at.parent().map(|p| p.join(&target));
+    if resolved.is_some_and(|p| p.is_dir()) {
+        std::os::windows::fs::symlink_dir(target, at)
+    } else {
+        std::os::windows::fs::symlink_file(target, at)
     }
 }
