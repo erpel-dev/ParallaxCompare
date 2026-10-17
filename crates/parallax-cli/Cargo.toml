@@ -16,5 +16,9 @@ anyhow.workspace = true
 serde_json.workspace = true
 clap = { version = "4", features = ["derive"] }
 
+# musl's allocator serialises the parallel compare; the static Linux build uses mimalloc.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = "0.1"
+
 [dev-dependencies]
 tempfile = "3"
