@@ -238,13 +238,19 @@ pub fn open_pair(
     merge_base: bool,
 ) -> Result<(Source, Source)> {
     let mut left = left.clone();
+    let mut label = None;
     if merge_base
         && let (SourceSpec::GitRev { repo, rev, .. }, SourceSpec::GitRev { rev: right_rev, .. }) = (&mut left, right)
     {
         let git = GitRepo::discover(&*repo)?;
+        label = Some(format!("{rev} (merge-base)"));
         *rev = git.merge_base(rev, right_rev)?;
     }
-    Ok((left.open(opts)?, right.open(opts)?))
+    let mut left = left.open(opts)?;
+    if label.is_some() {
+        left.info.rev = label;
+    }
+    Ok((left, right.open(opts)?))
 }
 
 #[cfg(test)]

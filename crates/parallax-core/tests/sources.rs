@@ -180,6 +180,7 @@ fn git_branches() {
 
     // Compared against the merge-base, main's own README change disappears.
     let (l, r) = open_pair(&left, &right, SourceOptions::default(), true).unwrap();
+    assert_eq!(l.info.rev.as_deref(), Some("main (merge-base)"));
     let result = compare::compare(&l, &r, &CompareOptions::default(), &Control::default()).unwrap();
     let list = compare::flatten(&result.root);
     assert!(!list.iter().any(|(p, _)| p == "README.md"));
