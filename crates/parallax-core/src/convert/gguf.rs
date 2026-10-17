@@ -374,7 +374,7 @@ impl Gguf {
 
 // ---- Formatting helpers ----
 
-fn escape(s: &str) -> String {
+pub(super) fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     for c in s.chars() {
         match c {
@@ -391,7 +391,7 @@ fn escape(s: &str) -> String {
     out
 }
 
-fn short_hash(data: &[u8]) -> String {
+pub(super) fn short_hash(data: &[u8]) -> String {
     format!("{:08x}", crc32fast::hash(data))
 }
 
@@ -450,7 +450,7 @@ fn describe(value: &Value) -> String {
     }
 }
 
-fn count(n: u64) -> String {
+pub(super) fn count(n: u64) -> String {
     let s = n.to_string();
     let mut out = String::new();
     for (i, c) in s.chars().enumerate() {
@@ -462,7 +462,7 @@ fn count(n: u64) -> String {
     out
 }
 
-fn size(bytes: u64) -> String {
+pub(super) fn size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut v = bytes as f64;
     let mut unit = 0;
@@ -473,7 +473,7 @@ fn size(bytes: u64) -> String {
     if unit == 0 { format!("{bytes} B") } else { format!("{v:.2} {}", UNITS[unit]) }
 }
 
-fn parameters(n: u64) -> String {
+pub(super) fn parameters(n: u64) -> String {
     match n {
         n if n >= 1_000_000_000 => format!("{:.2} B", n as f64 / 1e9),
         n if n >= 1_000_000 => format!("{:.1} M", n as f64 / 1e6),
@@ -481,7 +481,7 @@ fn parameters(n: u64) -> String {
     }
 }
 
-fn line(out: &mut String, label: &str, value: impl std::fmt::Display) {
+pub(super) fn line(out: &mut String, label: &str, value: impl std::fmt::Display) {
     let _ = writeln!(out, "{:<18} {value}", format!("{label}:"));
 }
 
@@ -762,7 +762,7 @@ fn break_at_tags(template: &str) -> String {
 }
 
 /// Sorts tensor names so that `blk.10` follows `blk.9`.
-fn natural_key(name: &str) -> Vec<(String, u64)> {
+pub(super) fn natural_key(name: &str) -> Vec<(String, u64)> {
     name.split('.').map(|part| part.parse::<u64>().map_or((part.to_string(), 0), |n| (String::new(), n))).collect()
 }
 
