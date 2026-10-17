@@ -3,6 +3,10 @@
 //! The directory index is built once from the archive headers, so listing never
 //! decompresses anything. zip and 7z headers carry a CRC32 per entry, which the
 //! compare engine uses as a [`QuickId`].
+//!
+//! Writing rewrites the whole archive, see [`write`].
+
+mod write;
 
 use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Read};
@@ -113,6 +117,8 @@ enum Backend {
     },
     /// tar streams are decompressed once while indexing.
     Tar {
+        data: Data,
+        format: ArchiveFormat,
         contents: HashMap<String, Arc<Vec<u8>>>,
     },
 }
@@ -130,7 +136,7 @@ impl ArchiveFs {
         let backend = match format {
             ArchiveFormat::Zip => open_zip(data, &mut index)?,
             ArchiveFormat::SevenZ => open_7z(data, &mut index)?,
-            _ => open_tar(&data, format, &mut index)?,
+            _ => open_tar(data, format, &mut index)?,
         };
         Ok(ArchiveFs { label, index, backend })
     }
@@ -195,17 +201,20 @@ fn open_7z(data: Data, index: &mut Index) -> Result<Backend> {
     Ok(Backend::SevenZ { data, archive: Box::new(archive), index_of, solid })
 }
 
-fn open_tar(data: &Data, format: ArchiveFormat, index: &mut Index) -> Result<Backend> {
-    let raw: &[u8] = data;
-    let reader: Box<dyn Read> = match format {
+/// The decompressed tar stream of a tar archive.
+fn tar_reader(raw: &[u8], format: ArchiveFormat) -> Result<Box<dyn Read + '_>> {
+    Ok(match format {
         ArchiveFormat::Tar => Box::new(raw),
         ArchiveFormat::TarGz => Box::new(flate2::read::MultiGzDecoder::new(raw)),
         ArchiveFormat::TarXz => Box::new(lzma_rust2::XzReader::new(raw, true)),
         ArchiveFormat::TarZst => Box::new(ruzstd::decoding::StreamingDecoder::new(raw).map_err(Error::archive)?),
         ArchiveFormat::TarBz2 => Box::new(bzip2::read::MultiBzDecoder::new(raw)),
         ArchiveFormat::Zip | ArchiveFormat::SevenZ => unreachable!("not a tar format"),
-    };
-    let mut archive = tar::Archive::new(reader);
+    })
+}
+
+fn open_tar(data: Data, format: ArchiveFormat, index: &mut Index) -> Result<Backend> {
+    let mut archive = tar::Archive::new(tar_reader(&data, format)?);
     let mut contents = HashMap::new();
     for entry in archive.entries().map_err(Error::archive)? {
         let mut entry = entry.map_err(Error::archive)?;
@@ -234,7 +243,8 @@ fn open_tar(data: &Data, format: ArchiveFormat, index: &mut Index) -> Result<Bac
             _ => {}
         }
     }
-    Ok(Backend::Tar { contents })
+    drop(archive);
+    Ok(Backend::Tar { data, format, contents })
 }
 
 /// Decodes all files of one 7z block.
@@ -318,7 +328,7 @@ impl Vfs for ArchiveFs {
                 };
                 files.get(path).cloned().map(Data::from_shared).ok_or_else(not_found)
             }
-            Backend::Tar { contents } => contents.get(path).cloned().map(Data::from_shared).ok_or_else(not_found),
+            Backend::Tar { contents, .. } => contents.get(path).cloned().map(Data::from_shared).ok_or_else(not_found),
         }
     }
 }

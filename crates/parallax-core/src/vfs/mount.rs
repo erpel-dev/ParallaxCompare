@@ -1,15 +1,18 @@
 //! Makes archives inside any tree browsable as folders, including archives nested
 //! in archives and archives stored in Git commits.
+//!
+//! Writes into an archive rewrite it and store the new archive file in the tree it
+//! lives in; for a nested archive, that is a write into the outer archive.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 
 use super::archive::{ArchiveFs, detect_format};
-use super::{Data, Entry, EntryKind, Vfs, join, split_parent};
-use crate::Result;
+use super::{Change, Data, Entry, EntryKind, Vfs, join, split_parent};
+use crate::{Error, Result};
 
 pub struct ArchiveMount {
     base: Arc<dyn Vfs>,
@@ -17,11 +20,14 @@ pub struct ArchiveMount {
     /// explicitly point into an archive are always resolved.
     expand: bool,
     cache: Mutex<HashMap<String, Arc<ArchiveFs>>>,
+    /// Writes run one at a time: two rewrites of the same archive from the same old
+    /// version would lose the first one's changes.
+    writing: Mutex<()>,
 }
 
 impl ArchiveMount {
     pub fn new(base: Arc<dyn Vfs>, expand: bool) -> Self {
-        ArchiveMount { base, expand, cache: Mutex::new(HashMap::new()) }
+        ArchiveMount { base, expand, cache: Mutex::new(HashMap::new()), writing: Mutex::new(()) }
     }
 
     /// Maps a mount path to the provider that owns it and the path inside it.
@@ -55,11 +61,13 @@ impl ArchiveMount {
         inner: &str,
         outer: &str,
         format: super::archive::ArchiveFormat,
-    ) -> Result<Arc<dyn Vfs>> {
+    ) -> Result<Arc<ArchiveFs>> {
         if let Some(archive) = self.cache.lock().get(outer) {
             return Ok(archive.clone());
         }
-        let data: Data = vfs.read(inner)?;
+        // A copy, not a memory map: Windows cannot replace a mapped file when the
+        // archive is written to.
+        let data = Data::from_vec(vfs.read(inner)?.to_vec());
         let label = format!("{}/{}", vfs.label(), inner);
         let archive = Arc::new(ArchiveFs::open(data, format, label)?);
         self.cache.lock().insert(outer.to_string(), archive.clone());
@@ -111,4 +119,73 @@ impl Vfs for ArchiveMount {
         self.cache.lock().retain(|outer, _| outer != path && !outer.starts_with(&prefix));
         self.base.changed(path);
     }
+
+    fn writable(&self) -> bool {
+        self.base.writable()
+    }
+
+    fn apply(&self, changes: Vec<Change>) -> Result<()> {
+        if !self.base.writable() {
+            return Err(Error::Unsupported(format!("{} is read-only", self.label())));
+        }
+        let _writing = self.writing.lock();
+        let (mut direct, nested) = split_by_archive(&*self.base, changes);
+        for (outer, inner) in nested {
+            let archive = self.open_archive(&*self.base, &outer, &outer, archive_format(&outer))?;
+            let data = Data::from_vec(rewrite(&archive, inner)?);
+            direct.push(Change::Put { path: outer, kind: EntryKind::File, data, mtime: None });
+        }
+        let paths: Vec<String> = direct.iter().map(|c| c.path().to_string()).collect();
+        let result = self.base.apply(direct);
+        for path in paths {
+            self.changed(&path);
+        }
+        result
+    }
+}
+
+fn archive_format(path: &str) -> super::archive::ArchiveFormat {
+    detect_format(split_parent(path).1).expect("archive paths come from split_by_archive")
+}
+
+/// Sorts changes into those on `vfs` itself and those inside archives stored in it,
+/// grouped by the archive's path, with paths relative to the archive.
+fn split_by_archive(vfs: &dyn Vfs, changes: Vec<Change>) -> (Vec<Change>, BTreeMap<String, Vec<Change>>) {
+    let mut direct = Vec::new();
+    let mut nested: BTreeMap<String, Vec<Change>> = BTreeMap::new();
+    let mut is_archive: HashMap<String, bool> = HashMap::new();
+    for change in changes {
+        let parts: Vec<&str> = change.path().split('/').collect();
+        let mut prefix = String::new();
+        let mut target = None;
+        // The last part is what is written; an archive there is replaced as a file.
+        for (i, part) in parts.iter().enumerate().take(parts.len().saturating_sub(1)) {
+            prefix = join(&prefix, part);
+            if detect_format(part).is_some()
+                && *is_archive
+                    .entry(prefix.clone())
+                    .or_insert_with(|| vfs.stat(&prefix).is_ok_and(|e| e.kind == EntryKind::File))
+            {
+                target = Some((prefix.clone(), parts[i + 1..].join("/")));
+                break;
+            }
+        }
+        match target {
+            Some((outer, rest)) => nested.entry(outer).or_default().push(change.with_path(rest)),
+            None => direct.push(change),
+        }
+    }
+    (direct, nested)
+}
+
+/// The bytes of `archive` with `changes` applied, which may enter nested archives.
+fn rewrite(archive: &ArchiveFs, changes: Vec<Change>) -> Result<Vec<u8>> {
+    let (mut direct, nested) = split_by_archive(archive, changes);
+    for (outer, inner) in nested {
+        let label = join(&archive.label(), &outer);
+        let child = ArchiveFs::open(archive.read(&outer)?, archive_format(&outer), label)?;
+        let data = Data::from_vec(rewrite(&child, inner)?);
+        direct.push(Change::Put { path: outer, kind: EntryKind::File, data, mtime: None });
+    }
+    archive.rewritten(direct)
 }

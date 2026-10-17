@@ -202,12 +202,16 @@
       kind: "warning",
     });
     if (!ok) return;
+    // Deleting from an archive rewrites it, which takes a while for large ones.
+    busy = `Deleting ${row.path}…`;
     try {
       const node = await api.deleteEntry(session.id, row.path, left, $state.snapshot(options));
       replaceNode(result.root, row.path, node);
       version++;
     } catch (e) {
       error = String(e);
+    } finally {
+      busy = "";
     }
   }
 

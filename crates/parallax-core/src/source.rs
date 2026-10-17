@@ -213,7 +213,8 @@ fn open_local(spec: &SourceSpec, path: &str, opts: SourceOptions) -> Result<Sour
             rev: None,
             commit: None,
             commit_summary: None,
-            writable: !in_archive,
+            // Archives are written by rewriting them.
+            writable: true,
         },
     };
     // Fail early on a bad path inside an archive.
