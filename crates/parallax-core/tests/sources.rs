@@ -204,6 +204,10 @@ fn git_branches() {
 fn git_worktree_against_revision() {
     let dir = make_repo();
     let repo = dir.path().display().to_string();
+    // A tracked file inside an ignored folder stays visible, like in `git status`.
+    write(dir.path(), &[("build/keep.txt", "tracked\n")]);
+    git(dir.path(), &["add", "-f", "build/keep.txt"]);
+    git(dir.path(), &["commit", "-q", "-m", "force-add"]);
     write(dir.path(), &[("build/out.bin", "ignored"), ("src/catalog/list.ts", "edited\n")]);
     let (l, r) = open_pair(
         &SourceSpec::parse(&format!("{repo}@HEAD")),
@@ -217,7 +221,21 @@ fn git_worktree_against_revision() {
     let list = compare::flatten(&result.root);
     assert_eq!(status_of(&list, "src/catalog/list.ts"), Status::Different);
     assert_eq!(status_of(&list, "src/cart.ts"), Status::Same);
-    assert!(!list.iter().any(|(p, _)| p.starts_with("build") || p.starts_with(".git/")));
+    assert_eq!(status_of(&list, "build/keep.txt"), Status::Same);
+    assert!(!list.iter().any(|(p, _)| p == "build/out.bin" || p.starts_with(".git/")));
+
+    // A folder opened directly is shown completely, even when it is ignored itself.
+    let (l, r) = open_pair(
+        &SourceSpec::parse(&format!("{repo}@HEAD:build")),
+        &SourceSpec::parse(&dir.path().join("build").display().to_string()),
+        SourceOptions::default(),
+        false,
+    )
+    .unwrap();
+    let list =
+        compare::flatten(&compare::compare(&l, &r, &CompareOptions::default(), &Control::default()).unwrap().root);
+    assert_eq!(status_of(&list, "keep.txt"), Status::Same);
+    assert_eq!(status_of(&list, "out.bin"), Status::RightOnly);
 }
 
 #[test]
@@ -239,4 +257,53 @@ fn copy_between_sides() {
     assert!(list.iter().all(|(_, s)| *s == Status::Same), "{list:?}");
     parallax_core::ops::delete(&r, "dir").unwrap();
     assert!(!b.path().join("dir").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinks_compare_by_target() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q", "-b", "main"]);
+    write(repo, &[("real/a.txt", "a"), ("other.txt", "o")]);
+    symlink("real", repo.join("dir-link")).unwrap();
+    symlink("other.txt", repo.join("file-link")).unwrap();
+    // A link to a parent folder must not be walked (it would never end).
+    symlink("..", repo.join("real/up")).unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-q", "-m", "links"]);
+
+    let spec = repo.display().to_string();
+    let (l, r) = open_pair(
+        &SourceSpec::parse(&format!("{spec}@HEAD")),
+        &SourceSpec::GitWorktree { repo: spec.clone() },
+        SourceOptions::default(),
+        false,
+    )
+    .unwrap();
+    let result = compare::compare(&l, &r, &CompareOptions::default(), &Control::default()).unwrap();
+    assert_eq!(result.root.status, Status::Same, "{:?}", compare::flatten(&result.root));
+    assert_eq!(r.vfs.stat("dir-link").unwrap().kind, EntryKind::Symlink);
+
+    // Plain folders (no .gitignore snapshot) treat links the same way.
+    let copy = tempfile::tempdir().unwrap();
+    write(copy.path(), &[("real/a.txt", "a"), ("other.txt", "o")]);
+    symlink("real", copy.path().join("dir-link")).unwrap();
+    symlink("elsewhere.txt", copy.path().join("file-link")).unwrap();
+    let list = statuses(&spec, &copy.path().display().to_string(), &CompareOptions::default());
+    assert_eq!(status_of(&list, "dir-link"), Status::Same);
+    assert_eq!(status_of(&list, "file-link"), Status::Different);
+    assert_eq!(status_of(&list, "real/up"), Status::LeftOnly);
+
+    // Copying recreates the link instead of writing its target as a file.
+    let (l, r) = open_pair(
+        &SourceSpec::parse(&spec),
+        &SourceSpec::parse(&copy.path().display().to_string()),
+        SourceOptions::default(),
+        false,
+    )
+    .unwrap();
+    parallax_core::ops::copy(&l, &r, "file-link").unwrap();
+    assert_eq!(fs::read_link(copy.path().join("file-link")).unwrap(), Path::new("other.txt"));
 }
