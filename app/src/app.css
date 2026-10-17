@@ -1,0 +1,147 @@
+:root {
+  --bg: #1e1f22;
+  --panel: #2b2d31;
+  --panel-2: #25272b;
+  --chrome: #18191b;
+  --line: #3a3d43;
+  --text: #d7dae0;
+  --dim: #8b919b;
+  --faint: #5f646d;
+  --accent: #4f8cf0;
+  --accent-bg: #3b5a8e;
+  --sel: #2f4a78;
+  --input: #1b1c1f;
+  --btn: #33363c;
+  --btn-border: #45484f;
+  --diff: #ff8a80;
+  --left-only: #c9a6ff;
+  --right-only: #7fd3f0;
+  --error: #ff5c5c;
+  --row-changed: #4a2a2c;
+  --row-changed-gutter: #3d2526;
+  --row-added: #22392a;
+  --row-added-gutter: #1f3326;
+  --row-removed: #3a2f4d;
+  --row-removed-gutter: #2f2840;
+  --row-minor: #2c2f3a;
+  --mark: #8a3a3a;
+  --mark-added: #2f6b3f;
+  --filler: repeating-linear-gradient(135deg, #26282c 0 6px, #2b2d31 6px 12px);
+  --mono: "JetBrains Mono", "Cascadia Code", "Fira Code", Consolas, "DejaVu Sans Mono", monospace;
+  --ui: system-ui, "Segoe UI", Ubuntu, Cantarell, sans-serif;
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #ffffff;
+    --panel: #f1f2f4;
+    --panel-2: #f7f8f9;
+    --chrome: #e6e8eb;
+    --line: #d5d8dd;
+    --text: #1f2328;
+    --dim: #5d6470;
+    --faint: #9aa1ab;
+    --accent: #2f6fdb;
+    --accent-bg: #d6e4fb;
+    --sel: #cfe0fb;
+    --input: #ffffff;
+    --btn: #ffffff;
+    --btn-border: #c9cdd3;
+    --diff: #c2362f;
+    --left-only: #7b3fc4;
+    --right-only: #0a7ea4;
+    --error: #c2362f;
+    --row-changed: #fde8e7;
+    --row-changed-gutter: #f8d7d5;
+    --row-added: #e3f6e8;
+    --row-added-gutter: #cfeed8;
+    --row-removed: #efe6fb;
+    --row-removed-gutter: #e3d6f6;
+    --row-minor: #f1f3f6;
+    --mark: #f5b5b1;
+    --mark-added: #a8e2b8;
+    --filler: repeating-linear-gradient(135deg, #f1f2f4 0 6px, #e8eaed 6px 12px);
+    color-scheme: light;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.4 var(--ui);
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  background: var(--btn);
+  border: 1px solid var(--btn-border);
+  border-radius: 4px;
+  padding: 3px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+button.on {
+  background: var(--accent-bg);
+  border-color: var(--accent);
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+input[type="text"],
+select {
+  background: var(--input);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 4px 7px;
+}
+
+input[type="text"]:focus,
+select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.sep {
+  width: 1px;
+  align-self: stretch;
+  background: var(--line);
+  margin: 0 4px;
+}
+
+.mono {
+  font-family: var(--mono);
+}

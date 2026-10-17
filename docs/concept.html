@@ -1,0 +1,679 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Folder Compare Concept</title>
+<style>
+:root {
+  --bg: #f7f7f5;
+  --surface: #ffffff;
+  --text: #1d1f23;
+  --muted: #5d6470;
+  --border: #dcdfe4;
+  --accent: #2f6fdb;
+  --accent-soft: #e6eefc;
+  --good: #1f8a4c;
+  --warn: #b26a00;
+  --bad: #c2362f;
+  --code-bg: #f0f2f5;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #15171b;
+    --surface: #1d2026;
+    --text: #e6e8eb;
+    --muted: #9aa2ae;
+    --border: #30353e;
+    --accent: #6b9cf0;
+    --accent-soft: #1f2a3d;
+    --good: #4cc27e;
+    --warn: #e0a548;
+    --bad: #ec6b62;
+    --code-bg: #262a31;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #15171b;
+  --surface: #1d2026;
+  --text: #e6e8eb;
+  --muted: #9aa2ae;
+  --border: #30353e;
+  --accent: #6b9cf0;
+  --accent-soft: #1f2a3d;
+  --good: #4cc27e;
+  --warn: #e0a548;
+  --bad: #ec6b62;
+  --code-bg: #262a31;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif;
+}
+main { max-width: 1120px; margin: 0 auto; padding: 32px 16px 80px; }
+h1 { font-size: 2rem; line-height: 1.2; margin: 0 0 8px; }
+h2 { font-size: 1.45rem; margin: 56px 0 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+h3 { font-size: 1.1rem; margin: 28px 0 8px; }
+p, li { max-width: 78ch; }
+a { color: var(--accent); }
+code { font-family: ui-monospace, "Cascadia Code", "JetBrains Mono", Consolas, monospace; font-size: .88em; background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+.lede { color: var(--muted); font-size: 1.05rem; margin: 0 0 20px; }
+nav.toc { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 18px; margin: 20px 0; }
+nav.toc ol { margin: 0; padding-left: 20px; columns: 2; column-gap: 32px; }
+nav.toc li { font-size: .95rem; }
+.callout { background: var(--accent-soft); border-left: 4px solid var(--accent); padding: 14px 18px; border-radius: 6px; margin: 16px 0; }
+.callout p { margin: 6px 0; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; }
+.card h3 { margin-top: 0; }
+.card ul { padding-left: 18px; margin: 6px 0; }
+.table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: .9rem; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { background: var(--code-bg); font-weight: 600; white-space: nowrap; }
+tr:last-child td { border-bottom: 0; }
+.y { color: var(--good); font-weight: 600; }
+.n { color: var(--bad); font-weight: 600; }
+.p { color: var(--warn); font-weight: 600; }
+.tag { display: inline-block; font-size: .75rem; padding: 1px 8px; border-radius: 99px; border: 1px solid var(--border); color: var(--muted); }
+.figcap { color: var(--muted); font-size: .9rem; margin: 8px 0 0; }
+
+/* ---------- Mockup chrome (fixed app palette, looks like a screenshot) ---------- */
+.mock {
+  --m-bg: #1e1f22; --m-panel: #2b2d31; --m-panel2: #25272b; --m-line: #3a3d43;
+  --m-text: #d7dae0; --m-dim: #8b919b; --m-sel: #2f4a78;
+  --m-diff: #5a2e2e; --m-diff-strong: #8a3a3a; --m-add: #23412c; --m-add-strong: #2f6b3f;
+  --m-lonly: #3d2f55; --m-ronly: #22414d; --m-filler: repeating-linear-gradient(135deg, #26282c 0 6px, #2b2d31 6px 12px);
+  background: var(--m-bg); color: var(--m-text);
+  border: 1px solid #000; border-radius: 10px; overflow: hidden;
+  font: 12.5px/1.45 "Segoe UI", system-ui, sans-serif;
+  box-shadow: 0 10px 30px rgba(0,0,0,.25);
+  margin: 16px 0 0;
+}
+.mock-scroll { overflow-x: auto; }
+.mock-inner { min-width: 900px; }
+.titlebar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: #18191b; color: var(--m-dim); font-size: 12px; }
+.titlebar .dots { display: flex; gap: 6px; }
+.titlebar .dots i { width: 11px; height: 11px; border-radius: 50%; background: #44474d; display: block; }
+.titlebar .ttl { flex: 1; text-align: center; }
+.tabs { display: flex; background: #18191b; border-bottom: 1px solid var(--m-line); }
+.tabs span { padding: 6px 14px; color: var(--m-dim); border-right: 1px solid var(--m-line); }
+.tabs span.on { background: var(--m-panel); color: var(--m-text); border-top: 2px solid #4f8cf0; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 8px; background: var(--m-panel); border-bottom: 1px solid var(--m-line); align-items: center; }
+.btn { padding: 3px 9px; border: 1px solid #45484f; border-radius: 4px; background: #33363c; color: var(--m-text); white-space: nowrap; }
+.btn.on { background: #3b5a8e; border-color: #4f78bd; }
+.sep { width: 1px; height: 20px; background: var(--m-line); margin: 0 4px; }
+.pathbars { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--m-line); border-bottom: 1px solid var(--m-line); }
+.pathbar { background: var(--m-panel2); padding: 5px 8px; display: flex; gap: 6px; align-items: center; }
+.pathbar .src { font-size: 11px; padding: 0 6px; border-radius: 3px; background: #444; color: #fff; }
+.src.git { background: #b2502d; }
+.src.zip { background: #6b5ab8; }
+.src.fs { background: #3d6e9e; }
+.pathbar .path { flex: 1; font-family: ui-monospace, Consolas, monospace; background: #1b1c1f; border: 1px solid #3a3d43; padding: 2px 6px; border-radius: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pathbar .ref { font-family: ui-monospace, Consolas, monospace; color: #e6a974; }
+
+/* folder compare grid */
+.fgrid { display: grid; grid-template-columns: 1fr 26px 1fr; }
+.fside { min-width: 0; }
+.frow { display: grid; grid-template-columns: 1fr 72px 120px; gap: 6px; padding: 1px 8px; white-space: nowrap; height: 21px; align-items: center; }
+.frow.head { background: var(--m-panel); color: var(--m-dim); border-bottom: 1px solid var(--m-line); height: 23px; }
+.frow .nm { overflow: hidden; text-overflow: ellipsis; }
+.frow .sz, .frow .dt { color: var(--m-dim); text-align: right; font-variant-numeric: tabular-nums; }
+.frow.diff .nm { color: #ff8a80; }
+.frow.lonly .nm { color: #c9a6ff; }
+.frow.ronly .nm { color: #7fd3f0; }
+.frow.same .nm { color: var(--m-text); }
+.frow.sel { background: var(--m-sel); }
+.frow.empty { background: var(--m-filler); }
+.ind { display: inline-block; width: 14px; color: var(--m-dim); }
+.ico { display: inline-block; width: 16px; text-align: center; margin-right: 3px; }
+.mid { background: var(--m-panel2); border-left: 1px solid var(--m-line); border-right: 1px solid var(--m-line); }
+.mid div { height: 21px; display: flex; align-items: center; justify-content: center; color: var(--m-dim); font-size: 11px; }
+.mid div.head { height: 23px; background: var(--m-panel); border-bottom: 1px solid var(--m-line); }
+.mid .ne { color: #ff8a80; }
+.mid .lo { color: #c9a6ff; }
+.mid .ro { color: #7fd3f0; }
+.statusbar { display: flex; flex-wrap: wrap; gap: 16px; padding: 4px 10px; background: #18191b; color: var(--m-dim); border-top: 1px solid var(--m-line); font-size: 11.5px; }
+.statusbar b { color: var(--m-text); font-weight: 600; }
+.legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin: 0 4px 0 10px; }
+
+/* text compare */
+.tgrid { display: grid; grid-template-columns: 18px 1fr 22px 1fr; font: 12.5px/19px ui-monospace, "Cascadia Code", "JetBrains Mono", Consolas, monospace; }
+.overview { background: #18191b; border-right: 1px solid var(--m-line); position: relative; }
+.overview i { position: absolute; left: 3px; right: 3px; border-radius: 1px; }
+.tside { min-width: 0; overflow: hidden; }
+.tl { display: grid; grid-template-columns: 34px 1fr; white-space: pre; height: 19px; }
+.tl .ln { color: #5f646d; text-align: right; padding-right: 8px; background: var(--m-panel2); user-select: none; }
+.tl .c { padding-left: 6px; overflow: hidden; }
+.tl.chg .c { background: var(--m-diff); }
+.tl.chg .ln { background: #432526; }
+.tl.add .c { background: var(--m-add); }
+.tl.add .ln { background: #1f3626; }
+.tl.fill .c, .tl.fill .ln { background: var(--m-filler); }
+.tl.cur { outline: 1px solid #4f78bd; outline-offset: -1px; }
+.hl-d { background: var(--m-diff-strong); border-radius: 2px; }
+.hl-a { background: var(--m-add-strong); border-radius: 2px; }
+.tmid { background: var(--m-panel2); border-left: 1px solid var(--m-line); border-right: 1px solid var(--m-line); }
+.tmid div { height: 19px; text-align: center; color: #7f8792; font-size: 11px; }
+.kw { color: #cf8e6d; } .ty { color: #6fb3d2; } .fn { color: #56a8f5; } .st { color: #6aab73; } .nu { color: #2aacb8; } .pu { color: #bcbec4; } .cm { color: #7a7e85; font-style: italic; }
+.detail { border-top: 1px solid var(--m-line); background: var(--m-panel2); font: 12.5px/19px ui-monospace, Consolas, monospace; }
+.detail div { padding: 0 10px; white-space: pre; }
+.detail .lbl { color: var(--m-dim); font-family: "Segoe UI", system-ui, sans-serif; display: inline-block; width: 64px; }
+
+/* dialog */
+.dlg-wrap { padding: 22px; background: rgba(0,0,0,.35); }
+.dlg { background: var(--m-panel); border: 1px solid #4a4d55; border-radius: 8px; max-width: 860px; margin: 0 auto; box-shadow: 0 12px 40px rgba(0,0,0,.5); }
+.dlg-h { padding: 10px 14px; border-bottom: 1px solid var(--m-line); font-weight: 600; }
+.dlg-b { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 14px; }
+.side-pick h4 { margin: 0 0 8px; font-size: 12px; color: var(--m-dim); text-transform: uppercase; letter-spacing: .05em; }
+.seg { display: flex; margin-bottom: 8px; }
+.seg span { flex: 1; text-align: center; padding: 4px 0; border: 1px solid #45484f; background: #33363c; margin-right: -1px; }
+.seg span:first-child { border-radius: 4px 0 0 4px; } .seg span:last-child { border-radius: 0 4px 4px 0; }
+.seg span.on { background: #3b5a8e; border-color: #4f78bd; position: relative; }
+.field { font-family: ui-monospace, Consolas, monospace; background: #1b1c1f; border: 1px solid #3a3d43; padding: 4px 7px; border-radius: 4px; margin-bottom: 8px; }
+.reflist { border: 1px solid #3a3d43; border-radius: 4px; background: #1b1c1f; }
+.reflist div { padding: 3px 8px; display: flex; justify-content: space-between; gap: 8px; }
+.reflist div span:last-child { color: var(--m-dim); font-family: ui-monospace, Consolas, monospace; font-size: 11px; }
+.reflist .grp { color: var(--m-dim); font-size: 11px; text-transform: uppercase; background: #232428; }
+.reflist .on { background: var(--m-sel); }
+.chk { margin: 8px 0 0; color: var(--m-text); }
+.chk i { display: inline-block; width: 12px; height: 12px; border: 1px solid #6b7079; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+.chk i.on { background: #4f78bd; border-color: #4f78bd; }
+.dlg-f { display: flex; justify-content: space-between; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--m-line); align-items: center; color: var(--m-dim); }
+
+/* architecture diagram */
+.arch { display: grid; gap: 10px; }
+.layer { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); padding: 10px 12px; }
+.layer > b { display: block; font-size: .8rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-bottom: 6px; }
+.boxes { display: flex; flex-wrap: wrap; gap: 8px; }
+.box { border: 1px solid var(--border); background: var(--bg); border-radius: 6px; padding: 6px 10px; font-size: .9rem; }
+.box small { display: block; color: var(--muted); font-size: .78rem; }
+.arrow { text-align: center; color: var(--muted); font-size: .85rem; }
+.layer.vfs { border-color: var(--accent); }
+.layer.vfs .box { border-color: var(--accent); background: var(--accent-soft); }
+
+@media (max-width: 640px) {
+  nav.toc ol { columns: 1; }
+  h1 { font-size: 1.6rem; }
+}
+</style>
+</head>
+<body>
+<main>
+
+<h1>Folder &amp; File Compare Tool — Concept</h1>
+<p class="lede">Working title <b>“Parallax”</b>. A fast, cross-platform (Windows + Linux) side-by-side compare tool in the spirit of Beyond Compare, where folders, archives and Git revisions are all just <em>sources</em> that can be compared against each other.</p>
+
+<div class="callout">
+  <p><b>TL;DR</b></p>
+  <p><b>Concept:</b> One virtual-file-system layer turns a local folder, a <code>.zip</code>/<code>.7z</code>/<code>.tar.*</code> archive, a Git branch, tag or commit, and a Git working tree into the same kind of browsable tree. The compare engine and both views (folder and text) only see that tree.</p>
+  <p><b>Tech stack:</b> a Rust core (gitoxide, libarchive/zip/7z crates, imara-diff, tree-sitter, rayon) with a thin UI. Recommended UI: <b>Tauri 2</b> with a virtualized web front end. Fallback if Linux rendering speed falls short: <b>Qt 6/QML via CXX-Qt</b>.</p>
+  <p><b>Existing tools:</b> <b>Beyond Compare 5</b> comes closest but has no native “Git ref as a folder” source. <b>DirectCompare</b>, a newer commercial tool, advertises nearly this exact feature set. Evaluate both before building anything (see <a href="#market">§3</a>).</p>
+</div>
+
+<nav class="toc" aria-label="Contents">
+  <ol>
+    <li><a href="#req">Requirements → design decisions</a></li>
+    <li><a href="#features">Feature scope</a></li>
+    <li><a href="#market">Is there an existing tool?</a></li>
+    <li><a href="#mockups">GUI mockups</a></li>
+    <li><a href="#arch">Architecture</a></li>
+    <li><a href="#perf">Performance strategy</a></li>
+    <li><a href="#stack">Tech stack</a></li>
+    <li><a href="#roadmap">Roadmap</a></li>
+    <li><a href="#risks">Risks &amp; open questions</a></li>
+    <li><a href="#sources">Sources</a></li>
+  </ol>
+</nav>
+
+<!-- ============================================================ -->
+<h2 id="req">1. Requirements → design decisions</h2>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Requirement</th><th>Design decision</th></tr></thead>
+  <tbody>
+    <tr><td>Local app for Windows and Linux</td><td>A native binary with no JVM or .NET runtime. Ships as MSI and portable ZIP on Windows, and as AppImage, .deb/.rpm and Flatpak on Linux. A CLI entry point (<code>parallax a b</code>) so the app can serve as <code>git difftool</code>/<code>mergetool</code>.</td></tr>
+    <tr><td>Performance is important</td><td>All heavy work (walking, hashing, diffing, decompression, Git object access) runs in a multi-threaded Rust core. The UI only renders the visible viewport. Results stream in while the compare is still running, and every operation can be cancelled.</td></tr>
+    <tr><td>Side-by-side view like Beyond Compare</td><td>Two-pane folder tree with a status gutter and aligned rows; a two-pane text view with aligned lines, inline highlighting of changed characters, an overview strip and a line-detail pane; sessions in tabs.</td></tr>
+    <tr><td>zip / 7z / … usable in folder compare</td><td>An <b>Archive provider</b> in the virtual file system (VFS). An archive expands like a folder, including archives nested inside archives. Where the archive stores size and CRC per entry, files are compared from those headers without decompressing anything.</td></tr>
+    <tr><td>Git repo usable in folder compare</td><td>A <b>Git provider</b> in the VFS exposes the working tree, the index, and any ref or commit as a read-only tree, read directly from the object database without a checkout.</td></tr>
+    <tr><td>Folder/file compare between Git branches</td><td>Branch A vs. branch B is simply two Git sources. Options: direct compare (<code>A..B</code>) or “what B changed since it branched off” (merge-base, <code>A...B</code>). Identical tree hashes skip whole subtrees.</td></tr>
+    <tr><td>Syntax highlighting for common files</td><td>tree-sitter grammars in the core (C/C++, C#, Java, JS/TS, Python, Rust, Go, JSON, YAML, XML/HTML, CSS, SQL, Markdown, shell, PowerShell …), with a TextMate-grammar fallback (syntect) for the long tail. Only the visible text is highlighted.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="features">2. Feature scope</h2>
+<div class="grid2">
+  <div class="card">
+    <h3>MVP</h3>
+    <ul>
+      <li>Folder compare: any source vs. any source (local, archive, Git ref, Git working tree)</li>
+      <li>Compare levels: structure → size/date → CRC/hash → byte-exact → rules-based (ignore whitespace, line endings, case, encoding)</li>
+      <li>Filters: show all / differences / same / orphans; include/exclude masks; honour <code>.gitignore</code></li>
+      <li>Actions: copy left→right and right→left, delete, sync preview (Git refs are read-only; “restore into working tree” instead)</li>
+      <li>Text compare with syntax highlighting, inline character highlighting, an overview strip, next/previous difference, editing and saving</li>
+      <li>Encodings (UTF-8/16, Windows-1252 …) and line endings (CRLF/LF) detected and shown</li>
+      <li>Binary detection with a hex compare fallback</li>
+      <li>CLI plus <code>git difftool -d</code> / <code>mergetool</code> integration; saved sessions</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>Later</h3>
+    <ul>
+      <li>3-way text merge (with Git conflict resolution) and 3-way folder compare</li>
+      <li>Commit-range picker, “compare with stash”, Git LFS pointer resolution, submodules as nested repos</li>
+      <li>Image compare, table/CSV compare, office documents converted to text</li>
+      <li>Structural (AST) diff mode, like difftastic; “ignore comments” rule</li>
+      <li>Reports: HTML and patch export</li>
+      <li>Remote sources: SFTP, S3, WebDAV</li>
+      <li>Plugin API for custom VFS providers and file converters</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="market">3. Is there an existing tool that matches this?</h2>
+<p>Short answer: <b>none of the established tools covers everything</b>. The gap is Git revisions as first-class folder sources, especially combined with archives and Linux support. A newer commercial product, DirectCompare, advertises exactly that combination, but those claims come from its listings and were not verified here.</p>
+
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>Tool</th><th>Windows</th><th>Linux</th><th>Archives in folder compare</th><th>Git refs as folders</th><th>Syntax highlighting</th><th>License</th><th>Notes</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><b>Beyond Compare 5</b></td><td class="y">✔</td><td class="y">✔</td><td class="y">✔ zip, 7z, tar, rar …</td><td class="n">✘</td><td class="y">✔</td><td>Commercial</td><td>The reference UX and very fast. Works with Git only as an external diff/merge tool. Branch-to-branch compare needs <code>git difftool -d A B</code> (temp copies of changed files only) or a second worktree.</td></tr>
+    <tr><td><b>DirectCompare</b></td><td class="y">✔</td><td class="y">✔</td><td class="y">✔ zip, tar, 7z, rar*</td><td class="y">✔*</td><td>?</td><td>Commercial, subscription*</td><td>*Vendor claims: Git branches compared without a checkout, up to 16 sources, portable .exe. According to its WinGet listing, Git and archive support are in the paid tier. A newer product; evaluate first.</td></tr>
+    <tr><td><b>WinMerge</b></td><td class="y">✔</td><td class="n">✘</td><td class="y">✔ via 7-Zip</td><td class="n">✘</td><td class="y">✔</td><td>GPL</td><td>Strong and free, but Windows-only.</td></tr>
+    <tr><td><b>Meld</b></td><td class="p">~</td><td class="y">✔</td><td class="n">✘</td><td class="p">working tree only</td><td class="y">✔</td><td>GPL</td><td>Good UX on Linux. Python/GTK, so slow on large trees. The Windows build is less polished.</td></tr>
+    <tr><td><b>KDiff3</b></td><td class="y">✔</td><td class="y">✔</td><td class="n">✘</td><td class="n">✘</td><td class="n">✘</td><td>GPL</td><td>Fast, with excellent 3-way merge. Dated UI and no archive support.</td></tr>
+    <tr><td><b>Guiffy</b></td><td class="y">✔</td><td class="y">✔</td><td class="p">zip, tar, jar</td><td class="n">✘</td><td>?</td><td>Commercial</td><td>Java-based.</td></tr>
+    <tr><td><b>Araxis Merge</b></td><td class="y">✔</td><td class="n">✘</td><td>–</td><td class="n">✘</td><td class="y">✔</td><td>Commercial</td><td>No Linux build, so it fails a hard requirement.</td></tr>
+    <tr><td><b>JetBrains IDEs</b></td><td class="y">✔</td><td class="y">✔</td><td class="n">✘</td><td class="p">“Compare with branch” as a change list</td><td class="y">✔</td><td>Commercial / CE</td><td>A heavy IDE, not a standalone compare tool.</td></tr>
+    <tr><td><b>Double Commander</b></td><td class="y">✔</td><td class="y">✔</td><td class="p">via plugins</td><td class="n">✘</td><td class="n">✘</td><td>GPL</td><td>Directory sync, but no real diff viewer.</td></tr>
+    <tr><td><b>VS Code / Sublime Merge / GitKraken</b></td><td class="y">✔</td><td class="y">✔</td><td class="n">✘</td><td class="p">branch diff as a file list</td><td class="y">✔</td><td>Mixed</td><td>Show a change list, not two full aligned trees, and no archives.</td></tr>
+  </tbody>
+</table>
+</div>
+<p class="figcap">✔ supported · ~ partial · ✘ not supported · ? / – not verified. Based on product documentation and listings, mid-2026; check current versions before deciding.</p>
+
+<div class="callout">
+  <p><b>Recommendation:</b> before investing in development, run a one-day evaluation of <b>Beyond Compare 5</b> (with a <code>git worktree</code> or <code>difftool -d</code> script for branches) and <b>DirectCompare</b> against your real repositories. Build your own tool only if neither passes. The strongest case for building is an <b>open-source, Git-native, Beyond Compare-class</b> tool: that niche is currently empty.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="mockups">4. GUI mockups</h2>
+<p>The mockups below use illustrative data. Colour conventions follow Beyond Compare so users can switch easily: <span style="color:var(--bad)">red = different</span>, <span style="color:#8a63d2">purple = only on the left</span>, <span style="color:#2a8fb8">blue = only on the right</span>, grey hatching = missing on this side.</p>
+
+<h3>4.1 Folder compare: Git branch vs. Git branch, with an archive expanded inline</h3>
+<div class="mock"><div class="mock-scroll"><div class="mock-inner">
+  <div class="titlebar"><div class="dots"><i></i><i></i><i></i></div><div class="ttl">Parallax — webshop: main ↔ feature/checkout</div></div>
+  <div class="tabs"><span class="on">📁 main ↔ feature/checkout</span><span>📄 cart.ts</span><span>📦 release-1.4.7z ↔ dist/</span><span>＋</span></div>
+  <div class="toolbar">
+    <span class="btn">⟳ Refresh</span><span class="btn">⇄ Swap</span><span class="sep"></span>
+    <span class="btn">All</span><span class="btn on">Diffs</span><span class="btn">Same</span><span class="btn">Orphans</span><span class="sep"></span>
+    <span class="btn">Rules: Content (ignore EOL)</span><span class="btn">Filter: *.* −node_modules</span><span class="sep"></span>
+    <span class="btn">Copy →</span><span class="btn">← Copy</span><span class="btn">Restore to worktree</span><span class="sep"></span>
+    <span class="btn">Expand all</span><span class="btn">⚙</span>
+  </div>
+  <div class="pathbars">
+    <div class="pathbar"><span class="src git">GIT</span><span class="path">~/src/webshop</span><span class="ref">⎇ main · a1b2c3d</span></div>
+    <div class="pathbar"><span class="src git">GIT</span><span class="path">~/src/webshop</span><span class="ref">⎇ feature/checkout · 9f8e7d6</span></div>
+  </div>
+  <div class="fgrid">
+    <div class="fside">
+      <div class="frow head"><span>Name</span><span class="sz">Size</span><span class="dt">Modified (commit)</span></div>
+      <div class="frow diff"><span class="nm"><span class="ind">▾</span><span class="ico">📁</span>src</span><span class="sz"></span><span class="dt">2026-09-28</span></div>
+      <div class="frow diff"><span class="nm"><span class="ind"></span><span class="ind">▾</span><span class="ico">📁</span>checkout</span><span class="sz"></span><span class="dt">2026-09-28</span></div>
+      <div class="frow diff sel"><span class="nm"><span class="ind"></span><span class="ind"></span><span class="ind"></span><span class="ico">📄</span>cart.ts</span><span class="sz">1,204</span><span class="dt">2026-09-12</span></div>
+      <div class="frow diff"><span class="nm"><span class="ind"></span><span class="ind"></span><span class="ind"></span><span class="ico">📄</span>types.ts</span><span class="sz">642</span><span class="dt">2026-08-30</span></div>
+      <div class="frow empty"><span class="nm"></span><span class="sz"></span><span class="dt"></span></div>
+      <div class="frow lonly"><span class="nm"><span class="ind"></span><span class="ind"></span><span class="ind"></span><span class="ico">📄</span>legacyPayment.ts</span><span class="sz">3,870</span><span class="dt">2025-11-04</span></div>
+      <div class="frow same"><span class="nm"><span class="ind"></span><span class="ind">▸</span><span class="ico">📁</span>catalog</span><span class="sz"></span><span class="dt">2026-07-01</span></div>
+      <div class="frow diff"><span class="nm"><span class="ind">▾</span><span class="ico">📁</span>assets</span><span class="sz"></span><span class="dt">2026-09-02</span></div>
+      <div class="frow diff"><span class="nm"><span class="ind"></span><span class="ind">▾</span><span class="ico">📦</span>fonts.zip</span><span class="sz">812 KB</span><span class="dt">2026-06-18</span></div>
+      <div class="frow same"><span class="nm"><span class="ind"></span><span class="ind"></span><span class="ind"></span><span class="ico">📄</span>Inter-Regular.woff2</span><span class="sz">98,140</span><span class="dt">2024-01-10</span></div>
+      <div class="frow diff"><span class="nm"><span class="ind"></span><span class="ind"></span><span class="ind"></span><span class="ico">📄</span>Inter-Bold.woff2</span><span class="sz">101,233</span><span class="dt">2024-01-10</span></div>
+      <div class="frow empty"><span class="nm"></span><span class="sz"></span><span class="dt"></span></div>
+      <div class="frow same"><span class="nm"><span class="ind"></span><span class="ind">▸</span><span class="ico">📦</span>icons.7z</span><span class="sz">2.1 MB</span><span class="dt">2026-03-03</span></div>
+      <div class="frow diff"><span class="nm"><span class="ind"></span><span class="ico">📄</span>package.json</span><span class="sz">1,988</span><span class="dt">2026-09-01</span></div>
+      <div class="frow same"><span class="nm"><span class="ind"></span><span class="ico">📄</span>README.md</span><span class="sz">4,410</span><span class="dt">2026-02-14</span></div>
+    </div>
+    <div class="mid">
+      <div class="head"></div>
+      <div class="ne">≠</div><div class="ne">≠</div><div class="ne">≠</div><div class="ne">≠</div>
+      <div class="ro">→</div><div class="lo">←</div><div>=</div>
+      <div class="ne">≠</div><div class="ne">≠</div><div>=</div><div class="ne">≠</div><div class="ro">→</div><div>=</div>
+      <div class="ne">≠</div><div>=</div>
+    </div>
+    <div class="fside">
+      <div class="frow head"><span>Name</span><span class="sz">Size</span><span class="dt">Modified (commit)</span></div>
+      <div class="frow diff"><span class="nm"><span class="ind">▾</span><span class="ico">📁</span>src</span><span class="sz"></span><span class="dt">2026-10-14</span></div>
+      <div class="frow diff"><span class="nm"><span class="ind"></span><span class="ind">▾</span><span class="ico">📁</span>checkout</span><span class="sz"></span><span class="dt">2026-10-14</span></div>
+      <div class="frow diff sel"><span class="nm"><span class="ind"></span><span class="ind"></span><span class="ind"></span><span class="ico">📄</span>cart.ts</span><span class="sz">1,377</span><span class="dt">2026-10-14</span></div>
+      <div class="frow diff"><span class="nm"><span class="ind"></span><span class="ind"></span><span class="ind"></span><span class="ico">📄</span>types.ts</span><span class="sz">918</span><span class="dt">2026-10-11</span></div>
+      <div class="frow ronly"><span class="nm"><span class="ind"></span><span class="ind"></span><span class="ind"></span><span class="ico">📄</span>discount.ts</span><span class="sz">2,301</span><span class="dt">2026-10-11</span></div>
+      <div class="frow empty"><span class="nm"></span><span class="sz"></span><span class="dt"></span></div>
+      <div class="frow same"><span class="nm"><span class="ind"></span><span class="ind">▸</span><span class="ico">📁</span>catalog</span><span class="sz"></span><span class="dt">2026-07-01</span></div>
+      <div class="frow diff"><span class="nm"><span class="ind">▾</span><span class="ico">📁</span>assets</span><span class="sz"></span><span class="dt">2026-10-02</span></div>
+      <div class="frow diff"><span class="nm"><span class="ind"></span><span class="ind">▾</span><span class="ico">📦</span>fonts.zip</span><span class="sz">935 KB</span><span class="dt">2026-10-02</span></div>
+      <div class="frow same"><span class="nm"><span class="ind"></span><span class="ind"></span><span class="ind"></span><span class="ico">📄</span>Inter-Regular.woff2</span><span class="sz">98,140</span><span class="dt">2024-01-10</span></div>
+      <div class="frow diff"><span class="nm"><span class="ind"></span><span class="ind"></span><span class="ind"></span><span class="ico">📄</span>Inter-Bold.woff2</span><span class="sz">104,977</span><span class="dt">2025-08-22</span></div>
+      <div class="frow ronly"><span class="nm"><span class="ind"></span><span class="ind"></span><span class="ind"></span><span class="ico">📄</span>Inter-Italic.woff2</span><span class="sz">112,544</span><span class="dt">2025-08-22</span></div>
+      <div class="frow same"><span class="nm"><span class="ind"></span><span class="ind">▸</span><span class="ico">📦</span>icons.7z</span><span class="sz">2.1 MB</span><span class="dt">2026-03-03</span></div>
+      <div class="frow diff"><span class="nm"><span class="ind"></span><span class="ico">📄</span>package.json</span><span class="sz">2,045</span><span class="dt">2026-10-09</span></div>
+      <div class="frow same"><span class="nm"><span class="ind"></span><span class="ico">📄</span>README.md</span><span class="sz">4,410</span><span class="dt">2026-02-14</span></div>
+    </div>
+  </div>
+  <div class="statusbar">
+    <span><b>12,431</b> files</span><span><b>37</b> different</span><span><b>5</b> left only</span><span><b>9</b> right only</span>
+    <span>Compared in <b>0.41 s</b> — 11,902 files skipped via identical tree hashes</span>
+    <span class="legend"><i style="background:#ff8a80"></i>different<i style="background:#c9a6ff"></i>left only<i style="background:#7fd3f0"></i>right only</span>
+  </div>
+</div></div></div>
+<p class="figcap">Archives (📦) expand like folders on both sides. <code>fonts.zip</code> is compared entry by entry using the CRC values stored in the zip headers, with no extraction. Double-clicking <code>cart.ts</code> opens the text compare (4.2).</p>
+
+<h3>4.2 Text compare with syntax highlighting</h3>
+<div class="mock"><div class="mock-scroll"><div class="mock-inner">
+  <div class="titlebar"><div class="dots"><i></i><i></i><i></i></div><div class="ttl">Parallax — cart.ts</div></div>
+  <div class="tabs"><span>📁 main ↔ feature/checkout</span><span class="on">📄 cart.ts</span><span>📦 release-1.4.7z ↔ dist/</span></div>
+  <div class="toolbar">
+    <span class="btn">◀ Prev diff</span><span class="btn">Next diff ▶</span><span class="sep"></span>
+    <span class="btn on">All</span><span class="btn">Diffs</span><span class="btn">Context ±3</span><span class="sep"></span>
+    <span class="btn">Ignore: whitespace ✓</span><span class="btn">Syntax: TypeScript ▾</span><span class="btn">UTF-8 · LF</span><span class="sep"></span>
+    <span class="btn">Copy line →</span><span class="btn">← Copy line</span><span class="btn">Edit</span><span class="btn">Save</span>
+  </div>
+  <div class="pathbars">
+    <div class="pathbar"><span class="src git">GIT</span><span class="path">src/checkout/cart.ts</span><span class="ref">⎇ main · a1b2c3d (read-only)</span></div>
+    <div class="pathbar"><span class="src git">GIT</span><span class="path">src/checkout/cart.ts</span><span class="ref">⎇ feature/checkout · 9f8e7d6</span></div>
+  </div>
+  <div class="tgrid">
+    <div class="overview">
+      <i style="top:12%;height:5%;background:#c25555"></i>
+      <i style="top:24%;height:5%;background:#c25555"></i>
+      <i style="top:52%;height:16%;background:#3f9a59"></i>
+      <i style="top:86%;height:5%;background:#c25555"></i>
+    </div>
+    <div class="tside">
+      <div class="tl"><span class="ln">1</span><span class="c"><span class="kw">import</span> <span class="pu">{</span> Money <span class="pu">}</span> <span class="kw">from</span> <span class="st">"../lib/money"</span>;</span></div>
+      <div class="tl chg"><span class="ln">2</span><span class="c"><span class="kw">import type</span> <span class="pu">{</span> <span class="ty">CartItem</span> <span class="pu">}</span> <span class="kw">from</span> <span class="st">"./types"</span>;</span></div>
+      <div class="tl"><span class="ln">3</span><span class="c"> </span></div>
+      <div class="tl chg cur"><span class="ln">4</span><span class="c"><span class="kw">export function</span> <span class="fn">cartTotal</span>(items: <span class="ty">CartItem</span>[]): <span class="ty">Money</span> {</span></div>
+      <div class="tl"><span class="ln">5</span><span class="c">  <span class="kw">let</span> total = Money.<span class="fn">zero</span>(<span class="st">"EUR"</span>);</span></div>
+      <div class="tl"><span class="ln">6</span><span class="c">  <span class="kw">for</span> (<span class="kw">const</span> item <span class="kw">of</span> items) {</span></div>
+      <div class="tl"><span class="ln">7</span><span class="c">    total = total.<span class="fn">add</span>(item.price.<span class="fn">times</span>(item.qty));</span></div>
+      <div class="tl"><span class="ln">8</span><span class="c">  }</span></div>
+      <div class="tl fill"><span class="ln"></span><span class="c"></span></div>
+      <div class="tl fill"><span class="ln"></span><span class="c"></span></div>
+      <div class="tl fill"><span class="ln"></span><span class="c"></span></div>
+      <div class="tl"><span class="ln">9</span><span class="c">  <span class="kw">return</span> total;</span></div>
+      <div class="tl"><span class="ln">10</span><span class="c">}</span></div>
+      <div class="tl"><span class="ln">11</span><span class="c"> </span></div>
+      <div class="tl"><span class="ln">12</span><span class="c"><span class="cm">// hard limit enforced by the API</span></span></div>
+      <div class="tl chg"><span class="ln">13</span><span class="c"><span class="kw">export const</span> MAX_ITEMS = <span class="hl-d"><span class="nu">50</span></span>;</span></div>
+    </div>
+    <div class="tmid">
+      <div></div><div>≠</div><div></div><div>≠</div><div></div><div></div><div></div><div></div><div>+</div><div>+</div><div>+</div><div></div><div></div><div></div><div></div><div>≠</div>
+    </div>
+    <div class="tside">
+      <div class="tl"><span class="ln">1</span><span class="c"><span class="kw">import</span> <span class="pu">{</span> Money <span class="pu">}</span> <span class="kw">from</span> <span class="st">"../lib/money"</span>;</span></div>
+      <div class="tl chg"><span class="ln">2</span><span class="c"><span class="kw">import type</span> <span class="pu">{</span> <span class="ty">CartItem</span><span class="hl-d">, <span class="ty">Discount</span></span> <span class="pu">}</span> <span class="kw">from</span> <span class="st">"./types"</span>;</span></div>
+      <div class="tl"><span class="ln">3</span><span class="c"> </span></div>
+      <div class="tl chg cur"><span class="ln">4</span><span class="c"><span class="kw">export function</span> <span class="fn">cartTotal</span>(items: <span class="ty">CartItem</span>[]<span class="hl-d">, discount?: <span class="ty">Discount</span></span>): <span class="ty">Money</span> {</span></div>
+      <div class="tl"><span class="ln">5</span><span class="c">  <span class="kw">let</span> total = Money.<span class="fn">zero</span>(<span class="st">"EUR"</span>);</span></div>
+      <div class="tl"><span class="ln">6</span><span class="c">  <span class="kw">for</span> (<span class="kw">const</span> item <span class="kw">of</span> items) {</span></div>
+      <div class="tl"><span class="ln">7</span><span class="c">    total = total.<span class="fn">add</span>(item.price.<span class="fn">times</span>(item.qty));</span></div>
+      <div class="tl"><span class="ln">8</span><span class="c">  }</span></div>
+      <div class="tl add"><span class="ln">9</span><span class="c">  <span class="kw">if</span> (discount) {</span></div>
+      <div class="tl add"><span class="ln">10</span><span class="c">    total = discount.<span class="fn">apply</span>(total);</span></div>
+      <div class="tl add"><span class="ln">11</span><span class="c">  }</span></div>
+      <div class="tl"><span class="ln">12</span><span class="c">  <span class="kw">return</span> total;</span></div>
+      <div class="tl"><span class="ln">13</span><span class="c">}</span></div>
+      <div class="tl"><span class="ln">14</span><span class="c"> </span></div>
+      <div class="tl"><span class="ln">15</span><span class="c"><span class="cm">// hard limit enforced by the API</span></span></div>
+      <div class="tl chg"><span class="ln">16</span><span class="c"><span class="kw">export const</span> MAX_ITEMS = <span class="hl-d"><span class="nu">100</span></span>;</span></div>
+    </div>
+  </div>
+  <div class="detail">
+    <div><span class="lbl">main</span><span class="kw">export function</span> <span class="fn">cartTotal</span>(items: <span class="ty">CartItem</span>[]): <span class="ty">Money</span> {</div>
+    <div><span class="lbl">feature</span><span class="kw">export function</span> <span class="fn">cartTotal</span>(items: <span class="ty">CartItem</span>[]<span class="hl-d">, discount?: <span class="ty">Discount</span></span>): <span class="ty">Money</span> {</div>
+  </div>
+  <div class="statusbar"><span><b>4</b> difference sections</span><span>Ln 4, Col 38</span><span>Algorithm: histogram</span><span>TypeScript (tree-sitter)</span><span>Left: read-only Git blob · Right: Git blob → <i>“Open in worktree to edit”</i></span></div>
+</div></div></div>
+<p class="figcap">Lines are aligned, inserted blocks get hatched fillers on the other side, and changed characters are highlighted within each line. The overview strip on the far left shows every difference in the file. The line-detail pane shows the current line pair one above the other, which makes long lines easy to read.</p>
+
+<h3>4.3 New session: picking sources (folder / archive / Git ref)</h3>
+<div class="mock"><div class="mock-scroll"><div class="mock-inner">
+  <div class="dlg-wrap">
+    <div class="dlg">
+      <div class="dlg-h">New comparison</div>
+      <div class="dlg-b">
+        <div class="side-pick">
+          <h4>Left source</h4>
+          <div class="seg"><span>Folder</span><span>Archive</span><span class="on">Git ref</span><span>Worktree</span></div>
+          <div class="field">~/src/webshop</div>
+          <div class="field">🔍 filter refs…</div>
+          <div class="reflist">
+            <div class="grp"><span>Branches</span><span></span></div>
+            <div class="on"><span>⎇ main</span><span>a1b2c3d</span></div>
+            <div><span>⎇ develop</span><span>77ac012</span></div>
+            <div><span>⎇ feature/checkout</span><span>9f8e7d6</span></div>
+            <div class="grp"><span>Remote</span><span></span></div>
+            <div><span>⎇ origin/main</span><span>a1b2c3d</span></div>
+            <div class="grp"><span>Tags</span><span></span></div>
+            <div><span>🏷 v1.4.0</span><span>5e6f7a8</span></div>
+            <div class="grp"><span>Recent commits</span><span></span></div>
+            <div><span>● Fix rounding in VAT calc</span><span>3c4d5e6</span></div>
+          </div>
+        </div>
+        <div class="side-pick">
+          <h4>Right source</h4>
+          <div class="seg"><span>Folder</span><span>Archive</span><span class="on">Git ref</span><span>Worktree</span></div>
+          <div class="field">~/src/webshop</div>
+          <div class="field">🔍 feat</div>
+          <div class="reflist">
+            <div class="grp"><span>Branches</span><span></span></div>
+            <div class="on"><span>⎇ feature/checkout</span><span>9f8e7d6</span></div>
+            <div><span>⎇ feature/search</span><span>0b1c2d3</span></div>
+            <div class="grp"><span>Remote</span><span></span></div>
+            <div><span>⎇ origin/feature/checkout</span><span>8e7d6c5</span></div>
+          </div>
+          <div class="chk"><i class="on"></i>Compare against merge-base (show only what the right side changed)</div>
+          <div class="chk"><i></i>Include submodules</div>
+          <div class="chk"><i class="on"></i>Expand archives (zip, 7z, tar.*, jar, nupkg)</div>
+          <div class="chk"><i class="on"></i>Respect .gitignore</div>
+        </div>
+      </div>
+      <div class="dlg-f"><span>Also accepts drag &amp; drop and paths such as <code style="background:#1b1c1f;color:#d7dae0">C:\dl\release.7z!/bin/</code> or <code style="background:#1b1c1f;color:#d7dae0">~/src/webshop@v1.4.0:src/</code></span><span><span class="btn">Cancel</span> <span class="btn on">Compare</span></span></div>
+    </div>
+  </div>
+</div></div></div>
+<p class="figcap">Each side picks one source type. Paths can address a location inside an archive (<code>!/</code>) or at a Git revision (<code>@ref:path</code>), and these combine, so a <code>.zip</code> stored in a Git commit is a valid source. The same syntax works on the command line.</p>
+
+<!-- ============================================================ -->
+<h2 id="arch">5. Architecture</h2>
+<div class="arch">
+  <div class="layer"><b>UI (thin, renders only the viewport)</b>
+    <div class="boxes">
+      <div class="box">Folder tree grid<small>virtualized, 1M+ rows</small></div>
+      <div class="box">Text compare view<small>aligned panes, overview strip, editing</small></div>
+      <div class="box">Hex / image views</div>
+      <div class="box">Session &amp; source picker</div>
+      <div class="box">Settings, rules, filters</div>
+    </div>
+  </div>
+  <div class="arrow">▲ ▼ typed commands + event stream (incremental results, progress, cancel)</div>
+  <div class="layer"><b>Core services (Rust, UI-agnostic, also used by the CLI)</b>
+    <div class="boxes">
+      <div class="box">Session manager<small>tabs, saved sessions</small></div>
+      <div class="box">Folder compare engine<small>parallel walk, tiered compare</small></div>
+      <div class="box">Text diff engine<small>imara-diff histogram/Myers, intraline</small></div>
+      <div class="box">Highlighter<small>tree-sitter, syntect fallback</small></div>
+      <div class="box">Converters<small>encoding, EOL, binary detection</small></div>
+      <div class="box">File operations<small>copy, sync, delete, undo journal</small></div>
+    </div>
+  </div>
+  <div class="arrow">▲ ▼ <code>trait VfsProvider { list(dir), stat(path), open(path), quick_id(path) }</code></div>
+  <div class="layer vfs"><b>Virtual file system (VFS) — every source is a tree</b>
+    <div class="boxes">
+      <div class="box">LocalFs<small>NTFS / ext4 / … , file watcher</small></div>
+      <div class="box">Archive<small>zip, 7z, tar.gz/xz/zst, jar, rar (read) · nestable</small></div>
+      <div class="box">Git ref / commit<small>object DB, read-only, no checkout</small></div>
+      <div class="box">Git worktree &amp; index<small>status-aware</small></div>
+      <div class="box">Later: SFTP, S3</div>
+    </div>
+  </div>
+  <div class="layer"><b>Infrastructure</b>
+    <div class="boxes">
+      <div class="box">Thread pool (rayon) + async I/O</div>
+      <div class="box">Persistent hash cache<small>(path, size, mtime, inode) → xxh3</small></div>
+      <div class="box">Extraction cache<small>size-limited, for solid 7z</small></div>
+      <div class="box">Config &amp; plugins</div>
+    </div>
+  </div>
+</div>
+<p>The key idea is <b>quick_id</b>: each provider can return a cheap content fingerprint that does not require reading the file. Local files return size and mtime. Zip and 7z entries return the stored CRC32 and size. Git entries return the blob or tree hash. The compare engine uses the strongest fingerprint both sides share and falls back to reading content only when it has to.</p>
+
+<!-- ============================================================ -->
+<h2 id="perf">6. Performance strategy</h2>
+<div class="grid2">
+  <div class="card">
+    <h3>Folder compare</h3>
+    <ul>
+      <li><b>Parallel walk</b> of both sides (jwalk/ignore crates); results stream into the UI as they arrive.</li>
+      <li><b>Git vs. Git:</b> identical tree hash ⇒ the whole subtree is identical, so it is skipped without being walked. Identical blob hash ⇒ the file is identical. Comparing two branches of a large repo with a small diff costs about as much as the diff itself, not the repo size.</li>
+      <li><b>Git vs. local file:</b> compute the Git blob hash of the local file (honouring autocrlf and filters), or reuse the stat cache in Git's index the way <code>git status</code> does.</li>
+      <li><b>Archives:</b> compare the stored CRC32 and size from the headers. Decompress only when the CRCs differ and a rules-based compare is requested.</li>
+      <li><b>Local vs. local:</b> size → mtime → memory-mapped byte compare with early exit, or xxh3 with a persistent cache.</li>
+      <li>Lazy expansion: collapsed folders are compared in the background at low priority.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>Text compare</h3>
+    <ul>
+      <li>Memory-mapped input with a line index built in parallel. Lines are interned and hashed before diffing.</li>
+      <li><b>imara-diff</b> (histogram algorithm), the fast diff engine also used by gitoxide and the Helix editor; Myers as an option.</li>
+      <li>Intraline (character/word) diff computed only for visible changed lines.</li>
+      <li>Syntax highlighting with an incremental tree-sitter parse, limited to the viewport plus a margin and capped by a time budget. Above a size threshold, highlighting is switched off automatically.</li>
+      <li>Binary or very large files fall back to a chunked hex compare.</li>
+    </ul>
+  </div>
+</div>
+
+<h3>Performance targets (to verify with a benchmark suite in CI)</h3>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Scenario</th><th>Target</th></tr></thead>
+  <tbody>
+    <tr><td>Cold start to an empty window</td><td>&lt; 0.5 s</td></tr>
+    <tr><td>Two branches of a ~80k-file repository (Linux-kernel size) with ~200 changed files</td><td>&lt; 1 s to the full result</td></tr>
+    <tr><td>Two local folders, 100k files, quick compare (size/date), warm OS cache</td><td>&lt; 2 s</td></tr>
+    <tr><td>zip (10k entries) vs. folder, CRC compare</td><td>&lt; 1 s</td></tr>
+    <tr><td>Open a diff of two 50 MB / ~1M-line text files</td><td>&lt; 2 s to first paint, then 60 fps scrolling</td></tr>
+    <tr><td>Memory for 1M-row folder trees</td><td>&lt; 500 MB</td></tr>
+  </tbody>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="stack">7. Tech stack</h2>
+
+<h3>Recommended: Rust core + Tauri 2 UI</h3>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Area</th><th>Choice</th><th>Why</th></tr></thead>
+  <tbody>
+    <tr><td>Language (core)</td><td><b>Rust</b></td><td>C-level speed, memory safety while parsing untrusted archives, easy multithreading, one codebase for Windows and Linux.</td></tr>
+    <tr><td>Git</td><td><code>gix</code> (gitoxide); <code>git2</code> (libgit2) as fallback</td><td>Pure Rust, fast object access and tree traversal, with no external Git binary needed.</td></tr>
+    <tr><td>Archives</td><td><code>zip</code>, <code>sevenz-rust2</code>, <code>tar</code> + <code>flate2</code>/<code>xz2</code>/<code>zstd</code>; <code>compress-tools</code> (libarchive) for RAR, ISO, CAB and other long-tail formats</td><td>Native random access for zip; libarchive covers the remaining formats.</td></tr>
+    <tr><td>Diff</td><td><code>imara-diff</code>; <code>similar</code> for intraline</td><td>Among the fastest line-diff implementations available.</td></tr>
+    <tr><td>Syntax highlighting</td><td><code>tree-sitter</code> + <code>tree-sitter-highlight</code>; <code>syntect</code> fallback</td><td>Incremental and accurate, and the same parse tree later enables structural diff and “ignore comments”.</td></tr>
+    <tr><td>Filesystem</td><td><code>jwalk</code>/<code>ignore</code>, <code>memmap2</code>, <code>notify</code>, <code>xxhash-rust</code></td><td>Parallel walking, .gitignore support, file watching.</td></tr>
+    <tr><td>Text encoding</td><td><code>encoding_rs</code>, <code>chardetng</code></td><td>The same encoding stack Firefox uses.</td></tr>
+    <tr><td>Concurrency</td><td><code>rayon</code>, <code>tokio</code> (I/O), cancellation tokens</td><td>Data parallelism for walking and hashing; a responsive pipeline.</td></tr>
+    <tr><td>UI shell</td><td><b>Tauri 2</b></td><td>Small binaries (uses WebView2 on Windows and WebKitGTK on Linux), Rust backend, installers for both platforms.</td></tr>
+    <tr><td>UI framework</td><td><b>Svelte 5</b> (or SolidJS) + TypeScript</td><td>Fine-grained reactivity with no virtual-DOM overhead, which suits huge virtualized lists.</td></tr>
+    <tr><td>Text view</td><td><b>CodeMirror 6</b>, used as a renderer and editor; the diff and highlighting come from the core</td><td>Renders only the viewport, handles very large documents, supports editing and decorations.</td></tr>
+    <tr><td>Tree grid</td><td>Custom virtualized grid (two synchronized panes)</td><td>Needs Beyond Compare-style alignment that off-the-shelf grids don't provide.</td></tr>
+    <tr><td>Packaging</td><td>MSI/NSIS + portable ZIP (Windows); AppImage, .deb, .rpm, Flatpak (Linux)</td><td>Tauri bundler; Flatpak for consistent WebKitGTK versions.</td></tr>
+    <tr><td>Quality</td><td><code>cargo test</code>, <code>criterion</code> benchmarks, fuzzing archive and Git parsers (<code>cargo-fuzz</code>), Playwright UI tests, GitHub Actions on Windows and Ubuntu</td><td>Catches performance regressions in CI.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>Alternatives</h3>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Option</th><th>Pros</th><th>Cons</th><th>When to choose</th></tr></thead>
+  <tbody>
+    <tr><td><b>Rust core + Qt 6/QML via CXX-Qt</b></td><td>Fully native rendering, very mature widgets, KSyntaxHighlighting (Kate's engine, 300+ languages)</td><td>Rust↔C++ bridge complexity, Qt licensing (LGPL dynamic linking or commercial), slower UI iteration</td><td>If the Tauri spike fails on Linux (WebKitGTK scroll performance)</td></tr>
+    <tr><td><b>C++ / Qt 6 end-to-end</b></td><td>Proven path (KDiff3 and Kate take it), libgit2, libarchive, best native feel</td><td>Memory-safety risk while parsing archives, slower development</td><td>If the team is strongly C++</td></tr>
+    <tr><td><b>Rust + Slint / egui / GPUI</b></td><td>Pure Rust, GPU rendering, tiny binaries</td><td>You would need to build the text editor widget yourself; smaller ecosystems; GPUI's API is still unstable</td><td>For maximum control, with a long timeline</td></tr>
+    <tr><td><b>C# + Avalonia</b></td><td>Productive, AvaloniaEdit with syntax highlighting, LibGit2Sharp, SharpCompress</td><td>.NET runtime, garbage-collector pauses on huge trees, weaker raw performance</td><td>For a .NET team where performance is secondary</td></tr>
+    <tr><td><b>Electron</b></td><td>Fastest UI development, Monaco diff editor</td><td>Large footprint (~150 MB+), memory-hungry; conflicts with the performance goal</td><td>Not recommended</td></tr>
+  </tbody>
+</table>
+</div>
+<div class="callout"><p><b>Decision gate (week 2):</b> build a Tauri spike that scrolls a 1M-line aligned diff and a 200k-row tree on Ubuntu (WebKitGTK) and Windows (WebView2). If Linux falls below ~50 fps, switch the UI to Qt/QML via CXX-Qt. The Rust core stays unchanged either way, because it is UI-agnostic.</p></div>
+
+<!-- ============================================================ -->
+<h2 id="roadmap">8. Roadmap</h2>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Phase</th><th>Scope</th><th>Rough effort (1–2 developers)</th></tr></thead>
+  <tbody>
+    <tr><td><b>0 · Evaluate</b></td><td>Test Beyond Compare 5 and DirectCompare on real repositories; decide whether to build or buy</td><td>1–2 days</td></tr>
+    <tr><td><b>1 · Spike</b></td><td>VFS trait plus LocalFs and Git providers; Tauri tree and text-view performance spike; benchmark harness</td><td>2–3 weeks</td></tr>
+    <tr><td><b>2 · MVP</b></td><td>Folder compare (local, Git ref, worktree, zip, 7z, tar), text compare with highlighting, rules, filters, copy actions, CLI and difftool integration</td><td>3–4 months</td></tr>
+    <tr><td><b>3 · 1.0</b></td><td>3-way merge and mergetool, hex compare, sessions, settings UI, installers, nested archives, LFS and submodules</td><td>+3 months</td></tr>
+    <tr><td><b>4 · Beyond</b></td><td>Image, table and structural diff; reports; remote sources; plugin API</td><td>ongoing</td></tr>
+  </tbody>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="risks">9. Risks &amp; open questions</h2>
+<div class="grid2">
+  <div class="card">
+    <h3>Risks</h3>
+    <ul>
+      <li><b>WebKitGTK performance</b> on Linux → mitigated by the week-2 decision gate and the UI-agnostic core.</li>
+      <li><b>Solid 7z archives</b> must be decompressed sequentially → compare by header CRC first, then extract once into a cache.</li>
+      <li><b>Git edge cases:</b> autocrlf/eol attributes, clean/smudge filters, LFS, submodules, sparse checkouts, very large packfiles.</li>
+      <li><b>Malicious archives</b> (zip bombs, path traversal) → size and ratio limits, path sanitising, fuzzing.</li>
+      <li><b>Scope creep</b>: Beyond Compare has had 25+ years of polish. Keep the MVP focused on the three source types.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>Open questions</h3>
+    <ul>
+      <li>Open source or commercial? This decides the Qt licensing question and how you compete with Beyond Compare and DirectCompare.</li>
+      <li>Is writing into archives (updating a zip) needed, or is read-only enough?</li>
+      <li>Is macOS desired later? The stack supports it at little extra cost.</li>
+      <li>Which file types beyond code matter (Office, PDF, images)?</li>
+      <li>Is 3-way folder merge needed, or only 3-way text merge?</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="sources">10. Sources</h2>
+<ul>
+  <li><a href="https://www.scootersoftware.com/kb/vcs">Scooter Software: Using Beyond Compare with Version Control Systems</a></li>
+  <li><a href="https://www.scootersoftware.com/download/v5changelog">Beyond Compare 5 change log</a></li>
+  <li><a href="https://dev.library.kiwix.org/content/stackoverflow_en_nopic_2021-08/questions/4248830/directory-comparison-of-git-branches">Stack Overflow: Directory comparison of Git branches</a></li>
+  <li><a href="https://hunted.space/product/directcompare">DirectCompare listing (vendor claims)</a> · <a href="https://wingetgui.com/apps/DirectCompare-DirectCompare">DirectCompare on WinGet</a></li>
+  <li><a href="https://cdn.jsdelivr.net/gh/winmerge/winmerge@master/README.md">WinMerge README</a></li>
+  <li><a href="https://guiffy.com/Folder-Compare.html">Guiffy Folder Compare</a></li>
+  <li><a href="https://www.jetbrains.com.cn/en-us/help/idea/differences-viewer-for-folders.html.md">JetBrains: Diff viewer for folders</a></li>
+  <li><a href="https://www.alternativeto.net/category/file-management/file-compare/">AlternativeTo: File compare tools</a></li>
+</ul>
+
+</main>
+</body>
+</html>
