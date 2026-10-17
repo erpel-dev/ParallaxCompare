@@ -7,6 +7,7 @@ pub mod git;
 pub mod local;
 pub mod mount;
 
+use std::collections::HashMap;
 use std::fmt;
 use std::ops::Deref;
 use std::path::PathBuf;
@@ -51,6 +52,14 @@ impl QuickId {
             (QuickId::GitOid(a), QuickId::GitOid(b)) => Some(a == b),
             (QuickId::Crc32(a), QuickId::Crc32(b)) => Some(a == b),
             _ => None,
+        }
+    }
+
+    /// Whether `data` hashes to this id.
+    pub fn matches_data(&self, data: &[u8]) -> bool {
+        match self {
+            QuickId::GitOid(oid) => git::blob_id(data).as_ref() == Some(oid),
+            QuickId::Crc32(crc) => crc32fast::hash(data) == *crc,
         }
     }
 }
@@ -122,6 +131,8 @@ pub trait Vfs: Send + Sync {
     fn local_path(&self, _path: &str) -> Option<PathBuf> {
         None
     }
+    /// Tells a provider that caches its tree that `path` was written or deleted.
+    fn changed(&self, _path: &str) {}
 }
 
 pub fn join(dir: &str, name: &str) -> String {
@@ -154,10 +165,13 @@ pub fn normalize(path: &str) -> Option<String> {
     Some(parts.join("/"))
 }
 
-/// Looks up an entry by listing its parent; for providers without a cheaper stat.
-pub(crate) fn stat_via_list(vfs: &dyn Vfs, path: &str) -> Result<Entry> {
+/// Looks up an entry in a tree index that maps each folder to its children.
+pub(crate) fn find_entry(dirs: &HashMap<String, Vec<Entry>>, path: &str) -> Result<Entry> {
     let (parent, name) = split_parent(path);
-    vfs.list(parent)?.into_iter().find(|e| e.name == name).ok_or_else(|| crate::Error::NotFound(path.to_string()))
+    dirs.get(parent)
+        .and_then(|list| list.iter().find(|e| e.name == name))
+        .cloned()
+        .ok_or_else(|| crate::Error::NotFound(path.to_string()))
 }
 
 /// A root entry used when `stat("")` is called on a tree.

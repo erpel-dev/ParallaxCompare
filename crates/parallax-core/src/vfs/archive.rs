@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use super::{Data, Entry, EntryKind, QuickId, Vfs, join, normalize, root_entry, split_parent};
+use super::{Data, Entry, EntryKind, QuickId, Vfs, find_entry, join, normalize, root_entry, split_parent};
 use crate::{Error, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,16 +91,25 @@ impl Index {
 
 type Extracted = Arc<HashMap<String, Arc<Vec<u8>>>>;
 
+/// Blocks at least this large are decoded with several threads, when the
+/// encoder split them into independent chunks (7-Zip does for LZMA2).
+const MT_BLOCK_SIZE: u64 = 16 << 20;
+
 enum Backend {
     Zip {
         archive: zip::ZipArchive<Cursor<Data>>,
         index_of: HashMap<String, usize>,
     },
-    /// 7z is extracted completely on first read: solid archives can only be
-    /// decompressed sequentially, so per-file extraction would be quadratic.
+    /// 7z is decoded per block. A solid block holds many files that can only be
+    /// decompressed in sequence, so it is decoded completely on first read and kept;
+    /// blocks of different files decode in parallel. A block with a single file
+    /// (non-solid archives) is decoded on each read, like a zip entry.
     SevenZ {
         data: Data,
-        extracted: Mutex<Option<Extracted>>,
+        archive: Box<sevenz_rust2::Archive>,
+        index_of: HashMap<String, usize>,
+        /// Per block: the decoded files of a solid block, `None` for a single-file block.
+        solid: Vec<Option<Mutex<Option<Extracted>>>>,
     },
     /// tar streams are decompressed once while indexing.
     Tar {
@@ -158,7 +167,8 @@ fn open_zip(data: Data, index: &mut Index) -> Result<Backend> {
 fn open_7z(data: Data, index: &mut Index) -> Result<Backend> {
     let archive = sevenz_rust2::Archive::read(&mut Cursor::new(&*data), &sevenz_rust2::Password::empty())
         .map_err(Error::archive)?;
-    for file in &archive.files {
+    let mut index_of = HashMap::new();
+    for (i, file) in archive.files.iter().enumerate() {
         let Some(path) = normalize(&file.name) else {
             continue;
         };
@@ -174,9 +184,15 @@ fn open_7z(data: Data, index: &mut Index) -> Result<Backend> {
         } else {
             let quick_id = file.has_crc.then_some(QuickId::Crc32(file.crc as u32));
             index.add_file(&path, EntryKind::File, file.size, mtime, quick_id);
+            index_of.insert(path, i);
         }
     }
-    Ok(Backend::SevenZ { data, extracted: Mutex::new(None) })
+    let mut files_per_block = vec![0usize; archive.blocks.len()];
+    for block in archive.stream_map.file_block_index.iter().flatten() {
+        files_per_block[*block] += 1;
+    }
+    let solid = files_per_block.iter().map(|&n| (n > 1).then(|| Mutex::new(None))).collect();
+    Ok(Backend::SevenZ { data, archive: Box::new(archive), index_of, solid })
 }
 
 fn open_tar(data: &Data, format: ArchiveFormat, index: &mut Index) -> Result<Backend> {
@@ -221,25 +237,34 @@ fn open_tar(data: &Data, format: ArchiveFormat, index: &mut Index) -> Result<Bac
     Ok(Backend::Tar { contents })
 }
 
-impl ArchiveFs {
-    fn extract_7z(&self, data: &Data) -> Result<Extracted> {
-        let mut reader = sevenz_rust2::ArchiveReader::new(Cursor::new(&**data), sevenz_rust2::Password::empty())
-            .map_err(Error::archive)?;
-        let mut files = HashMap::new();
-        reader
-            .for_each_entries(|entry, r| {
-                if !entry.is_directory {
-                    let mut buf = Vec::with_capacity(entry.size as usize);
-                    r.read_to_end(&mut buf)?;
-                    if let Some(path) = normalize(&entry.name) {
-                        files.insert(path, Arc::new(buf));
-                    }
+/// Decodes all files of one 7z block.
+fn decode_7z_block(
+    data: &Data,
+    archive: &sevenz_rust2::Archive,
+    block: usize,
+) -> Result<HashMap<String, Arc<Vec<u8>>>> {
+    let threads = if archive.blocks[block].get_unpack_size() >= MT_BLOCK_SIZE {
+        std::thread::available_parallelism().map_or(1, |n| n.get() as u32)
+    } else {
+        // A decoder thread pool per small block costs more than the decoding.
+        1
+    };
+    let password = sevenz_rust2::Password::empty();
+    let mut source = Cursor::new(&**data);
+    let mut files = HashMap::new();
+    sevenz_rust2::BlockDecoder::new(threads, block, archive, &password, &mut source)
+        .for_each_entries(&mut |entry, r| {
+            if !entry.is_directory {
+                let mut buf = Vec::with_capacity(entry.size as usize);
+                r.read_to_end(&mut buf)?;
+                if let Some(path) = normalize(&entry.name) {
+                    files.insert(path, Arc::new(buf));
                 }
-                Ok(true)
-            })
-            .map_err(Error::archive)?;
-        Ok(Arc::new(files))
-    }
+            }
+            Ok(true)
+        })
+        .map_err(Error::archive)?;
+    Ok(files)
 }
 
 impl Vfs for ArchiveFs {
@@ -255,7 +280,7 @@ impl Vfs for ArchiveFs {
         if path.is_empty() {
             return Ok(root_entry());
         }
-        super::stat_via_list(self, path)
+        find_entry(&self.index.dirs, path)
     }
 
     fn read(&self, path: &str) -> Result<Data> {
@@ -270,14 +295,23 @@ impl Vfs for ArchiveFs {
                 file.read_to_end(&mut buf).map_err(Error::archive)?;
                 Ok(Data::from_vec(buf))
             }
-            Backend::SevenZ { data, extracted } => {
+            Backend::SevenZ { data, archive, index_of, solid } => {
+                let i = *index_of.get(path).ok_or_else(not_found)?;
+                let Some(block) = archive.stream_map.file_block_index[i] else {
+                    return Ok(Data::from_vec(Vec::new()));
+                };
+                let Some(slot) = &solid[block] else {
+                    let mut files = decode_7z_block(data, archive, block)?;
+                    return files.remove(path).map(Data::from_shared).ok_or_else(not_found);
+                };
+                // Reads of other files in the same block wait here instead of decoding it again.
                 let files = {
-                    let mut guard = extracted.lock();
-                    match &*guard {
+                    let mut slot = slot.lock();
+                    match &*slot {
                         Some(files) => files.clone(),
                         None => {
-                            let files = self.extract_7z(data)?;
-                            *guard = Some(files.clone());
+                            let files = Arc::new(decode_7z_block(data, archive, block)?);
+                            *slot = Some(files.clone());
                             files
                         }
                     }

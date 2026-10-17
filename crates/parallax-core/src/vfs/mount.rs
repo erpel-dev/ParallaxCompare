@@ -103,4 +103,12 @@ impl Vfs for ArchiveMount {
             _ => None,
         }
     }
+
+    fn changed(&self, path: &str) {
+        // An archive that was overwritten or deleted, or one inside a changed folder,
+        // is opened again on next use.
+        let prefix = format!("{path}/");
+        self.cache.lock().retain(|outer, _| outer != path && !outer.starts_with(&prefix));
+        self.base.changed(path);
+    }
 }
