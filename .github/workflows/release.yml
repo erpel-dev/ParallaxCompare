@@ -7,10 +7,11 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Manual runs build the selected branch; the release step creates the tag on that commit.
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing tag to build and release, e.g. v0.0.1
+        description: Tag to create and release, e.g. v0.0.1
         required: true
 
 permissions:
@@ -28,8 +29,6 @@ jobs:
       APPIMAGE_EXTRACT_AND_RUN: 1
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.TAG }}
 
       - name: Install dependencies
         run: |
@@ -78,8 +77,6 @@ jobs:
       CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.TAG }}
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -118,8 +115,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.TAG }}
 
       - uses: actions/download-artifact@v4
         with:
@@ -138,5 +133,6 @@ jobs:
           [ -f "$notes" ] || { echo "Release ${TAG}" > /tmp/notes.md; notes=/tmp/notes.md; }
           prerelease=""
           case "$TAG" in v0.*|*-*) prerelease="--prerelease" ;; esac
-          gh release create "$TAG" dist/* --verify-tag $prerelease \
+          # Uses the tag if it was pushed, otherwise creates it on the built commit.
+          gh release create "$TAG" dist/* --target "$GITHUB_SHA" $prerelease \
             --title "ParallaxCompare ${TAG#v}" --notes-file "$notes"
