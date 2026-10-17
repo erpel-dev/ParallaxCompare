@@ -3698,6 +3698,7 @@ dependencies = [
  "pdf-extract",
  "quick-xml 0.42.0",
  "rayon",
+ "rustc-demangle",
  "ruzstd",
  "serde",
  "serde_json",
@@ -3710,6 +3711,7 @@ dependencies = [
  "thiserror 2.0.21",
  "trash",
  "two-face",
+ "wasmparser",
  "zip",
 ]
 
@@ -4213,6 +4215,12 @@ dependencies = [
  "web-sys",
  "windows-sys 0.60.2",
 ]
+
+[[package]]
+name = "rustc-demangle"
+version = "0.1.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b74b56ffa8bb2830709a538c2cbcae9aa062db0d2a42563bfb09bdaae44020eb"
 
 [[package]]
 name = "rustc-hash"
@@ -5840,6 +5848,16 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "wasmparser"
+version = "0.262.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "974d643b125b272607e2fff8012ea14a8328acd7621e4bafa7afb32500052b1b"
+dependencies = [
+ "bitflags 2.13.2",
+ "indexmap 2.14.2",
 ]
 
 [[package]]

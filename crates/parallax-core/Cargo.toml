@@ -40,6 +40,8 @@ pdf-extract = "0.12"
 crc32fast = "1"
 cafebabe = "0.9"
 sha2 = { version = "0.11", default-features = false }
+wasmparser = { version = "0.262", default-features = false, features = ["std", "simd"] }
+rustc-demangle = "0.1"
 
 [dev-dependencies]
 sevenz-rust2 = { version = "0.24", default-features = false, features = ["compress", "util"] }

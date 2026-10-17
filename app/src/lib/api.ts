@@ -129,7 +129,12 @@ export type View =
   | "databaseSchema"
   | "databaseRows"
   | "dataSummary"
-  | "modelGraph";
+  | "modelGraph"
+  | "wasmOutline"
+  | "wasmText"
+  | "assemblyOutline"
+  | "il"
+  | "androidXml";
 
 export interface ImageSideView {
   url: string;
