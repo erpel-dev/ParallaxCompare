@@ -1,0 +1,12 @@
+;FFMETADATA1
+title=Chaptered video
+[CHAPTER]
+TIMEBASE=1/1000
+START=0
+END=400
+title=Intro
+[CHAPTER]
+TIMEBASE=1/1000
+START=400
+END=1000
+title=Main part

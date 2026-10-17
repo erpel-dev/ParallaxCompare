@@ -18,6 +18,8 @@ pub mod gguf;
 mod image_diff;
 mod linkmap;
 mod mdf;
+mod image_meta;
+mod media;
 mod office;
 mod onnx;
 mod parquet;
@@ -100,6 +102,10 @@ pub enum View {
     Measurement,
     /// CDFX calibration data: every instance's values, one per line, sorted by name.
     Calibration,
+    /// Raster images: format, colour, EXIF, XMP, IPTC, ICC profile and text chunks.
+    ImageMetadata,
+    /// Audio and video files: container, duration, tracks, tags, chapters, attachments.
+    MediaSummary,
 }
 
 impl View {
@@ -137,6 +143,8 @@ impl View {
             View::DebugSymbols => "Debug symbols",
             View::Measurement => "Measurement summary",
             View::Calibration => "Calibration values",
+            View::ImageMetadata => "Image metadata",
+            View::MediaSummary => "Media summary",
         }
     }
 }
@@ -175,6 +183,9 @@ enum Kind {
     LinkMap,
     Mdf,
     Cdfx,
+    /// HEIF and AVIF images: metadata only, the pixels are not decoded.
+    Heif,
+    Media,
 }
 
 fn extension(name: &str) -> String {
@@ -236,6 +247,12 @@ fn kind_of(name: &str, data: &[u8]) -> Kind {
     {
         return Kind::Executable;
     }
+    if media::is_heif(data) {
+        return Kind::Heif;
+    }
+    if media::detect(&ext, data).is_some() {
+        return Kind::Media;
+    }
     if image::guess_format(data).is_ok() {
         return Kind::Raster;
     }
@@ -281,7 +298,9 @@ pub fn views_for(name: &str, data: &[u8]) -> Vec<View> {
         Kind::LegacyOffice | Kind::Binary => vec![],
         Kind::Executable if dwarf::has_debug_info(data) => vec![View::Executable, View::DebugSymbols],
         Kind::Executable => vec![View::Executable],
-        Kind::Raster => vec![View::Image],
+        Kind::Raster => vec![View::Image, View::ImageMetadata],
+        Kind::Heif => vec![View::ImageMetadata],
+        Kind::Media => vec![View::MediaSummary],
         Kind::Svg => vec![View::Text, View::PrettyXml, View::Image],
         Kind::IntelHex | Kind::Srec => vec![View::Firmware, View::Text],
         Kind::Xml if longest_line() > LONG_LINE => vec![View::PrettyXml, View::Text],
@@ -363,6 +382,8 @@ pub fn render(view: View, name: &str, data: &[u8]) -> Result<String> {
         View::DebugSymbols => dwarf::debug_symbols(data),
         View::Measurement => mdf::summary(data),
         View::Calibration => cdfx::values(&text::decode(data).text),
+        View::ImageMetadata => image_meta::metadata(data),
+        View::MediaSummary => media::summary(&extension(name), data),
     }
 }
 
@@ -403,6 +424,12 @@ pub fn has_content_rule(name: &str) -> bool {
             | "a2l"
             | "cdfx"
             | "cdf"
+            | "mp3"
+            | "flac"
+            | "wav"
+            | "aif"
+            | "aiff"
+            | "aifc"
     )
 }
 
@@ -420,6 +447,7 @@ pub fn content_equal(name: &str, left: &[u8], right: &[u8]) -> Option<&'static s
             render(View::Document, name, left).ok()? == render(View::Document, name, right).ok()?
         }
         Kind::Raster => image_diff::pixels_equal(left, right)?,
+        Kind::Media => return media::same_media(&extension(name), left, right),
         Kind::JavaClass => {
             return class::same_code(left, right)?
                 .then_some("same code, only debug info or constant pool layout differ");

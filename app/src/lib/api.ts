@@ -140,7 +140,9 @@ export type View =
   | "memoryMap"
   | "debugSymbols"
   | "measurement"
-  | "calibration";
+  | "calibration"
+  | "imageMetadata"
+  | "mediaSummary";
 
 export interface ImageSideView {
   url: string;
