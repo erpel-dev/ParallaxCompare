@@ -134,7 +134,13 @@ export type View =
   | "wasmText"
   | "assemblyOutline"
   | "il"
-  | "androidXml";
+  | "androidXml"
+  | "canDatabase"
+  | "a2lObjects"
+  | "memoryMap"
+  | "debugSymbols"
+  | "measurement"
+  | "calibration";
 
 export interface ImageSideView {
   url: string;
