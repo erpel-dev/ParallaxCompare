@@ -301,8 +301,13 @@ fn sample_sizes(stsz: &[u8]) -> Option<(u64, Option<u64>)> {
     if (table.len() as u64) < count * 4 {
         return Some((count, None));
     }
-    let total =
-        table.chunks_exact(4).take(count as usize).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as u64).sum();
+    let total = table
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .take(count as usize)
+        .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as u64)
+        .sum();
     Some((count, Some(total)))
 }
 
@@ -733,7 +738,8 @@ fn meta_tags(meta: &[u8], attachments: &mut Vec<String>) -> Vec<(String, String)
                 }
                 (1, _) | (4, _) => utf8(value),
                 (2 | 5, _) => {
-                    let units: Vec<u16> = value.chunks_exact(2).map(|b| u16::from_be_bytes([b[0], b[1]])).collect();
+                    let units: Vec<u16> =
+                        value.as_chunks::<2>().0.iter().map(|b| u16::from_be_bytes([b[0], b[1]])).collect();
                     String::from_utf16_lossy(&units)
                 }
                 (13 | 14 | 27, _) | (_, b"covr") => {

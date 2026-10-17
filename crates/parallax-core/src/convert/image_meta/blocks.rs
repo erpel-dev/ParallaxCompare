@@ -284,8 +284,13 @@ fn icc_text(profile: &[u8], offset: usize, len: usize) -> Option<String> {
                 }
             }
             let (o, l) = chosen?;
-            let units: Vec<u16> =
-                t.get(o..o.checked_add(l)?)?.chunks_exact(2).map(|b| u16::from_be_bytes([b[0], b[1]])).collect();
+            let units: Vec<u16> = t
+                .get(o..o.checked_add(l)?)?
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|b| u16::from_be_bytes([b[0], b[1]]))
+                .collect();
             Some(String::from_utf16_lossy(&units).trim_end_matches('\0').to_string())
         }
         _ => None,
@@ -342,7 +347,7 @@ pub(super) fn icc(out: &mut String, p: &[u8]) {
     if let Some(creator) = field(80..84) {
         line(out, "Creator", creator);
     }
-    let d: Vec<u16> = p[24..36].chunks_exact(2).map(|b| u16::from_be_bytes([b[0], b[1]])).collect();
+    let d: Vec<u16> = p[24..36].as_chunks::<2>().0.iter().map(|b| u16::from_be_bytes([b[0], b[1]])).collect();
     if d[0] != 0 {
         line(out, "Created", format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", d[0], d[1], d[2], d[3], d[4], d[5]));
     }

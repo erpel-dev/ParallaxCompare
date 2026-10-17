@@ -451,7 +451,7 @@ impl<'a> Heaps<'a> {
         let b = self.us.get(index as usize..).unwrap_or_default();
         let Some((len, n)) = compressed(b) else { return String::new() };
         let bytes = b.get(n..n + (len as usize).saturating_sub(1)).unwrap_or_default();
-        let units: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let units: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
         String::from_utf16_lossy(&units)
     }
 
@@ -980,7 +980,7 @@ impl<'a> Assembly<'a> {
             0x0C => float(f64::from(f32::from_le_bytes(v.get(..4)?.try_into().ok()?))) + "f",
             0x0D => float(f64::from_le_bytes(v.get(..8)?.try_into().ok()?)),
             0x0E => {
-                let units: Vec<u16> = v.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                let units: Vec<u16> = v.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
                 quote(&String::from_utf16_lossy(&units))
             }
             0x12 => "null".into(),
@@ -1541,7 +1541,7 @@ impl<'a> Assembly<'a> {
         }
         let Some((rva, size)) = self.pe.dir(6) else { return };
         let Some(dir) = self.pe.slice(rva, size) else { return };
-        for entry in dir.chunks_exact(28).take(16) {
+        for entry in dir.as_chunks::<28>().0.iter().take(16) {
             let kind = u32_at(entry, 12).unwrap_or(0);
             let (data_size, data_rva) = (u32_at(entry, 16).unwrap_or(0), u32_at(entry, 20).unwrap_or(0));
             match kind {
@@ -1925,7 +1925,7 @@ fn sha1(data: &[u8]) -> [u8; 20] {
         msg.push(0);
     }
     msg.extend_from_slice(&((data.len() as u64) * 8).to_be_bytes());
-    for chunk in msg.chunks_exact(64) {
+    for chunk in msg.as_chunks::<64>().0.iter() {
         let mut w = [0u32; 80];
         for i in 0..16 {
             w[i] = u32::from_be_bytes(chunk[4 * i..4 * i + 4].try_into().unwrap_or_default());
@@ -2457,7 +2457,7 @@ impl<'c> Instructions<'c> {
                 let n = u32_at(self.take(4)?, 0)? as usize;
                 let table = self.take(n.checked_mul(4)?)?;
                 let base = self.pos as i64;
-                Operand::Switch(table.chunks_exact(4).map(|c| (base + i64::from(i32_(c))) as u32).collect())
+                Operand::Switch(table.as_chunks::<4>().0.iter().map(|c| (base + i64::from(i32_(c))) as u32).collect())
             }
         };
         Some(Instruction { name, operand })

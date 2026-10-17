@@ -307,7 +307,7 @@ enum Value<'p> {
 
 fn decode_text(bytes: &[u8], encoding: Encoding) -> Cow<'_, str> {
     let units = |f: fn([u8; 2]) -> u16| {
-        let u: Vec<u16> = bytes.chunks_exact(2).map(|c| f([c[0], c[1]])).collect();
+        let u: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|c| f([c[0], c[1]])).collect();
         Cow::Owned(String::from_utf16_lossy(&u))
     };
     match encoding {

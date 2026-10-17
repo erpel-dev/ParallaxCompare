@@ -433,7 +433,9 @@ fn decode(enc: u8, b: &[u8]) -> String {
                 _ => (enc == 2, b),
             };
             let units: Vec<u16> = b
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|p| if be { u16::from_be_bytes([p[0], p[1]]) } else { u16::from_le_bytes([p[0], p[1]]) })
                 .collect();
             // A BOM may start each value of a list.
