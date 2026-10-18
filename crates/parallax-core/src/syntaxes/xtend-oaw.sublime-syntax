@@ -1,0 +1,104 @@
+%YAML 1.2
+---
+# Xtend extensions (.ext) of openArchitectureWare / Eclipse M2T Xpand 1.x, not
+# the later Xtend language. The `expression` context is shared with the Check
+# and Xpand grammars, which include it by scope.
+name: Xtend (oAW)
+file_extensions: [ext]
+scope: source.xtend-oaw
+contexts:
+  main:
+    - include: comments
+    - match: \b(import|extension)\b
+      scope: keyword.control.import.xtend-oaw
+      push: import
+    - match: \b(around)\b
+      scope: storage.modifier.xtend-oaw
+    - match: \b(private|cached|create|reexport)\b
+      scope: storage.modifier.xtend-oaw
+    - match: \bJAVA\b
+      scope: keyword.other.java.xtend-oaw
+      push: java
+    - include: keywords
+    # `Type name(` or `name(` at the start of a declaration.
+    - match: ([A-Za-z_^][\w^]*)\s*(?=\()
+      captures:
+        1: entity.name.function.xtend-oaw
+    - include: expression
+
+  import:
+    - meta_scope: meta.import.xtend-oaw
+    - match: ;
+      scope: punctuation.terminator.xtend-oaw
+      pop: true
+    - match: \breexport\b
+      scope: storage.modifier.xtend-oaw
+    - match: '[\w:^]+'
+      scope: entity.name.namespace.xtend-oaw
+
+  java:
+    - meta_scope: meta.java.xtend-oaw
+    - match: ;
+      scope: punctuation.terminator.xtend-oaw
+      pop: true
+    - match: '[\w.$]+'
+      scope: support.class.java.xtend-oaw
+
+  comments:
+    - match: //
+      scope: punctuation.definition.comment.xtend-oaw
+      push:
+        - meta_scope: comment.line.double-slash.xtend-oaw
+        - match: $\n?
+          pop: true
+    - match: /\*
+      scope: punctuation.definition.comment.begin.xtend-oaw
+      push:
+        - meta_scope: comment.block.xtend-oaw
+        - match: \*/
+          scope: punctuation.definition.comment.end.xtend-oaw
+          pop: true
+
+  expression:
+    - include: comments
+    - match: '"'
+      scope: punctuation.definition.string.begin.xtend-oaw
+      push: string-double
+    - match: "'"
+      scope: punctuation.definition.string.begin.xtend-oaw
+      push: string-single
+    - match: \b\d+(\.\d+)?\b
+      scope: constant.numeric.xtend-oaw
+    - match: \b(true|false|null)\b
+      scope: constant.language.xtend-oaw
+    - match: \b(this)\b
+      scope: variable.language.xtend-oaw
+    - include: keywords
+    - match: \b(String|Integer|Real|Boolean|Object|Collection|List|Set|Void|Type|Feature|Property|Operation)\b
+      scope: support.type.xtend-oaw
+    - match: '::'
+      scope: punctuation.accessor.xtend-oaw
+    - match: '->|==|!=|>=|<=|&&|\|\||[-+*/!<>=?:|]'
+      scope: keyword.operator.xtend-oaw
+    - match: '[;,.]'
+      scope: punctuation.separator.xtend-oaw
+
+  keywords:
+    - match: \b(let|if|then|else|switch|case|default|new|typeSelect|collect|select|selectFirst|reject|exists|notExists|forAll|sortBy|implies)\b
+      scope: keyword.control.xtend-oaw
+
+  string-double:
+    - meta_scope: string.quoted.double.xtend-oaw
+    - match: \\.
+      scope: constant.character.escape.xtend-oaw
+    - match: '"'
+      scope: punctuation.definition.string.end.xtend-oaw
+      pop: true
+
+  string-single:
+    - meta_scope: string.quoted.single.xtend-oaw
+    - match: \\.
+      scope: constant.character.escape.xtend-oaw
+    - match: "'"
+      scope: punctuation.definition.string.end.xtend-oaw
+      pop: true

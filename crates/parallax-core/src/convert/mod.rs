@@ -41,6 +41,7 @@ mod safetensors;
 mod sqlite;
 mod table;
 mod wasm;
+mod xpand;
 
 use serde::{Deserialize, Serialize};
 
@@ -154,6 +155,10 @@ pub enum View {
     RustOutline,
     /// JavaScript and TypeScript: imports, declarations and a checksum of each function body.
     JsOutline,
+    /// Xpand template: imports and every DEFINE and AROUND with a checksum of its body.
+    XpandOutline,
+    /// Xtend extensions and Check constraints: imports, functions and checks with a checksum of each body.
+    XtendOutline,
 }
 
 impl View {
@@ -203,10 +208,12 @@ impl View {
             View::NormalizedToml => "Normalized TOML",
             View::ReflowedText => "Text, reflowed",
             View::Needs => "Needs",
-            View::TemplateOutline => "Template outline",
+            View::TemplateOutline | View::XpandOutline => "Template outline",
             View::ConanGraph => "Conan graph",
             View::NormalizedConan => "Normalized",
-            View::PythonOutline | View::PerlOutline | View::RustOutline | View::JsOutline => "Code outline",
+            View::PythonOutline | View::PerlOutline | View::RustOutline | View::JsOutline | View::XtendOutline => {
+                "Code outline"
+            }
         }
     }
 }
@@ -271,6 +278,12 @@ enum Kind {
     Perl,
     Rust,
     Js(js::Dialect),
+    /// Xpand template (.xpt).
+    Xpand,
+    /// Xtend extensions (.ext) of openArchitectureWare.
+    Xtend,
+    /// Check constraints (.chk).
+    Check,
 }
 
 fn extension(name: &str) -> String {
@@ -399,6 +412,9 @@ fn kind_of(name: &str, data: &[u8]) -> Kind {
     if matches!(ext.as_str(), "ftl" | "ftlh" | "ftlx") && ftl::is_template(data) {
         return Kind::Ftl;
     }
+    if let Some(kind) = xpand_kind(&ext, data) {
+        return kind;
+    }
     if matches!(ext.as_str(), "rst" | "rest") {
         return Kind::Rst;
     }
@@ -424,6 +440,20 @@ fn kind_of(name: &str, data: &[u8]) -> Kind {
         return Kind::Json;
     }
     Kind::Text
+}
+
+/// Xpand, Xtend and Check files by extension. The extensions are shared with
+/// SAS transport files and CHKDSK fragments, so binary data is left alone and a
+/// template must contain a statement.
+fn xpand_kind(ext: &str, data: &[u8]) -> Option<Kind> {
+    let kind = match ext {
+        // `«` is 0xAB in ISO-8859-1, the encoding Xpand defaults to, and ends its UTF-8 form.
+        "xpt" if data.contains(&0xAB) => Kind::Xpand,
+        "ext" => Kind::Xtend,
+        "chk" if data.windows(8).any(|w| w == b"context ") => Kind::Check,
+        _ => return None,
+    };
+    (!data.iter().take(8192).any(|&b| b == 0)).then_some(kind)
 }
 
 /// Views that make sense for a file, best first.
@@ -481,6 +511,8 @@ pub fn views_for(name: &str, data: &[u8]) -> Vec<View> {
         Kind::Perl => vec![View::Text, View::PerlOutline],
         Kind::Rust => vec![View::Text, View::RustOutline],
         Kind::Js(_) => vec![View::Text, View::JsOutline],
+        Kind::Xpand => vec![View::Text, View::XpandOutline],
+        Kind::Xtend | Kind::Check => vec![View::Text, View::XtendOutline],
         Kind::ConanIni => vec![View::Text, View::NormalizedConan],
         Kind::ConanManifest => vec![View::Text],
     };
@@ -588,6 +620,9 @@ pub fn render(view: View, name: &str, data: &[u8]) -> Result<String> {
             _ => Ok(js::outline(&text::decode(data).text, js::Dialect { ts: false, jsx: true })),
         },
         View::NormalizedConan => Ok(conan::normalized(&text::decode(data).text)),
+        View::XpandOutline => Ok(xpand::template_outline(&text::decode(data).text)),
+        View::XtendOutline if extension(name) == "chk" => Ok(xpand::check_outline(&text::decode(data).text)),
+        View::XtendOutline => Ok(xpand::extension_outline(&text::decode(data).text)),
     }
 }
 
@@ -623,6 +658,9 @@ pub fn has_content_rule(name: &str) -> bool {
                 | "pm"
                 | "t"
                 | "psgi"
+                | "xpt"
+                | "ext"
+                | "chk"
                 | "ftl"
                 | "ftlh"
                 | "ftlx"
@@ -793,6 +831,15 @@ pub fn content_equal(name: &str, left: &[u8], right: &[u8]) -> Option<&'static s
             let (l, r) = (text::decode(left).text, text::decode(right).text);
             return (ftl::without_comments(&l) == ftl::without_comments(&r))
                 .then_some("same template, only comments differ");
+        }
+        Kind::Xpand if left.len().max(right.len()) <= MAX_SOURCE_COMPARE => {
+            let (l, r) = (text::decode(left).text, text::decode(right).text);
+            return xpand::same_template(&l, &r)
+                .then_some("same template, only comments, text outside definitions or spacing in directives differ");
+        }
+        Kind::Xtend | Kind::Check if left.len().max(right.len()) <= MAX_SOURCE_COMPARE => {
+            let (l, r) = (text::decode(left).text, text::decode(right).text);
+            return xpand::same_code(&l, &r).then_some("same code, only comments or formatting differ");
         }
         Kind::NeedsJson => {
             return needs::same_needs_json(left, right)?
@@ -1137,6 +1184,59 @@ mod tests {
         assert_eq!(views_for("bin/tool", b"#!/usr/bin/perl -w\nprint 1;\n")[1], View::PerlOutline);
         assert_eq!(views_for("t/basic.t", b"use Test::More;\nok(1);\n")[1], View::PerlOutline);
         assert!(has_content_rule("x.py") && has_content_rule("Cart.pm") && has_content_rule("run.pl"));
+    }
+
+    #[test]
+    fn xpand_views_and_similarity() {
+        let fixture =
+            |p: &str| std::fs::read(format!("{}/tests/fixtures/source/{p}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        // Templates are ISO-8859-1; the guillemets must survive decoding.
+        let (t1, tidy, t2) = (fixture("Root-v1.xpt"), fixture("Root-v1-tidy.xpt"), fixture("Root-v2.xpt"));
+        assert!(text::decode(&t1).text.contains("«DEFINE Root FOR Model»"));
+        assert_eq!(views_for("templates/Root.xpt", &t1), vec![View::Text, View::XpandOutline, View::Hex]);
+        assert_eq!(
+            content_equal("Root.xpt", &t1, &tidy),
+            Some("same template, only comments, text outside definitions or spacing in directives differ")
+        );
+        assert_eq!(content_equal("Root.xpt", &t1, &t2), None);
+        let outline = render(View::XpandOutline, "Root.xpt", &t1).unwrap();
+        assert_eq!(outline, render(View::XpandOutline, "Root.xpt", &tidy).unwrap());
+        assert!(outline.starts_with("«EXTENSION templates::Naming»\n«IMPORT entities»\n"), "{outline}");
+        assert!(
+            outline.contains("«DEFINE Entity FOR Entity»") && outline.contains("«FILE javaFileName()»"),
+            "{outline}"
+        );
+        let outline2 = render(View::XpandOutline, "Root.xpt", &t2).unwrap();
+        assert!(outline2.contains("«DEFINE Setter FOR Attribute»"), "{outline2}");
+
+        // Xtend extensions and Check constraints.
+        let (e1, etidy, e2) = (fixture("Naming-v1.ext"), fixture("Naming-v1-tidy.ext"), fixture("Naming-v2.ext"));
+        assert_eq!(views_for("Naming.ext", &e1), vec![View::Text, View::XtendOutline, View::Hex]);
+        assert_eq!(content_equal("Naming.ext", &e1, &etidy), Some("same code, only comments or formatting differ"));
+        assert_eq!(content_equal("Naming.ext", &e1, &e2), None);
+        let outline = render(View::XtendOutline, "Naming.ext", &e1).unwrap();
+        assert_eq!(outline, render(View::XtendOutline, "Naming.ext", &etidy).unwrap());
+        assert!(outline.contains("cached String javaType(Type this)"), "{outline}");
+        let (c1, c2) = (fixture("Checks-v1.chk"), fixture("Checks-v2.chk"));
+        assert_eq!(views_for("Checks.chk", &c1)[1], View::XtendOutline);
+        assert_eq!(content_equal("Checks.chk", &c1, &c2), None);
+        // A changed severity is a changed line, not a moved one.
+        let outline2 = render(View::XtendOutline, "Checks.chk", &c2).unwrap();
+        let pos = |o: &str| o.lines().position(|l| l.contains("should start upper case"));
+        assert_eq!(pos(&render(View::XtendOutline, "Checks.chk", &c1).unwrap()), pos(&outline2));
+        let outline = render(View::XtendOutline, "Checks.chk", &c1).unwrap();
+        assert!(
+            outline.contains("context Attribute if type != null ERROR \"Attribute \" + name + \" has no type\""),
+            "{outline}"
+        );
+
+        // The extensions also name SAS transport files and CHKDSK fragments; workflows are XML.
+        assert_eq!(views_for("data.xpt", b"HEADER RECORD*******LIBRARY HEADER RECORD!!!!!!!\0\0"), vec![View::Hex]);
+        assert_eq!(views_for("notes.xpt", b"plain text\n"), vec![View::Text, View::Hex]);
+        assert_eq!(views_for("FILE0000.CHK", b"\0\x01\x02 binary"), vec![View::Hex]);
+        assert_eq!(views_for("generator.mwe", b"<workflow>\n</workflow>\n")[1], View::PrettyXml);
+        assert_eq!(views_for("generator.oaw", b"<workflow>\n</workflow>\n")[1], View::PrettyXml);
+        assert!(has_content_rule("Root.xpt") && has_content_rule("a.ext") && has_content_rule("Checks.chk"));
     }
 
     #[test]

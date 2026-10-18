@@ -1,0 +1,12 @@
+import entities;
+extension templates::Types;
+
+String packageName(Entity this): "com.example."+model.name.toLowerCase();
+
+String javaFileName(Entity this): packageName().replaceAll('\\.', '/') + '/' + name + '.java';
+
+cached String javaType(Type this):
+  switch(name) { case "Text": "String" case "Number": "long" default: name };
+
+String timestamp():
+  JAVA templates.Helper.timestamp();

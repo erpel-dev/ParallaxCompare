@@ -137,9 +137,15 @@ pub fn decode(data: &[u8]) -> TextDoc {
             let first = data.iter().position(|b| !b.is_ascii()).unwrap_or(0);
             let start = first.saturating_sub(1024);
             let sample = &data[start..data.len().min(start + SAMPLE)];
-            let mut detector = chardetng::EncodingDetector::new(chardetng::Iso2022JpDetection::Deny);
-            detector.feed(sample, sample.len() == data.len() - start);
-            (detector.guess(None, chardetng::Utf8Detection::Allow), 0)
+            // Guillemets alone, as in Xpand templates, read as Ť and ť in ISO-8859-2 but
+            // are « and » in the Western, Central European and Cyrillic code pages.
+            if sample.iter().all(|&b| b.is_ascii() || b == 0xAB || b == 0xBB) {
+                (encoding_rs::WINDOWS_1252, 0)
+            } else {
+                let mut detector = chardetng::EncodingDetector::new(chardetng::Iso2022JpDetection::Deny);
+                detector.feed(sample, sample.len() == data.len() - start);
+                (detector.guess(None, chardetng::Utf8Detection::Allow), 0)
+            }
         }
     };
     let (text, _) = encoding.decode_without_bom_handling(&data[bom_len..]);

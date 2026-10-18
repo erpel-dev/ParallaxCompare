@@ -201,6 +201,8 @@ export type View =
   | "perlOutline"
   | "rustOutline"
   | "jsOutline"
+  | "xpandOutline"
+  | "xtendOutline"
   | "table"
   | "certificate"
   | "email";

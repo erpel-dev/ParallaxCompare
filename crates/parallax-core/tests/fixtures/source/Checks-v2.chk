@@ -1,0 +1,11 @@
+import entities;
+extension templates::Naming;
+
+context Entity ERROR "Entity without a name" :
+    name != null && name.length > 0;
+
+context Entity ERROR "Entity " + name + " should start upper case" :
+    name.toFirstUpper() == name;
+
+context Attribute if type != null ERROR "Attribute " + name + " has no type" :
+    type.name != null;

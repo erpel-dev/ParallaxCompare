@@ -1,0 +1,22 @@
+%YAML 1.2
+---
+# Check constraints (.chk) of openArchitectureWare / Eclipse M2T Xpand 1.x.
+name: Check (oAW)
+file_extensions: [chk]
+scope: source.check-oaw
+contexts:
+  main:
+    - match: \b(import|extension)\b
+      scope: keyword.control.import.check-oaw
+      push: scope:source.xtend-oaw#import
+    - match: \b(context)\b\s*([\w:^]+)?
+      captures:
+        1: keyword.control.context.check-oaw
+        2: entity.name.type.check-oaw
+    - match: \b(ERROR|WARNING)\b
+      scope: keyword.other.severity.check-oaw
+    - match: \bif\b
+      scope: keyword.control.check-oaw
+    - match: '#\s*[\w^]+'
+      scope: entity.name.tag.check-oaw
+    - include: scope:source.xtend-oaw#expression

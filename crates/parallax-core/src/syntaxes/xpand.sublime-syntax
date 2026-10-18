@@ -1,0 +1,33 @@
+%YAML 1.2
+---
+# Xpand templates (.xpt) of openArchitectureWare / Eclipse M2T. Text is output
+# as is; statements sit between guillemets, «REM»…«ENDREM» is a comment.
+name: Xpand
+file_extensions: [xpt]
+scope: text.xpand
+contexts:
+  main:
+    - match: «REM»
+      scope: punctuation.definition.comment.begin.xpand
+      push:
+        - meta_scope: comment.block.xpand
+        - match: «ENDREM»
+          scope: punctuation.definition.comment.end.xpand
+          pop: true
+    - match: «
+      scope: punctuation.section.embedded.begin.xpand
+      push: directive
+
+  directive:
+    - meta_scope: meta.embedded.xpand
+    - clear_scopes: 1
+    - match: -?»
+      scope: punctuation.section.embedded.end.xpand
+      pop: true
+    - match: \b(DEFINE|AROUND)\b\s*([\w:^*]+)?
+      captures:
+        1: keyword.control.definition.xpand
+        2: entity.name.function.xpand
+    - match: \b(ENDDEFINE|ENDAROUND|IMPORT|EXTENSION|EXPAND|FOR|FOREACH|AS|SEPARATOR|ITERATOR|ENDFOREACH|IF|ELSEIF|ELSE|ENDIF|FILE|ENDFILE|LET|ENDLET|PROTECT|CSTART|CEND|ID|DISABLE|ENDPROTECT|ERROR|ONFILECLOSE)\b
+      scope: keyword.control.xpand
+    - include: scope:source.xtend-oaw#expression

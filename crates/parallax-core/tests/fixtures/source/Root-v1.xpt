@@ -1,0 +1,26 @@
+«IMPORT entities»
+«EXTENSION templates::Naming»
+
+«DEFINE Root FOR Model»
+  «EXPAND Entity FOREACH entities»
+«ENDDEFINE»
+
+«DEFINE Entity FOR Entity»
+«FILE javaFileName()»
+package «packageName()»;
+
+public class «name» {
+  «FOREACH attributes AS a-»
+  private «a.type.javaType()» «a.name»;
+  «ENDFOREACH»
+
+  «EXPAND Accessor FOREACH attributes-»
+}
+«ENDFILE»
+«ENDDEFINE»
+
+«DEFINE Accessor FOR Attribute»
+  public «type.javaType()» get«name.toFirstUpper()»() {
+    return «name»;
+  }
+«ENDDEFINE»

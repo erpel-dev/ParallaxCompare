@@ -8,8 +8,8 @@
 //! which is exact for almost all code and keeps the first paint fast.
 //!
 //! Extra grammars for automotive and embedded formats (A2L, DBC, Intel HEX,
-//! S-record), for FreeMarker templates, Conan files and for the generated content views live
-//! in `src/syntaxes`.
+//! S-record), for FreeMarker templates, Conan files, oAW Xpand, Xtend and Check and for the
+//! generated content views live in `src/syntaxes`.
 
 use std::sync::LazyLock;
 
@@ -39,6 +39,9 @@ const CUSTOM_SYNTAXES: &[&str] = &[
     include_str!("syntaxes/html-freemarker.sublime-syntax"),
     include_str!("syntaxes/xml-freemarker.sublime-syntax"),
     include_str!("syntaxes/conan.sublime-syntax"),
+    include_str!("syntaxes/xtend-oaw.sublime-syntax"),
+    include_str!("syntaxes/check-oaw.sublime-syntax"),
+    include_str!("syntaxes/xpand.sublime-syntax"),
     include_str!("syntaxes/parallax-views.sublime-syntax"),
 ];
 
@@ -49,7 +52,7 @@ const EXTENSION_ALIASES: &[(&str, &str)] = &[("psgi", "Perl"), ("pyw", "Python")
 const XML_EXTENSIONS: &[&str] = &[
     "arxml", "odx", "odx-d", "odx-c", "odx-v", "odx-f", "odx-e", "odx-cs", "odx-m", "cdd", "cdfx", "fibex", "xdm",
     "epc", "ecuc", "svg", "xsd", "xsl", "xslt", "xaml", "plist", "resx", "nuspec", "props", "targets", "csproj",
-    "vcxproj", "xlf", "wsdl", "kml", "gpx", "xmi", "uml", "aird", "launch", "xml",
+    "vcxproj", "xlf", "wsdl", "kml", "gpx", "xmi", "uml", "aird", "launch", "mwe", "oaw", "xml",
 ];
 
 static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(|| {
@@ -240,6 +243,11 @@ mod tests {
             assert_eq!(name(p, "").as_deref(), Some("Perl"), "{p}");
         }
         assert_eq!(name("tool", "#!/usr/bin/perl -w").as_deref(), Some("Perl"));
+        assert_eq!(name("templates/Root.xpt", "").as_deref(), Some("Xpand"));
+        assert_eq!(name("Naming.ext", "").as_deref(), Some("Xtend (oAW)"));
+        assert_eq!(name("Checks.chk", "").as_deref(), Some("Check (oAW)"));
+        assert_eq!(name("generator.mwe", "").as_deref(), Some("XML"));
+        assert_eq!(name("workflow.oaw", "").as_deref(), Some("XML"));
     }
 
     #[test]
@@ -300,5 +308,22 @@ mod tests {
         assert!(scopes_at("XML (FreeMarker)", xml, "#list").contains("keyword.control.directive.ftl"));
         let raw = "<#noparse>${not} <#if></#noparse>";
         assert!(!scopes_at("FreeMarker", raw, "not").contains("interpolation"));
+
+        // Xpand statements with Xtend expressions; the output text stays plain.
+        let xpt = "«REM»note«ENDREM»public «type.javaType()» get«name» { «FOREACH xs AS x SEPARATOR \", \"-»";
+        assert!(scopes_at("Xpand", xpt, "note").contains("comment.block.xpand"));
+        assert!(!scopes_at("Xpand", xpt, "public").contains("meta.embedded"));
+        assert!(scopes_at("Xpand", xpt, "type.").contains("meta.embedded.xpand"));
+        assert!(scopes_at("Xpand", xpt, "FOREACH").contains("keyword.control.xpand"));
+        assert!(scopes_at("Xpand", xpt, ", ").contains("string.quoted.double.xtend-oaw"));
+        let ext = "cached String javaType(Type this) : switch (name) { default : 'x' }; // c";
+        assert!(scopes_at("Xtend (oAW)", ext, "cached").contains("storage.modifier.xtend-oaw"));
+        assert!(scopes_at("Xtend (oAW)", ext, "javaType").contains("entity.name.function.xtend-oaw"));
+        assert!(scopes_at("Xtend (oAW)", ext, "switch").contains("keyword.control.xtend-oaw"));
+        assert!(scopes_at("Xtend (oAW)", ext, "// c").contains("comment.line"));
+        let chk = "context Entity if abstract ERROR \"no name\" : name != null;";
+        assert!(scopes_at("Check (oAW)", chk, "Entity").contains("entity.name.type.check-oaw"));
+        assert!(scopes_at("Check (oAW)", chk, "ERROR").contains("keyword.other.severity.check-oaw"));
+        assert!(scopes_at("Check (oAW)", chk, "no name").contains("string.quoted.double.xtend-oaw"));
     }
 }
