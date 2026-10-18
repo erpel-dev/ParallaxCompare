@@ -445,12 +445,13 @@
     enqueue(() => api.redo(id)).then(applyEdit);
   }
 
-  async function save() {
+  /** Saves the changed sides among `sides` (both by default). */
+  async function save(sides: (0 | 1)[] = [0, 1]) {
     if (!info) return;
     const id = info.id;
     // Typed edits land first, so they are saved too.
     await queue;
-    for (const side of [0, 1] as const) {
+    for (const side of sides) {
       if (!dirty[side]) continue;
       busy = "Saving…";
       try {
@@ -492,7 +493,9 @@
         { group, title: "Copy difference to the right", keys: "Alt+→", enabled: editable[1] && currentSection >= 0, run: () => copySection(currentSection, 1) },
         { group, title: "Undo", keys: "Ctrl+Z", enabled: canUndo, run: undo },
         { group, title: "Redo", keys: "Ctrl+Y", enabled: canRedo, run: redo },
-        { group, title: "Save", keys: "Ctrl+S", enabled: anyDirty, run: save },
+        { group, title: "Save", keys: "Ctrl+S", enabled: anyDirty, run: () => save() },
+        { group, title: "Save left side only", enabled: dirty[0], run: () => save([0]) },
+        { group, title: "Save right side only", enabled: dirty[1], run: () => save([1]) },
       );
     }
     const ws = [["exact", "Whitespace: exact"], ["normalize", "Whitespace: ignore changes"], ["ignoreAll", "Whitespace: ignore all"]] as const;
@@ -825,7 +828,7 @@
       <button onclick={() => copySection(currentSection, 1)} disabled={!editable[1] || currentSection < 0} title="Copy the current difference to the right side (Alt+→)">Copy →</button>
       <button onclick={undo} disabled={!canUndo} title="Undo (Ctrl+Z)">↶</button>
       <button onclick={redo} disabled={!canRedo} title="Redo (Ctrl+Y)">↷</button>
-      <button class:dirty={anyDirty} onclick={save} disabled={!anyDirty} title="Save the changed sides (Ctrl+S)">Save{anyDirty ? " ●" : ""}</button>
+      <button class:dirty={anyDirty} onclick={() => save()} disabled={!anyDirty} title="Save all changed sides (Ctrl+S)">Save{anyDirty ? " ●" : ""}</button>
     {/if}
     <span class="sep"></span>
     <button class:on={findOpen} onclick={() => (findOpen ? closeFind() : openFind())} disabled={!info} title="Find in both files (Ctrl+F)">Find</button>
@@ -886,8 +889,8 @@
   {/if}
 
   <div class="pathbars">
-    <PathBar bind:this={pathbars[0]} info={session.left} suffix={path} modified={dirty[0]} edit={edit?.[0]} title="Left" />
-    <PathBar bind:this={pathbars[1]} info={session.right} suffix={path} modified={dirty[1]} edit={edit?.[1]} title="Right" />
+    <PathBar bind:this={pathbars[0]} info={session.left} suffix={path} modified={dirty[0]} onSave={() => save([0])} edit={edit?.[0]} title="Left" />
+    <PathBar bind:this={pathbars[1]} info={session.right} suffix={path} modified={dirty[1]} onSave={() => save([1])} edit={edit?.[1]} title="Right" />
   </div>
   {#if info}
     <div class="meta">

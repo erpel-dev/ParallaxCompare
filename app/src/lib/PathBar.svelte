@@ -26,9 +26,18 @@
     info,
     suffix = "",
     modified = false,
+    onSave,
     edit,
     title = "",
-  }: { info: SourceInfo; suffix?: string; modified?: boolean; edit?: SideEdit; title?: string } = $props();
+  }: {
+    info: SourceInfo;
+    suffix?: string;
+    modified?: boolean;
+    /** Saves this side alone; shown while it has unsaved changes. */
+    onSave?: () => void;
+    edit?: SideEdit;
+    title?: string;
+  } = $props();
 
   const badge = $derived(
     ({
@@ -285,7 +294,10 @@
   {#if info.rev}
     <span class="ref mono">⎇ {info.rev}{info.commit && info.commit !== info.rev ? ` · ${info.commit}` : ""}</span>
   {/if}
-  {#if modified}<span class="mod" title="Unsaved changes">● modified</span>{/if}
+  {#if modified}
+    <span class="mod" title="Unsaved changes">● modified</span>
+    {#if onSave}<button class="save" onclick={onSave} title="Save only the {title.toLowerCase()} side">Save</button>{/if}
+  {/if}
   {#if !info.writable}<span class="ro">read-only</span>{/if}
   {#if edit}
     <button
@@ -505,6 +517,12 @@
     flex: none;
     color: var(--dim);
     font-size: 11px;
+  }
+  .save {
+    padding: 0 8px;
+    line-height: 18px;
+    color: var(--accent);
+    border-color: var(--accent);
   }
   .icon {
     padding: 0 6px;
