@@ -180,6 +180,24 @@ pub async fn inspect_path(path: String) -> CmdResult<PathInfo> {
     .await
 }
 
+/// Reads a path typed into a path bar: `repo@rev:sub` is a Git revision.
+#[tauri::command]
+pub fn parse_source(text: String) -> SourceSpec {
+    SourceSpec::parse(&text)
+}
+
+/// The source of the entry at `rel` on one side of a comparison, so a file opened
+/// from a folder comparison can be compared on its own.
+#[tauri::command]
+pub async fn side_source(state: State<'_, AppState>, id: u64, left: bool, rel: String) -> CmdResult<SourceSpec> {
+    let session = state.session(id)?;
+    blocking(move || {
+        let side = if left { &session.left } else { &session.right };
+        side.spec.child(&rel).map_err(err)
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn git_refs(repo: String) -> CmdResult<RefList> {
     blocking(move || GitRepo::discover(&repo).and_then(|r| r.refs(40)).map_err(err)).await

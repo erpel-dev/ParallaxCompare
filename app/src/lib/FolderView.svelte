@@ -3,7 +3,7 @@
   import { listen } from "@tauri-apps/api/event";
   import { ask } from "@tauri-apps/plugin-dialog";
   import { api, defaultCompareOptions, type CompareResult, type Node, type OpResult, type PathsChanged, type SessionInfo, type Side } from "./api";
-  import PathBar from "./PathBar.svelte";
+  import PathBar, { type SideEdit } from "./PathBar.svelte";
   import { formatSize, formatTime } from "./format";
   import {
     allFolders,
@@ -22,7 +22,9 @@
     session,
     onOpenFile,
     onSwap,
-  }: { session: SessionInfo; onOpenFile: (path: string) => void; onSwap: () => void } = $props();
+    edit,
+  }: { session: SessionInfo; onOpenFile: (path: string) => void; onSwap: () => void; edit?: [SideEdit, SideEdit] } =
+    $props();
 
   const ROW = 22;
 
@@ -454,8 +456,8 @@
   </div>
 
   <div class="pathbars">
-    <PathBar info={session.left} />
-    <PathBar info={session.right} />
+    <PathBar info={session.left} edit={edit?.[0]} title="Left" />
+    <PathBar info={session.right} edit={edit?.[1]} title="Right" />
   </div>
 
   <div class="head">

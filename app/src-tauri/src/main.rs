@@ -14,6 +14,8 @@ fn main() {
             commands::startup_request,
             commands::inspect_path,
             commands::git_refs,
+            commands::parse_source,
+            commands::side_source,
             commands::open_session,
             commands::close_session,
             commands::run_compare,

@@ -6,6 +6,18 @@ export type SourceSpec =
   | { type: "gitRev"; repo: string; rev: string; subpath?: string }
   | { type: "gitWorktree"; repo: string };
 
+/** A source as text, the form the CLI and the path bars read: `repo@rev:sub` for Git. */
+export function sourceText(spec: SourceSpec): string {
+  switch (spec.type) {
+    case "local":
+      return spec.path;
+    case "gitRev":
+      return `${spec.repo}@${spec.rev}${spec.subpath ? `:${spec.subpath}` : ""}`;
+    case "gitWorktree":
+      return spec.repo;
+  }
+}
+
 export interface SourceOptions {
   expandArchives: boolean;
   respectGitignore: boolean;
@@ -287,6 +299,8 @@ export const api = {
   startupRequest: () => invoke<StartupRequest | null>("startup_request"),
   inspectPath: (path: string) => invoke<PathInfo>("inspect_path", { path }),
   gitRefs: (repo: string) => invoke<RefList>("git_refs", { repo }),
+  parseSource: (text: string) => invoke<SourceSpec>("parse_source", { text }),
+  sideSource: (id: number, left: boolean, rel: string) => invoke<SourceSpec>("side_source", { id, left, rel }),
   openSession: (left: SourceSpec, right: SourceSpec, options: SourceOptions, mergeBase: boolean) =>
     invoke<SessionInfo>("open_session", { left, right, options, mergeBase }),
   closeSession: (id: number) => invoke<void>("close_session", { id }),

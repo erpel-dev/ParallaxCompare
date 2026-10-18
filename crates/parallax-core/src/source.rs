@@ -136,6 +136,28 @@ impl SourceSpec {
         SourceSpec::Local { path: text.to_string() }
     }
 
+    /// The source for the entry at `rel` inside this one, e.g. to compare one file
+    /// of a folder comparison on its own. Archives on the way are entered with `!`.
+    pub fn child(&self, rel: &str) -> Result<SourceSpec> {
+        let rel = normalize(rel).ok_or_else(|| Error::InvalidSource(rel.to_string()))?;
+        if rel.is_empty() {
+            return Ok(self.clone());
+        }
+        Ok(match self {
+            SourceSpec::Local { path } => SourceSpec::Local { path: local_child(path, &rel) },
+            SourceSpec::GitRev { repo, rev, subpath } => {
+                let subpath = normalize(subpath).ok_or_else(|| Error::InvalidSource(subpath.clone()))?;
+                SourceSpec::GitRev { repo: repo.clone(), rev: rev.clone(), subpath: join(&subpath, &rel) }
+            }
+            SourceSpec::GitWorktree { repo } => {
+                let git = GitRepo::discover(repo)?;
+                let workdir =
+                    git.workdir().ok_or_else(|| Error::InvalidSource(format!("{repo} is a bare repository")))?;
+                SourceSpec::Local { path: local_child(&workdir.display().to_string(), &rel) }
+            }
+        })
+    }
+
     pub fn open(&self, opts: SourceOptions) -> Result<Source> {
         match self {
             SourceSpec::Local { path } => open_local(self, path, opts),
@@ -241,6 +263,23 @@ fn open_local(spec: &SourceSpec, path: &str, opts: SourceOptions) -> Result<Sour
     Ok(source)
 }
 
+/// `path` (a local path, possibly `a.zip!/dir`) joined with `rel`: the first file on
+/// disk along the way is an archive, and the rest of `rel` is inside it.
+fn local_child(path: &str, rel: &str) -> String {
+    if path.contains('!') {
+        return format!("{}/{rel}", path.trim_end_matches(['/', '\\']));
+    }
+    let mut disk = PathBuf::from(path);
+    let parts: Vec<&str> = rel.split('/').collect();
+    for (i, part) in parts.iter().enumerate() {
+        if disk.is_file() {
+            return format!("{}!/{}", disk.display(), parts[i..].join("/"));
+        }
+        disk.push(part);
+    }
+    disk.display().to_string()
+}
+
 /// For a folder inside a Git worktree: the tracked files below it, relative to it.
 /// `None` when the folder is not in a worktree.
 fn tracked_below(dir: &Path) -> Option<Vec<String>> {
@@ -298,5 +337,37 @@ mod tests {
         );
         assert_eq!(SourceSpec::parse(&repo), SourceSpec::Local { path: repo.clone() });
         assert_eq!(SourceSpec::parse("missing.zip!/bin"), SourceSpec::Local { path: "missing.zip!/bin".into() });
+    }
+
+    #[test]
+    fn child_of_folder_archive_and_git() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let zip = dir.path().join("sub/pack.zip");
+        let mut w = zip::ZipWriter::new(std::fs::File::create(&zip).unwrap());
+        w.start_file("inner/a.txt", zip::write::SimpleFileOptions::default()).unwrap();
+        std::io::Write::write_all(&mut w, b"hello").unwrap();
+        w.finish().unwrap();
+        let root = dir.path().display().to_string();
+        let local = SourceSpec::Local { path: root.clone() };
+
+        let file = local.child("sub/pack.zip").unwrap();
+        assert_eq!(file, SourceSpec::Local { path: zip.display().to_string() });
+
+        let inner = local.child("sub/pack.zip/inner/a.txt").unwrap();
+        assert_eq!(inner, SourceSpec::Local { path: format!("{}!/inner/a.txt", zip.display()) });
+        let source = inner.open(SourceOptions::default()).unwrap();
+        assert!(source.is_file().unwrap());
+
+        let in_archive = SourceSpec::Local { path: format!("{}!/inner/", zip.display()) };
+        assert_eq!(in_archive.child("a.txt").unwrap(), inner);
+        assert_eq!(local.child("").unwrap(), local);
+        assert!(local.child("../x").is_err());
+
+        let git = SourceSpec::GitRev { repo: root.clone(), rev: "main".into(), subpath: "src".into() };
+        assert_eq!(
+            git.child("lib/x.rs").unwrap(),
+            SourceSpec::GitRev { repo: root, rev: "main".into(), subpath: "src/lib/x.rs".into() }
+        );
     }
 }

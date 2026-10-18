@@ -130,6 +130,14 @@ git config --global diff.tool parallax
 git difftool --dir-diff main feature/x     # or simply: parallax-compare .@main .@feature/x
 ```
 
+To compare against something else without starting over, change a side from its path bar above the panes:
+
+- click the path, type another one (any form from the table below, e.g. `repo@v1.4`) and press Enter; Esc cancels
+- 📂 opens the file or folder dialog (⎇ the branch list for a Git side), ▾ switches the side to a folder, file, Git ref or worktree
+- drop a file or folder from your file manager onto the left or right half of the window; drop two to replace both sides, or onto a *New comparison* tab to fill it in
+
+The tab keeps its options and the other side. If the new path cannot be opened, the old comparison stays. In a file opened from a folder comparison, changing one side compares that file with any other file, also one with a different name.
+
 Keyboard: arrow keys, Enter (open or expand), ←/→ (collapse/expand), F5 (refresh), F7/F8 (previous/next difference), Ctrl+F (find), F3/Shift+F3 (next/previous match), Ctrl+T (new tab), Ctrl+W (close tab).
 
 ### Source syntax (CLI and path fields)

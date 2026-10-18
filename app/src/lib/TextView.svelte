@@ -19,14 +19,15 @@
     type View,
   } from "./api";
   import ImagePanel from "./ImagePanel.svelte";
-  import PathBar from "./PathBar.svelte";
+  import PathBar, { type SideEdit } from "./PathBar.svelte";
   import { formatSize } from "./format";
 
   let {
     session,
     path,
     onDirty,
-  }: { session: SessionInfo; path: string; onDirty?: (dirty: boolean) => void } = $props();
+    edit,
+  }: { session: SessionInfo; path: string; onDirty?: (dirty: boolean) => void; edit?: [SideEdit, SideEdit] } = $props();
 
   const ROW = 19;
   const CHUNK = 200;
@@ -785,8 +786,8 @@
   {/if}
 
   <div class="pathbars">
-    <PathBar info={session.left} suffix={path} modified={dirty[0]} />
-    <PathBar info={session.right} suffix={path} modified={dirty[1]} />
+    <PathBar info={session.left} suffix={path} modified={dirty[0]} edit={edit?.[0]} title="Left" />
+    <PathBar info={session.right} suffix={path} modified={dirty[1]} edit={edit?.[1]} title="Right" />
   </div>
   {#if info}
     <div class="meta">

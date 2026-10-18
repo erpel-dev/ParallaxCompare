@@ -1,6 +1,6 @@
 <script lang="ts">
   import SidePicker, { toSpec, type PickerValue } from "./SidePicker.svelte";
-  import type { SourceOptions, SourceSpec } from "./api";
+  import { api, type SourceOptions, type SourceSpec } from "./api";
 
   let {
     onCompare,
@@ -36,6 +36,18 @@
 
   function swap() {
     [left, right] = [right, left];
+  }
+
+  async function picked(path: string, was: PickerValue): Promise<PickerValue> {
+    const info = await api.inspectPath(path).catch(() => null);
+    return { ...was, kind: info && !info.isDir ? "file" : "folder", path, rev: "", subpath: "" };
+  }
+
+  /** Fills in dropped paths; with both sides given, compares right away. */
+  export async function fill(leftPath?: string, rightPath?: string) {
+    if (leftPath) left = await picked(leftPath, left);
+    if (rightPath) right = await picked(rightPath, right);
+    if (leftPath && rightPath) submit();
   }
 
   function submit() {
