@@ -835,6 +835,7 @@ pub async fn open_file_diff(
             View::PrettyJson => Some("JSON".into()),
             View::NormalizedYaml => Some("YAML".into()),
             View::NormalizedToml => Some("TOML".into()),
+            View::ReflowedText => syntax.or_else(|| Some("reStructuredText".into())),
             View::ChatTemplate => syntax.or_else(|| Some("Jinja2".into())),
             View::Image => None,
             _ => Some(highlight::view_syntax().name.clone()),

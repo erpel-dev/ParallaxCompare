@@ -192,6 +192,8 @@ export type View =
   | "notebookCode"
   | "normalizedYaml"
   | "normalizedToml"
+  | "reflowedText"
+  | "needs"
   | "table"
   | "certificate"
   | "email";

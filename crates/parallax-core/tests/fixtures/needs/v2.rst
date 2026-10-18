@@ -1,0 +1,38 @@
+Requirements
+============================
+
+The login requirements of the demo application.
+
+.. impl:: Login form
+   :id: IMPL_001
+   :status: done
+   :links: REQ_001,SPEC_001
+
+   Implemented in
+   ``login.py``.
+
+.. req:: Login with password
+   :id: REQ_001
+   :priority: high
+   :tags: security, auth
+   :status: open
+
+   The user can log in with a user name and a password.
+
+   .. spec:: Password rules
+      :id: SPEC_001
+      :links: REQ_001
+
+      At least 16 characters.
+
+.. req:: Logout
+   :id: REQ_002
+   :status: done
+
+   The user can log out.
+
+.. test:: Login test
+   :id: TEST_001
+   :links: IMPL_001, REQ_002
+
+   Checks the login.

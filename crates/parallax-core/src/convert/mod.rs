@@ -24,11 +24,13 @@ mod linkmap;
 mod lockfile;
 mod mdf;
 mod media;
+mod needs;
 mod notebook;
 mod office;
 mod onnx;
 mod parquet;
 mod pretty;
+mod rst;
 mod safetensors;
 mod sqlite;
 mod table;
@@ -128,6 +130,10 @@ pub enum View {
     NormalizedYaml,
     /// TOML with keys sorted and one layout.
     NormalizedToml,
+    /// reStructuredText with each paragraph on one line and headings normalized.
+    ReflowedText,
+    /// Sphinx-Needs: every need sorted by id, with its options and text.
+    Needs,
 }
 
 impl View {
@@ -175,6 +181,8 @@ impl View {
             View::NotebookCode => "Notebook, code only",
             View::NormalizedYaml => "Normalized YAML",
             View::NormalizedToml => "Normalized TOML",
+            View::ReflowedText => "Text, reflowed",
+            View::Needs => "Needs",
         }
     }
 }
@@ -226,6 +234,8 @@ enum Kind {
     Pkcs12,
     Eml,
     Msg,
+    Rst,
+    NeedsJson,
 }
 
 fn extension(name: &str) -> String {
@@ -339,6 +349,12 @@ fn kind_of(name: &str, data: &[u8]) -> Kind {
     if lockfile::format_of(name).is_some() {
         return Kind::Lockfile;
     }
+    if matches!(ext.as_str(), "rst" | "rest") {
+        return Kind::Rst;
+    }
+    if needs::is_needs_json(name, data) {
+        return Kind::NeedsJson;
+    }
     if notebook::is_notebook(&ext, data) {
         return Kind::Notebook;
     }
@@ -404,6 +420,11 @@ pub fn views_for(name: &str, data: &[u8]) -> Vec<View> {
         Kind::DerCert | Kind::Pkcs12 => vec![View::Certificate],
         Kind::Eml => vec![View::Email, View::Text],
         Kind::Msg => vec![View::Email],
+        Kind::Rst if needs::rst_has_needs(&text::decode(data).text) => {
+            vec![View::Text, View::Needs, View::ReflowedText]
+        }
+        Kind::Rst => vec![View::Text, View::ReflowedText],
+        Kind::NeedsJson => vec![View::Needs, View::PrettyJson, View::Text],
     };
     views.push(View::Hex);
     views
@@ -477,15 +498,21 @@ pub fn render(view: View, name: &str, data: &[u8]) -> Result<String> {
         View::NotebookCode => notebook::render(data, false),
         View::NormalizedYaml => data::normalized_yaml(data),
         View::NormalizedToml => data::normalized_toml(data),
+        View::ReflowedText => Ok(rst::reflow(&text::decode(data).text)),
+        View::Needs if needs::is_needs_json(name, data) => needs::render_json(data),
+        View::Needs => Ok(needs::render_rst(&text::decode(data).text)),
     }
 }
 
 /// Whether [`content_equal`] can apply to a file, judged by its name alone.
 pub fn has_content_rule(name: &str) -> bool {
     lockfile::format_of(name).is_some()
+        || name.rsplit(['/', '\\']).next().is_some_and(|f| f.eq_ignore_ascii_case("needs.json"))
         || matches!(
             extension(name).as_str(),
             "a2l"
+                | "rst"
+                | "rest"
                 | "aif"
                 | "aifc"
                 | "aiff"
@@ -610,6 +637,18 @@ pub fn content_equal(name: &str, left: &[u8], right: &[u8]) -> Option<&'static s
         Kind::Toml => {
             return data::same_toml(left, right)?.then_some("same data, only formatting, order or comments differ");
         }
+        Kind::Rst => {
+            let (l, r) = (text::decode(left).text, text::decode(right).text);
+            if rst::reflow(&l) == rst::reflow(&r) {
+                return Some("same text, only line wrapping or heading underlines differ");
+            }
+            return needs::same_rst_needs(&l, &r)
+                .then_some("same needs, only their order or the text around them differ");
+        }
+        Kind::NeedsJson => {
+            return needs::same_needs_json(left, right)?
+                .then_some("same needs, only build time, line numbers or order differ");
+        }
         _ => false,
     };
     equal.then_some("same content, the file bytes differ")
@@ -718,6 +757,58 @@ mod tests {
         assert_eq!(first("m.eml", &fixture("email/order.eml")), View::Email);
         assert_eq!(first("m.msg", &fixture("email/order.msg")), View::Email);
         assert_eq!(first("m.doc", &fixture("email/order.msg")), views_for("m.doc", b"\xD0\xCF\x11\xE0")[0]);
+    }
+
+    #[test]
+    fn restructured_text_and_sphinx_needs() {
+        let fixture =
+            |p: &str| std::fs::read(format!("{}/tests/fixtures/needs/{p}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        assert_eq!(
+            views_for("doc/index.rst", &fixture("v1.rst")),
+            vec![View::Text, View::Needs, View::ReflowedText, View::Hex]
+        );
+        assert_eq!(
+            views_for("readme.rst", b"Title\n=====\n\nText.\n"),
+            vec![View::Text, View::ReflowedText, View::Hex]
+        );
+        // A Sphinx-Needs export, whatever it is called.
+        assert_eq!(views_for("_build/needs.json", &fixture("v1-needs.json"))[0], View::Needs);
+        assert_eq!(views_for("export.json", &fixture("v1-needs.json"))[0], View::Needs);
+        assert_eq!(views_for("other.json", b"{\"a\": 1}")[0], View::Text);
+
+        // The same project built twice: only timestamps differ.
+        let (a, b) = (fixture("v1-needs.json"), fixture("v1-rebuilt-needs.json"));
+        assert_ne!(a, b);
+        assert_eq!(
+            content_equal("needs.json", &a, &b),
+            Some("same needs, only build time, line numbers or order differ")
+        );
+        assert_eq!(content_equal("needs.json", &a, &fixture("v2-needs.json")), None);
+        let rst = fixture("v1.rst");
+        assert_eq!(
+            content_equal("index.rst", &rst, &fixture("v1-rewrapped.rst")),
+            Some("same text, only line wrapping or heading underlines differ")
+        );
+        assert_eq!(content_equal("index.rst", &rst, &fixture("v2.rst")), None);
+        assert!(has_content_rule("docs/index.rst") && has_content_rule("_build/needs.json"));
+
+        // v2 moves, re-wraps and reorders needs, and changes three things.
+        let view = |name: &str, f: &str| render(View::Needs, name, &fixture(f)).unwrap();
+        let (l, r) = (view("index.rst", "v1.rst"), view("index.rst", "v2.rst"));
+        let changed: Vec<(&str, &str)> = l.lines().zip(r.lines()).filter(|(a, b)| a != b).collect();
+        assert_eq!(l.lines().count(), r.lines().count());
+        assert_eq!(
+            changed,
+            [
+                ("status: open", "status: done"),
+                ("    At least 12 characters.", "    At least 16 characters."),
+                ("links: IMPL_001", "links: IMPL_001, REQ_002"),
+            ]
+        );
+        let json = view("needs.json", "v1-needs.json");
+        assert!(json.starts_with("=== Demo · 5 needs: 1 impl, 2 req, 1 spec, 1 test ===\n"));
+        assert!(!json.contains("lineno") && !json.contains("created"));
+        assert!(json.contains("--- SPEC_001 [spec] Password rules ---\nlinks: REQ_001\n"));
     }
 
     #[test]

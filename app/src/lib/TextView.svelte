@@ -551,7 +551,11 @@
   /** Whitespace, case and grammar changes keep the edits. */
   let pathbars = $state<PathBar[]>([]);
   const hasSyntax = $derived(
-    info?.view === "text" || info?.view === "prettyXml" || info?.view === "prettyJson" || info?.view === "chatTemplate",
+    info?.view === "text" ||
+      info?.view === "prettyXml" ||
+      info?.view === "prettyJson" ||
+      info?.view === "chatTemplate" ||
+      info?.view === "reflowedText",
   );
   const optionsChanged = $derived.by(() => {
     const d = defaultDiffOptions();
