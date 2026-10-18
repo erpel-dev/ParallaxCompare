@@ -1,0 +1,252 @@
+%YAML 1.2
+---
+# Apache FreeMarker templates (FTL) over plain text. The `ftl` context holds the
+# template language alone; "HTML (FreeMarker)" and "XML (FreeMarker)" lay it over
+# their markup. Both the angle bracket (`<#if>`) and the square bracket (`[#if]`)
+# tag syntax are recognized.
+name: FreeMarker
+file_extensions: []
+scope: text.ftl
+contexts:
+  main:
+    - include: ftl
+
+  ftl:
+    - match: <#--
+      scope: punctuation.definition.comment.begin.ftl
+      push: comment-angle
+    - match: \[#--
+      scope: punctuation.definition.comment.begin.ftl
+      push: comment-square
+    # Text inside noparse is not interpreted.
+    - match: (<)(#noparse)\s*(>)
+      captures:
+        1: punctuation.definition.tag.begin.ftl
+        2: keyword.control.directive.ftl
+        3: punctuation.definition.tag.end.ftl
+      push: noparse-angle
+    - match: (\[)(#noparse)\s*(\])
+      captures:
+        1: punctuation.definition.tag.begin.ftl
+        2: keyword.control.directive.ftl
+        3: punctuation.definition.tag.end.ftl
+      push: noparse-square
+    # <#macro name …> and <#function name …> define a callable.
+    - match: (<)(#(?:macro|function))\s+([\w$.-]+)
+      captures:
+        1: punctuation.definition.tag.begin.ftl
+        2: keyword.control.directive.ftl
+        3: entity.name.function.ftl
+      push: tag-angle
+    - match: (\[)(#(?:macro|function))\s+([\w$.-]+)
+      captures:
+        1: punctuation.definition.tag.begin.ftl
+        2: keyword.control.directive.ftl
+        3: entity.name.function.ftl
+      push: tag-square
+    # <#assign x = …>, <#global …>, <#local …>, <#list xs as x>, <#import "…" as ns>.
+    - match: (<)(#\w+)
+      captures:
+        1: punctuation.definition.tag.begin.ftl
+        2: keyword.control.directive.ftl
+      push: tag-angle
+    - match: (\[)(#\w+)
+      captures:
+        1: punctuation.definition.tag.begin.ftl
+        2: keyword.control.directive.ftl
+      push: tag-square
+    - match: (</)(#\w+)\s*(>)
+      captures:
+        1: punctuation.definition.tag.begin.ftl
+        2: keyword.control.directive.ftl
+        3: punctuation.definition.tag.end.ftl
+    - match: (\[/)(#\w+)\s*(\])
+      captures:
+        1: punctuation.definition.tag.begin.ftl
+        2: keyword.control.directive.ftl
+        3: punctuation.definition.tag.end.ftl
+    # User-defined directives: <@layout.page title="…"> … </@layout.page> or </@>.
+    - match: (<)(@)([\w$.:-]+)
+      captures:
+        1: punctuation.definition.tag.begin.ftl
+        2: punctuation.definition.macro.ftl
+        3: variable.function.macro.ftl
+      push: tag-angle
+    - match: (\[)(@)([\w$.:-]+)
+      captures:
+        1: punctuation.definition.tag.begin.ftl
+        2: punctuation.definition.macro.ftl
+        3: variable.function.macro.ftl
+      push: tag-square
+    - match: (</)(@)([\w$.:-]*)\s*(>)
+      captures:
+        1: punctuation.definition.tag.begin.ftl
+        2: punctuation.definition.macro.ftl
+        3: variable.function.macro.ftl
+        4: punctuation.definition.tag.end.ftl
+    - match: (\[/)(@)([\w$.:-]*)\s*(\])
+      captures:
+        1: punctuation.definition.tag.begin.ftl
+        2: punctuation.definition.macro.ftl
+        3: variable.function.macro.ftl
+        4: punctuation.definition.tag.end.ftl
+    # Interpolations: ${…} and the old numeric #{…}.
+    - match: '[$#]\{'
+      scope: punctuation.section.interpolation.begin.ftl
+      push: interpolation
+
+  comment-angle:
+    - meta_scope: comment.block.ftl
+    - match: -->
+      scope: punctuation.definition.comment.end.ftl
+      pop: true
+
+  comment-square:
+    - meta_scope: comment.block.ftl
+    - match: --\]
+      scope: punctuation.definition.comment.end.ftl
+      pop: true
+
+  noparse-angle:
+    - match: (</)(#noparse)\s*(>)
+      captures:
+        1: punctuation.definition.tag.begin.ftl
+        2: keyword.control.directive.ftl
+        3: punctuation.definition.tag.end.ftl
+      pop: true
+
+  noparse-square:
+    - match: (\[/)(#noparse)\s*(\])
+      captures:
+        1: punctuation.definition.tag.begin.ftl
+        2: keyword.control.directive.ftl
+        3: punctuation.definition.tag.end.ftl
+      pop: true
+
+  tag-angle:
+    - meta_scope: meta.tag.directive.ftl
+    - match: /?>
+      scope: punctuation.definition.tag.end.ftl
+      pop: true
+    - include: expression
+
+  tag-square:
+    - meta_scope: meta.tag.directive.ftl
+    - match: /?\]
+      scope: punctuation.definition.tag.end.ftl
+      pop: true
+    - include: expression
+
+  interpolation:
+    - meta_scope: meta.interpolation.ftl
+    - meta_content_scope: source.ftl.embedded
+    - match: \}
+      scope: punctuation.section.interpolation.end.ftl
+      pop: true
+    - include: expression
+
+  # An expression; `>` ends a tag outside of parentheses, as in FreeMarker.
+  expression:
+    - match: <#--
+      scope: punctuation.definition.comment.begin.ftl
+      push: comment-angle
+    - match: '\('
+      scope: punctuation.section.group.begin.ftl
+      push: group
+    - match: '\['
+      scope: punctuation.section.brackets.begin.ftl
+      push: brackets
+    - match: '\{'
+      scope: punctuation.section.braces.begin.ftl
+      push: braces
+    - include: atoms
+
+  group:
+    - match: '\)'
+      scope: punctuation.section.group.end.ftl
+      pop: true
+    - match: '>=?'
+      scope: keyword.operator.comparison.ftl
+    - include: expression
+
+  brackets:
+    - match: '\]'
+      scope: punctuation.section.brackets.end.ftl
+      pop: true
+    - include: expression
+
+  braces:
+    - match: '\}'
+      scope: punctuation.section.braces.end.ftl
+      pop: true
+    - include: expression
+
+  atoms:
+    - match: r"
+      scope: punctuation.definition.string.begin.ftl
+      push: raw-double
+    - match: r'
+      scope: punctuation.definition.string.begin.ftl
+      push: raw-single
+    - match: '"'
+      scope: punctuation.definition.string.begin.ftl
+      push: string-double
+    - match: "'"
+      scope: punctuation.definition.string.begin.ftl
+      push: string-single
+    - match: (\?\??)([A-Za-z_][\w]*)
+      captures:
+        1: keyword.operator.builtin.ftl
+        2: support.function.builtin.ftl
+    - match: \?\?
+      scope: keyword.operator.exists.ftl
+    - match: \b(true|false)\b
+      scope: constant.language.boolean.ftl
+    - match: \b(as|in|using|gt|gte|lt|lte|items|sep)\b
+      scope: keyword.operator.word.ftl
+    - match: \b\d+(?:\.\d+)?\b
+      scope: constant.numeric.ftl
+    - match: '->|\.\.[<!*]?|==|!=|<=|&&|\|\||[-+*/%!=<]'
+      scope: keyword.operator.ftl
+    - match: '[,:;]'
+      scope: punctuation.separator.ftl
+    - match: \.
+      scope: punctuation.accessor.ftl
+    - match: '\.?[A-Za-z_$][\w$]*(?=\s*\()'
+      scope: variable.function.ftl
+    - match: '[A-Za-z_$@][\w$-]*'
+      scope: variable.other.ftl
+
+  string-double:
+    - meta_scope: string.quoted.double.ftl
+    - match: '"'
+      scope: punctuation.definition.string.end.ftl
+      pop: true
+    - match: \\.
+      scope: constant.character.escape.ftl
+    - match: '\$\{'
+      scope: punctuation.section.interpolation.begin.ftl
+      push: interpolation
+
+  string-single:
+    - meta_scope: string.quoted.single.ftl
+    - match: "'"
+      scope: punctuation.definition.string.end.ftl
+      pop: true
+    - match: \\.
+      scope: constant.character.escape.ftl
+    - match: '\$\{'
+      scope: punctuation.section.interpolation.begin.ftl
+      push: interpolation
+
+  raw-double:
+    - meta_scope: string.quoted.double.raw.ftl
+    - match: '"'
+      scope: punctuation.definition.string.end.ftl
+      pop: true
+
+  raw-single:
+    - meta_scope: string.quoted.single.raw.ftl
+    - match: "'"
+      scope: punctuation.definition.string.end.ftl
+      pop: true

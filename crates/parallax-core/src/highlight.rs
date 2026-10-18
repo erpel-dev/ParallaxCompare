@@ -8,7 +8,8 @@
 //! which is exact for almost all code and keeps the first paint fast.
 //!
 //! Extra grammars for automotive and embedded formats (A2L, DBC, Intel HEX,
-//! S-record) and for the generated content views live in `src/syntaxes`.
+//! S-record), for FreeMarker templates and for the generated content views live
+//! in `src/syntaxes`.
 
 use std::sync::LazyLock;
 
@@ -34,6 +35,9 @@ const CUSTOM_SYNTAXES: &[&str] = &[
     include_str!("syntaxes/dbc.sublime-syntax"),
     include_str!("syntaxes/intel-hex.sublime-syntax"),
     include_str!("syntaxes/srec.sublime-syntax"),
+    include_str!("syntaxes/freemarker.sublime-syntax"),
+    include_str!("syntaxes/html-freemarker.sublime-syntax"),
+    include_str!("syntaxes/xml-freemarker.sublime-syntax"),
     include_str!("syntaxes/parallax-views.sublime-syntax"),
 ];
 
@@ -211,6 +215,9 @@ mod tests {
         assert_eq!(name("fw.hex", "").as_deref(), Some("Intel HEX"));
         assert_eq!(name("fw.s19", "").as_deref(), Some("Motorola S-record"));
         assert_eq!(name("can.dbc", "").as_deref(), Some("DBC"));
+        assert_eq!(name("mail.ftl", "").as_deref(), Some("HTML (FreeMarker)"));
+        assert_eq!(name("page.ftlh", "").as_deref(), Some("HTML (FreeMarker)"));
+        assert_eq!(name("feed.ftlx", "").as_deref(), Some("XML (FreeMarker)"));
     }
 
     #[test]
@@ -235,5 +242,41 @@ mod tests {
         assert!(far.checkpoints.is_empty(), "approximate states are not cached");
         let mut exact = DocHighlighter::new(detect_syntax("a.rs", ""), ThemeKind::Dark);
         assert_eq!(jumped, exact.highlight(&doc, 0, 9_002)[9_000..].to_vec());
+    }
+
+    /// The scopes FreeMarker constructs get, inside HTML markup and attributes too.
+    #[test]
+    fn freemarker_inside_html() {
+        use syntect::parsing::ScopeStack;
+        let ss = &*SYNTAXES;
+        let scopes_at = |syntax: &str, line: &str, needle: &str| -> String {
+            let mut state = ParseState::new(ss.find_syntax_by_name(syntax).expect("syntax"));
+            let ops = state.parse_line(line, ss).expect("parses");
+            let at = line.find(needle).expect("needle in line");
+            let mut stack = ScopeStack::new();
+            for (pos, op) in ops {
+                if pos > at {
+                    break;
+                }
+                stack.apply(&op).expect("valid ops");
+            }
+            format!("{stack:?}")
+        };
+        let html = "HTML (FreeMarker)";
+        let line = r#"<a href="${user.url?html}"><#if (n > 3)>many</#if><@ui.card title="x"/><#-- note --></a>"#;
+        assert!(scopes_at(html, line, "href").contains("meta.tag"), "HTML tags still");
+        assert!(scopes_at(html, line, "user").contains("meta.interpolation.ftl"), "inside an attribute");
+        assert!(scopes_at(html, line, "html}").contains("support.function.builtin.ftl"));
+        assert!(scopes_at(html, line, "#if").contains("keyword.control.directive.ftl"));
+        // `>` in parentheses is a comparison, not the end of the tag.
+        assert!(scopes_at(html, line, "3)").contains("meta.tag.directive.ftl"));
+        assert!(!scopes_at(html, line, "many").contains("directive.ftl"));
+        assert!(scopes_at(html, line, "ui.card").contains("variable.function.macro.ftl"));
+        assert!(scopes_at(html, line, "note").contains("comment.block.ftl"));
+        let xml = r#"<item id="${id}">[#list xs as x]${x}[/#list]</item>"#;
+        assert!(scopes_at("XML (FreeMarker)", xml, "id}").contains("meta.interpolation.ftl"));
+        assert!(scopes_at("XML (FreeMarker)", xml, "#list").contains("keyword.control.directive.ftl"));
+        let raw = "<#noparse>${not} <#if></#noparse>";
+        assert!(!scopes_at("FreeMarker", raw, "not").contains("interpolation"));
     }
 }

@@ -194,6 +194,7 @@ export type View =
   | "normalizedToml"
   | "reflowedText"
   | "needs"
+  | "templateOutline"
   | "table"
   | "certificate"
   | "email";

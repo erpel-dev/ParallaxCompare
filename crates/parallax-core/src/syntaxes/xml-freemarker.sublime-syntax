@@ -1,0 +1,12 @@
+%YAML 1.2
+---
+# FreeMarker over XML, for `.ftlx` templates.
+name: XML (FreeMarker)
+file_extensions: [ftlx]
+scope: text.xml.ftl
+contexts:
+  main:
+    - match: ''
+      push: scope:text.xml
+      with_prototype:
+        - include: scope:text.ftl#ftl

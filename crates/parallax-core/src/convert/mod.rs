@@ -17,6 +17,7 @@ mod dbc;
 mod dotnet;
 mod dwarf;
 mod email;
+mod ftl;
 pub mod gguf;
 mod image_diff;
 mod image_meta;
@@ -134,6 +135,8 @@ pub enum View {
     ReflowedText,
     /// Sphinx-Needs: every need sorted by id, with its options and text.
     Needs,
+    /// FreeMarker template: directives, macro calls and interpolations, indented by nesting.
+    TemplateOutline,
 }
 
 impl View {
@@ -183,6 +186,7 @@ impl View {
             View::NormalizedToml => "Normalized TOML",
             View::ReflowedText => "Text, reflowed",
             View::Needs => "Needs",
+            View::TemplateOutline => "Template outline",
         }
     }
 }
@@ -236,6 +240,8 @@ enum Kind {
     Msg,
     Rst,
     NeedsJson,
+    /// FreeMarker template.
+    Ftl,
 }
 
 fn extension(name: &str) -> String {
@@ -349,6 +355,9 @@ fn kind_of(name: &str, data: &[u8]) -> Kind {
     if lockfile::format_of(name).is_some() {
         return Kind::Lockfile;
     }
+    if matches!(ext.as_str(), "ftl" | "ftlh" | "ftlx") && ftl::is_template(data) {
+        return Kind::Ftl;
+    }
     if matches!(ext.as_str(), "rst" | "rest") {
         return Kind::Rst;
     }
@@ -425,6 +434,7 @@ pub fn views_for(name: &str, data: &[u8]) -> Vec<View> {
         }
         Kind::Rst => vec![View::Text, View::ReflowedText],
         Kind::NeedsJson => vec![View::Needs, View::PrettyJson, View::Text],
+        Kind::Ftl => vec![View::Text, View::TemplateOutline],
     };
     views.push(View::Hex);
     views
@@ -501,6 +511,7 @@ pub fn render(view: View, name: &str, data: &[u8]) -> Result<String> {
         View::ReflowedText => Ok(rst::reflow(&text::decode(data).text)),
         View::Needs if needs::is_needs_json(name, data) => needs::render_json(data),
         View::Needs => Ok(needs::render_rst(&text::decode(data).text)),
+        View::TemplateOutline => Ok(ftl::outline(&text::decode(data).text)),
     }
 }
 
@@ -511,6 +522,9 @@ pub fn has_content_rule(name: &str) -> bool {
         || matches!(
             extension(name).as_str(),
             "a2l"
+                | "ftl"
+                | "ftlh"
+                | "ftlx"
                 | "rst"
                 | "rest"
                 | "aif"
@@ -644,6 +658,11 @@ pub fn content_equal(name: &str, left: &[u8], right: &[u8]) -> Option<&'static s
             }
             return needs::same_rst_needs(&l, &r)
                 .then_some("same needs, only their order or the text around them differ");
+        }
+        Kind::Ftl => {
+            let (l, r) = (text::decode(left).text, text::decode(right).text);
+            return (ftl::without_comments(&l) == ftl::without_comments(&r))
+                .then_some("same template, only comments differ");
         }
         Kind::NeedsJson => {
             return needs::same_needs_json(left, right)?
@@ -850,5 +869,23 @@ mod tests {
             assert!(has_content_rule(name), "{name}");
         }
         assert!(!has_content_rule("a.p12"));
+    }
+
+    #[test]
+    fn freemarker_templates() {
+        let page = b"<#-- greeting -->\n<#if user??>\n  <p>Hello ${user.name}!</p>\n</#if>\n";
+        assert_eq!(views_for("mail.ftlh", page), vec![View::Text, View::TemplateOutline, View::Hex]);
+        assert_eq!(views_for("feed.ftlx", page), vec![View::Text, View::TemplateOutline, View::Hex]);
+        assert_eq!(render(View::TemplateOutline, "mail.ftl", page).unwrap(), "<#if user??>\n  ${user.name}\n");
+        // Mozilla Fluent shares the extension.
+        assert_eq!(views_for("en/main.ftl", b"hello = Hello, { $name }!\n"), vec![View::Text, View::Hex]);
+        assert!(has_content_rule("templates/mail.ftl"));
+
+        let other_comment = b"<#-- says hello -->\n<#if user??>\n  <p>Hello ${user.name}!</p>\n</#if>\n";
+        let no_comment = b"<#if user??>\n  <p>Hello ${user.name}!</p>\n</#if>\n";
+        assert_eq!(content_equal("mail.ftl", page, other_comment), Some("same template, only comments differ"));
+        assert_eq!(content_equal("mail.ftl", page, no_comment), Some("same template, only comments differ"));
+        let changed = b"<#if user??>\n  <p>Hi ${user.name}!</p>\n</#if>\n";
+        assert_eq!(content_equal("mail.ftl", page, changed), None);
     }
 }

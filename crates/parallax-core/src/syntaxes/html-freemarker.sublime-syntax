@@ -1,0 +1,12 @@
+%YAML 1.2
+---
+# FreeMarker over HTML: `.ftlh` is HTML by definition, and most `.ftl` templates are.
+name: HTML (FreeMarker)
+file_extensions: [ftl, ftlh]
+scope: text.html.ftl
+contexts:
+  main:
+    - match: ''
+      push: scope:text.html.basic
+      with_prototype:
+        - include: scope:text.ftl#ftl
