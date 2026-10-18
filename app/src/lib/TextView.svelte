@@ -493,7 +493,7 @@
         { group, title: "Copy difference to the right", keys: "Alt+→", enabled: editable[1] && currentSection >= 0, run: () => copySection(currentSection, 1) },
         { group, title: "Undo", keys: "Ctrl+Z", enabled: canUndo, run: undo },
         { group, title: "Redo", keys: "Ctrl+Y", enabled: canRedo, run: redo },
-        { group, title: "Save", keys: "Ctrl+S", enabled: anyDirty, run: () => save() },
+        { group, title: "Save all changed sides", keys: "Ctrl+S", enabled: anyDirty, run: () => save() },
         { group, title: "Save left side only", enabled: dirty[0], run: () => save([0]) },
         { group, title: "Save right side only", enabled: dirty[1], run: () => save([1]) },
       );
@@ -828,7 +828,6 @@
       <button onclick={() => copySection(currentSection, 1)} disabled={!editable[1] || currentSection < 0} title="Copy the current difference to the right side (Alt+→)">Copy →</button>
       <button onclick={undo} disabled={!canUndo} title="Undo (Ctrl+Z)">↶</button>
       <button onclick={redo} disabled={!canRedo} title="Redo (Ctrl+Y)">↷</button>
-      <button class:dirty={anyDirty} onclick={() => save()} disabled={!anyDirty} title="Save all changed sides (Ctrl+S)">Save{anyDirty ? " ●" : ""}</button>
     {/if}
     <span class="sep"></span>
     <button class:on={findOpen} onclick={() => (findOpen ? closeFind() : openFind())} disabled={!info} title="Find in both files (Ctrl+F)">Find</button>
@@ -1047,10 +1046,6 @@
     min-width: 48px;
     text-align: center;
     font-variant-numeric: tabular-nums;
-  }
-  .dirty {
-    color: var(--accent);
-    font-weight: 600;
   }
   .pathbars,
   .meta {

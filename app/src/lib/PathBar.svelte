@@ -296,7 +296,15 @@
   {/if}
   {#if modified}
     <span class="mod" title="Unsaved changes">● modified</span>
-    {#if onSave}<button class="save" onclick={onSave} title="Save only the {title.toLowerCase()} side">Save</button>{/if}
+    {#if onSave}
+      <button class="save" onclick={onSave} title="Save the {title.toLowerCase()} side (Ctrl+S saves both)" aria-label="Save the {title.toLowerCase()} side">
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <path d="M2.5 1.5h9l3 3v9a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1v-11a1 1 0 0 1 1-1z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" />
+          <path d="M4.5 1.5v4h6v-4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" />
+          <rect x="4.5" y="9" width="7" height="5.5" rx="0.5" fill="none" stroke="currentColor" stroke-width="1.3" />
+        </svg>
+      </button>
+    {/if}
   {/if}
   {#if !info.writable}<span class="ro">read-only</span>{/if}
   {#if edit}
@@ -519,8 +527,9 @@
     font-size: 11px;
   }
   .save {
-    padding: 0 8px;
-    line-height: 18px;
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 6px;
     color: var(--accent);
     border-color: var(--accent);
   }
