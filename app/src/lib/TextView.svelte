@@ -9,9 +9,11 @@
     theme,
     type EditInfo,
     type FileDiffInfo,
+    type Hit,
     type LineView,
     type PathsChanged,
     type RowView,
+    type SearchOptions,
     type SessionInfo,
     type SideName,
     type View,
@@ -69,7 +71,41 @@
   // Edits run one after another, in the order they were made.
   let queue: Promise<unknown> = Promise.resolve();
 
+  // Find.
+  let root = $state<HTMLDivElement>();
+  let findOpen = $state(false);
+  let findQuery = $state("");
+  let findOptions = $state<SearchOptions>({ matchCase: false, wholeWord: false, regex: false });
+  let findInput = $state<HTMLInputElement>();
+  let findError = $state("");
+  let hits = $state.raw<Hit[]>([]);
+  let hitIndex = $state(-1);
+  let truncated = $state(false);
+  let searchRun = 0;
+  let searchTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The current match should be scrolled into view sideways once its row is drawn. */
+  let revealHitWanted = false;
+
   const total = $derived(info?.rows ?? 0);
+  /** Matches by row and side, for drawing. */
+  const hitsAt = $derived.by(() => {
+    const map = new Map<number, Hit[]>();
+    for (const h of hits) {
+      const key = h.row * 2 + h.side;
+      const list = map.get(key);
+      if (list) list.push(h);
+      else map.set(key, [h]);
+    }
+    return map;
+  });
+  const currentHit = $derived(hitIndex >= 0 ? hits[hitIndex] : undefined);
+  /** Rows with matches for the overview, at most one mark per pixel or so. */
+  const hitMarks = $derived.by(() => {
+    if (!total) return [];
+    const buckets = new Set<number>();
+    for (const h of hits) buckets.add(Math.floor((h.row / total) * 600));
+    return [...buckets].map((b) => b / 600);
+  });
   const first = $derived(Math.max(0, Math.floor(scrollTop / ROW) - 20));
   const last = $derived(Math.min(total, first + Math.ceil(viewHeight / ROW) + 40));
   const visible = $derived.by(() => {
@@ -117,6 +153,7 @@
       if (keepPosition && viewport) viewport.scrollTop = top;
       else if (info.sections.length) goTo(0);
       else ensureLoaded();
+      if (findOpen && findQuery) runSearch(keepPosition);
     } catch (e) {
       error = String(e);
     } finally {
@@ -227,6 +264,7 @@
       reveal(e.caret.row);
     }
     resetRows();
+    if (findOpen && findQuery) runSearch(true);
   }
 
   /** Opens the line editor on a row once the row with the wanted line is loaded. */
@@ -431,6 +469,139 @@
     load(true);
   }
 
+  // ---- Find ----
+
+  function openFind() {
+    if (!info || info.view === "image") return;
+    findOpen = true;
+    // Selected text in the view becomes the query.
+    const picked = window.getSelection()?.toString() ?? "";
+    if (picked && !picked.includes("\n") && viewport?.contains(window.getSelection()?.anchorNode ?? null)) {
+      findQuery = picked;
+      runSearch(false);
+    }
+    tick().then(() => {
+      findInput?.focus();
+      findInput?.select();
+    });
+  }
+
+  function closeFind() {
+    findOpen = false;
+    hits = [];
+    hitIndex = -1;
+    findError = "";
+    clearTimeout(searchTimer);
+    searchRun++;
+    viewport?.focus();
+  }
+
+  /** Searches again; `keep` stays near the current match instead of the view. */
+  async function runSearch(keep: boolean) {
+    clearTimeout(searchTimer);
+    const run = ++searchRun;
+    if (!info || !findQuery) {
+      hits = [];
+      hitIndex = -1;
+      findError = "";
+      truncated = false;
+      return;
+    }
+    const from = keep && currentHit ? currentHit : { row: selected ?? Math.floor(scrollTop / ROW), side: 0 as const, start: 0 };
+    try {
+      const r = await api.searchDiff(info.id, findQuery, $state.snapshot(findOptions));
+      if (run !== searchRun) return;
+      findError = "";
+      hits = r.hits;
+      truncated = r.truncated;
+      // The first match at or after where the reader is.
+      const at = hits.findIndex((h) => h.row > from.row || (h.row === from.row && (h.side > from.side || (h.side === from.side && h.start >= from.start))));
+      if (!hits.length) hitIndex = -1;
+      else if (keep) hitIndex = at === -1 ? hits.length - 1 : at;
+      else showHit(at === -1 ? 0 : at);
+    } catch (e) {
+      if (run !== searchRun) return;
+      findError = String(e);
+      hits = [];
+      hitIndex = -1;
+    }
+  }
+
+  function searchSoon() {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => runSearch(false), 150);
+  }
+
+  function showHit(i: number) {
+    const h = hits[i];
+    if (!h) return;
+    hitIndex = i;
+    selected = h.row;
+    activeSide = h.side;
+    section = -1;
+    if (viewport) {
+      const top = h.row * ROW;
+      if (top < viewport.scrollTop || top + ROW > viewport.scrollTop + viewHeight) {
+        viewport.scrollTop = Math.max(0, top - viewHeight / 3);
+      }
+    }
+    revealHitWanted = true;
+    tick().then(revealHitSideways);
+  }
+
+  function nextHit(dir: 1 | -1) {
+    if (!hits.length) return;
+    if (hitIndex === -1) {
+      runSearch(false);
+      return;
+    }
+    showHit((hitIndex + dir + hits.length) % hits.length);
+  }
+
+  /** Scrolls the code sideways so the current match is visible. */
+  function revealHitSideways() {
+    if (!revealHitWanted || !viewport) return;
+    const el = viewport.querySelector<HTMLElement>(".hit.now");
+    const cell = el?.closest<HTMLElement>(".code");
+    if (!el || !cell) return;
+    revealHitWanted = false;
+    const [a, c] = [el.getBoundingClientRect(), cell.getBoundingClientRect()];
+    if (a.left < c.left + 6 || a.right > c.right) {
+      hscroll = Math.max(0, Math.min(40000, hscroll + a.left - c.left - c.width / 3));
+    }
+  }
+
+  // The row is drawn after the scroll, and later still when it was not loaded yet.
+  $effect(() => {
+    void cacheVersion;
+    void first;
+    tick().then(revealHitSideways);
+  });
+
+  function findKey(e: KeyboardEvent) {
+    if (e.key === "Enter") nextHit(e.shiftKey ? -1 : 1);
+    else if (e.key === "Escape") closeFind();
+    else return;
+    e.preventDefault();
+  }
+
+  function toggle(key: keyof SearchOptions) {
+    findOptions[key] = !findOptions[key];
+    runSearch(false);
+    findInput?.focus();
+  }
+
+  function onWindowKey(e: KeyboardEvent) {
+    // Only the visible tab answers.
+    if (!root?.offsetParent) return;
+    const mod = e.ctrlKey || e.metaKey;
+    if (mod && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "f") openFind();
+    else if (e.key === "F3" && findOpen) nextHit(e.shiftKey ? -1 : 1);
+    else if (mod && e.key.toLowerCase() === "g" && findOpen) nextHit(e.shiftKey ? -1 : 1);
+    else return;
+    e.preventDefault();
+  }
+
   // ---- Keys, mouse ----
 
   function onKey(e: KeyboardEvent) {
@@ -475,13 +646,17 @@
     text: string;
     color: string | null;
     mark: boolean;
+    /** Part of a search match; `now` for the current one. */
+    hit: boolean;
+    now: boolean;
   }
 
-  /** Splits a line at every syntax-colour and change-mark boundary. */
-  function segments(line: LineView): Segment[] {
+  /** Splits a line at every syntax-colour, change-mark and match boundary. */
+  function segments(line: LineView, found: Hit[] = []): Segment[] {
     const cuts = new Set<number>([0, line.t.length]);
     for (const [a, b] of line.s) cuts.add(a).add(b);
     for (const [a, b] of line.m) cuts.add(a).add(b);
+    for (const h of found) cuts.add(h.start).add(h.end);
     const points = [...cuts].filter((p) => p <= line.t.length).sort((a, b) => a - b);
     const out: Segment[] = [];
     let si = 0;
@@ -493,6 +668,8 @@
         text: line.t.slice(a, b),
         color: span ? "#" + span[2].toString(16).padStart(6, "0") : null,
         mark: line.m.some(([ma, mb]) => ma <= a && b <= mb),
+        hit: found.some((h) => h.start <= a && b <= h.end),
+        now: !!currentHit && found.some((h) => h === currentHit && h.start <= a && b <= h.end),
       });
     }
     return out;
@@ -532,7 +709,9 @@
   });
 </script>
 
-<div class="view">
+<svelte:window onkeydown={onWindowKey} />
+
+<div class="view" bind:this={root}>
   <div class="toolbar">
     {#if info && info.views.length > 1}
       <select bind:value={view} onchange={() => { syntaxOverride = ""; load(); }} disabled={anyDirty} title={anyDirty ? "Save or undo the edits to change the view" : "How the files are shown"}>
@@ -557,6 +736,8 @@
       <button class:dirty={anyDirty} onclick={save} disabled={!anyDirty} title="Save the changed sides (Ctrl+S)">Save{anyDirty ? " ●" : ""}</button>
     {/if}
     <span class="sep"></span>
+    <button class:on={findOpen} onclick={() => (findOpen ? closeFind() : openFind())} disabled={!info} title="Find in both files (Ctrl+F)">Find</button>
+    <span class="sep"></span>
     <select bind:value={options.whitespace} onchange={settingsChanged} title="Whitespace rule">
       <option value="exact">Whitespace: exact</option>
       <option value="normalize">Whitespace: ignore changes</option>
@@ -575,6 +756,33 @@
     {/if}
     {/if}
   </div>
+
+  {#if findOpen && info?.view !== "image"}
+    <div class="findbar">
+      <input
+        class="query"
+        class:bad={!!findError}
+        bind:this={findInput}
+        bind:value={findQuery}
+        oninput={searchSoon}
+        onkeydown={findKey}
+        placeholder="Find in both files"
+        spellcheck="false"
+      />
+      <button class="opt" class:on={findOptions.matchCase} onclick={() => toggle("matchCase")} title="Match case">Aa</button>
+      <button class="opt" class:on={findOptions.wholeWord} onclick={() => toggle("wholeWord")} title="Whole words"><u>ab</u></button>
+      <button class="opt" class:on={findOptions.regex} onclick={() => toggle("regex")} title="Regular expression">.*</button>
+      <button onclick={() => nextHit(-1)} disabled={!hits.length} title="Previous match (Shift+Enter, Shift+F3)">▲</button>
+      <button onclick={() => nextHit(1)} disabled={!hits.length} title="Next match (Enter, F3)">▼</button>
+      <span class="found" class:bad={!!findError || (!!findQuery && !hits.length)}>
+        {#if findError}{findError}
+        {:else if !findQuery}{""}
+        {:else if !hits.length}No matches
+        {:else}{hitIndex >= 0 ? (hitIndex + 1).toLocaleString() : "–"} of {hits.length.toLocaleString()}{truncated ? "+" : ""}{/if}
+      </span>
+      <button class="close" onclick={closeFind} title="Close (Esc)">✕</button>
+    </div>
+  {/if}
 
   <div class="pathbars">
     <PathBar info={session.left} suffix={path} modified={dirty[0]} />
@@ -613,6 +821,9 @@
       {#if info && total}
         {#each info.sections as s, i (i)}
           <i style:top="{(s.start / total) * 100}%" style:height="max(2px, {((s.end - s.start) / total) * 100}%)"></i>
+        {/each}
+        {#each hitMarks as m (m)}
+          <em style:top="{m * 100}%"></em>
         {/each}
         <b style:top="{((scrollTop / ROW) / total) * 100}%" style:height="{Math.min(100, (viewHeight / ROW / total) * 100)}%"></b>
       {/if}
@@ -662,7 +873,7 @@
                 {:else if line}
                   <div class="ln">{line.n + 1}</div>
                   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                  <div class="code" class:editable={editable[s]} onclick={() => (activeSide = s)} ondblclick={(e) => startEdit(e, s, index)}><span class="text" style:transform="translateX({-hscroll}px)">{#each segments(line) as seg, si (si)}<span class:mk={seg.mark} style:color={seg.color}>{seg.text}</span>{/each}</span>{#if line.nn}<span class="cut" title="The other file ends with a line break">no line break at end</span>{/if}{#if line.x}<span class="cut" title="The line is cut for display">… {line.x.toLocaleString()} more characters</span>{/if}</div>
+                  <div class="code" class:editable={editable[s]} onclick={() => (activeSide = s)} ondblclick={(e) => startEdit(e, s, index)}><span class="text" style:transform="translateX({-hscroll}px)">{#each segments(line, hitsAt.get(index * 2 + s)) as seg, si (si)}<span class:mk={seg.mark} class:hit={seg.hit} class:now={seg.now} style:color={seg.now ? null : seg.color}>{seg.text}</span>{/each}</span>{#if line.nn}<span class="cut" title="The other file ends with a line break">no line break at end</span>{/if}{#if line.x}<span class="cut" title="The line is cut for display">… {line.x.toLocaleString()} more characters</span>{/if}</div>
                 {:else if row}
                   <div class="ln fill"></div>
                   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -703,7 +914,7 @@
       {#if selected !== null}<span>Row {selected + 1} of {total}</span>{/if}
       <span>{info.view === "text" ? (info.syntax ?? "Plain text") : info.views.find((v) => v.id === info?.view)?.label}</span>
       {#if busy}<span>{busy}</span>{/if}
-      <span class="hint">{editable[0] || editable[1] ? "Double-click to edit · Alt+←/→: copy difference · " : ""}F7 / F8: previous / next difference</span>
+      <span class="hint">{editable[0] || editable[1] ? "Double-click to edit · Alt+←/→: copy difference · " : ""}F7 / F8: previous / next difference · Ctrl+F: find</span>
     {/if}
   </div>
 </div>
@@ -903,6 +1114,56 @@
   .mk {
     background: var(--mark);
     border-radius: 2px;
+  }
+  .hit {
+    background: var(--hit);
+    border-radius: 2px;
+  }
+  .hit.now {
+    background: var(--hit-cur);
+    color: var(--hit-cur-text);
+    outline: 1px solid var(--hit-cur);
+  }
+  .findbar {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+    padding: 4px 8px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--line);
+  }
+  .findbar .query {
+    width: min(420px, 50%);
+    font-family: var(--mono);
+  }
+  .findbar .query.bad {
+    outline: 1px solid var(--error);
+  }
+  .findbar .opt {
+    min-width: 30px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+  }
+  .found {
+    color: var(--dim);
+    margin-left: 6px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .found.bad {
+    color: var(--error);
+  }
+  .findbar .close {
+    margin-left: auto;
+  }
+  .overview em {
+    position: absolute;
+    right: 0;
+    width: 5px;
+    height: 2px;
+    background: var(--hit-cur);
   }
   .cut {
     margin-left: 8px;

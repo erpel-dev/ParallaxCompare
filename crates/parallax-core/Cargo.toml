@@ -45,6 +45,7 @@ wasmparser = { version = "0.262", default-features = false, features = ["std", "
 rustc-demangle = "0.1"
 kamadak-exif = "0.6"
 memchr = "2"
+regex = "1"
 yaml-rust2 = { version = "0.13", default-features = false }
 toml = { version = "1", default-features = false, features = ["std", "parse", "display", "serde"] }
 x509-parser = "0.18"

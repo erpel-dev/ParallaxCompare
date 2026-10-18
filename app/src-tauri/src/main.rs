@@ -26,6 +26,7 @@ fn main() {
             commands::open_file_diff,
             commands::file_rows,
             commands::close_file_diff,
+            commands::search_diff,
             commands::edit_text,
             commands::insert_line,
             commands::copy_rows,

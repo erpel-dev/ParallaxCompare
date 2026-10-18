@@ -12,6 +12,7 @@ use parallax_core::edit::{EditSession, Edited, Pos, Side};
 use parallax_core::highlight::{self, DocHighlighter, Span, ThemeKind};
 use parallax_core::ops::Removal;
 use parallax_core::progress::Progress;
+use parallax_core::search::{self, SearchOptions, SearchResult};
 use parallax_core::source::{Source, SourceInfo, SourceOptions, SourceSpec, open_pair};
 use parallax_core::text::{self, LineEnding, TextDoc};
 use parallax_core::textdiff::{self, DiffOptions, DiffStats, RowKind, Section};
@@ -896,6 +897,24 @@ pub async fn file_rows(
                 }
             })
             .collect())
+    })
+    .await
+}
+
+/// Matches in both sides of a file comparison, as it is now (with unsaved edits).
+#[tauri::command]
+pub async fn search_diff(
+    state: State<'_, AppState>,
+    id: u64,
+    query: String,
+    options: SearchOptions,
+) -> CmdResult<SearchResult> {
+    let diff = state.diff(id)?;
+    blocking(move || {
+        let re = search::pattern(&query, &options)?;
+        let fd = diff.lock();
+        let docs = [fd.edit.doc(Side::Left), fd.edit.doc(Side::Right)];
+        Ok(search::search(&fd.edit.diff().rows, docs, &re, 20_000))
     })
     .await
 }

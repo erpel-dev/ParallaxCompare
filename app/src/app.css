@@ -27,6 +27,9 @@
   --row-minor: #2c2f3a;
   --mark: #8a3a3a;
   --mark-added: #2f6b3f;
+  --hit: rgba(229, 192, 123, 0.38);
+  --hit-cur: #e5c07b;
+  --hit-cur-text: #1e1f22;
   --filler: repeating-linear-gradient(135deg, #26282c 0 6px, #2b2d31 6px 12px);
   --mono: "JetBrains Mono", "Cascadia Code", "Fira Code", Consolas, "DejaVu Sans Mono", monospace;
   --ui: system-ui, "Segoe UI", Ubuntu, Cantarell, sans-serif;
@@ -63,6 +66,9 @@
     --row-minor: #f1f3f6;
     --mark: #f5b5b1;
     --mark-added: #a8e2b8;
+    --hit: #ffe27a;
+    --hit-cur: #f29d1f;
+    --hit-cur-text: #1f2328;
     --filler: repeating-linear-gradient(135deg, #f1f2f4 0 6px, #e8eaed 6px 12px);
     color-scheme: light;
   }
