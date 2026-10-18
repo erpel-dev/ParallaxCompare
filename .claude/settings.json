@@ -3,5 +3,11 @@
     "commit": "",
     "pr": "",
     "sessionUrl": false
+  },
+  "env": {
+    "GIT_AUTHOR_NAME": "Timo Leser",
+    "GIT_AUTHOR_EMAIL": "timo.leser@gmail.com",
+    "GIT_COMMITTER_NAME": "Timo Leser",
+    "GIT_COMMITTER_EMAIL": "timo.leser@gmail.com"
   }
 }
