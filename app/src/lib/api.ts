@@ -219,6 +219,8 @@ export interface ImageView {
   left: ImageSideView | null;
   right: ImageSideView | null;
   mask: string | null;
+  area: string | null;
+  outline: string | null;
   differentPixels: number;
   totalPixels: number;
   bounds: [number, number, number, number] | null;

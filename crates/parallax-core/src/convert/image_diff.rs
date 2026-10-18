@@ -38,7 +38,72 @@ pub struct ImageDiff {
     pub total_pixels: u64,
     /// x, y, width, height of the area that contains all differences.
     pub bounds: Option<[u32; 4]>,
+    /// SVG paths in image pixels of the tiles that hold differing pixels: their
+    /// area and its outline. Drawn over the images side by side, these keep them
+    /// recognizable however much differs, where the pixel mask would cover them.
+    pub area: Option<String>,
+    pub outline: Option<String>,
     pub note: Option<String>,
+}
+
+/// The images are divided into at most this many tiles across and down for the outline.
+const OUTLINE_TILES: u32 = 128;
+
+/// SVG paths of the area of the tiles in `set` (row-major, `cols` × `rows` tiles of
+/// `size` pixels, cut at `w` × `h`) and of its outline.
+fn tile_paths(set: &[bool], cols: u32, rows: u32, size: u32, w: u32, h: u32) -> (String, String) {
+    use std::fmt::Write as _;
+    let at = |c: i64, r: i64| {
+        c >= 0 && r >= 0 && c < cols as i64 && r < rows as i64 && set[(r as u32 * cols + c as u32) as usize]
+    };
+    let (x, y) = (|c: u32| (c * size).min(w), |r: u32| (r * size).min(h));
+    let (mut area, mut outline) = (String::new(), String::new());
+    for r in 0..rows {
+        let mut c = 0;
+        while c < cols {
+            if !at(c as i64, r as i64) {
+                c += 1;
+                continue;
+            }
+            let start = c;
+            while c < cols && at(c as i64, r as i64) {
+                c += 1;
+            }
+            let _ = write!(area, "M{} {}H{}V{}H{}Z", x(start), y(r), x(c), y(r + 1), x(start));
+        }
+    }
+    // Edges between a differing tile and one that is not, merged into runs.
+    for r in 0..=rows {
+        let mut c = 0;
+        while c < cols {
+            let edge = |c: u32| at(c as i64, r as i64 - 1) != at(c as i64, r as i64);
+            if !edge(c) {
+                c += 1;
+                continue;
+            }
+            let start = c;
+            while c < cols && edge(c) {
+                c += 1;
+            }
+            let _ = write!(outline, "M{} {}H{}", x(start), y(r), x(c));
+        }
+    }
+    for c in 0..=cols {
+        let mut r = 0;
+        while r < rows {
+            let edge = |r: u32| at(c as i64 - 1, r as i64) != at(c as i64, r as i64);
+            if !edge(r) {
+                r += 1;
+                continue;
+            }
+            let start = r;
+            while r < rows && edge(r) {
+                r += 1;
+            }
+            let _ = write!(outline, "M{} {}V{}", x(c), y(start), y(r));
+        }
+    }
+    (area, outline)
 }
 
 fn browser_mime(format: ImageFormat) -> Option<&'static str> {
@@ -136,6 +201,17 @@ pub fn image_diff(name: &str, left: Option<&[u8]>, right: Option<&[u8]>) -> Resu
             }
             diff.bounds = bounds.map(|[x0, y0, x1, y1]| [x0, y0, x1 - x0 + 1, y1 - y0 + 1]);
             if diff.different_pixels > 0 {
+                let size = w.max(h).div_ceil(OUTLINE_TILES).max(4);
+                let (cols, rows) = (w.div_ceil(size), h.div_ceil(size));
+                let mut set = vec![false; (cols * rows) as usize];
+                for (i, px) in mask.as_chunks::<4>().0.iter().enumerate() {
+                    if px[3] != 0 {
+                        let (px_x, px_y) = (i as u32 % w, i as u32 / w);
+                        set[((px_y / size) * cols + px_x / size) as usize] = true;
+                    }
+                }
+                let (area, outline) = tile_paths(&set, cols, rows, size, w, h);
+                (diff.area, diff.outline) = (Some(area), Some(outline));
                 let img = RgbaImage::from_raw(w, h, mask).expect("mask has the image size");
                 diff.mask = Some(encode_png(&img)?);
             }
@@ -151,4 +227,20 @@ pub fn pixels_equal(left: &[u8], right: &[u8]) -> Option<bool> {
     let a = image::load_from_memory(left).ok()?.to_rgba8();
     let b = image::load_from_memory(right).ok()?.to_rgba8();
     Some(a.dimensions() == b.dimensions() && a.as_raw() == b.as_raw())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outline_marks_the_differing_area_only() {
+        // One tile of four differs: its square, outlined.
+        let (area, outline) = tile_paths(&[false, true, false, false], 2, 2, 8, 16, 16);
+        assert_eq!(area, "M8 0H16V8H8Z");
+        assert_eq!(outline, "M8 0H16M8 8H16M8 0V8M16 0V8");
+        // All differ: the outline is the image's border, nothing inside.
+        let (_, outline) = tile_paths(&[true; 4], 2, 2, 8, 16, 12);
+        assert_eq!(outline, "M0 0H16M0 12H16M0 0V12M16 0V12");
+    }
 }

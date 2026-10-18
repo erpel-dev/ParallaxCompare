@@ -607,6 +607,9 @@ pub struct ImageView {
     left: Option<ImageSideView>,
     right: Option<ImageSideView>,
     mask: Option<String>,
+    /// SVG paths of the differing areas and their outline, in image pixels.
+    area: Option<String>,
+    outline: Option<String>,
     different_pixels: u64,
     total_pixels: u64,
     bounds: Option<[u32; 4]>,
@@ -745,6 +748,8 @@ pub async fn open_file_diff(
                         left: side(&d.left),
                         right: side(&d.right),
                         mask: d.mask.as_deref().map(|m| data_url("image/png", m)),
+                        area: d.area.clone(),
+                        outline: d.outline.clone(),
                         different_pixels: d.different_pixels,
                         total_pixels: d.total_pixels,
                         bounds: d.bounds,
