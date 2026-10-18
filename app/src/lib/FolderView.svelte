@@ -490,7 +490,19 @@
     if (!selection.has(path)) selectOnly(path);
     const row = rows.find((r) => r.path === path);
     if (!row) return;
-    const many = selection.size > 1 ? ` ${selection.size} items` : "";
+    // Each action names what it applies to: of two unmatched files, only one is
+    // on the side a copy or delete starts from.
+    const what = (paths: string[]) =>
+      paths.length === 1 ? `“${paths[0].split("/").pop()}”` : `${paths.length} items`;
+    const sideActions: MenuItem[] = [];
+    for (const [label, paths, allowed, run] of [
+      ["Copy %s to the right", present(true), session.right.writable, () => copy(true)],
+      ["Copy %s to the left", present(false), session.left.writable, () => copy(false)],
+      ["Delete %s on the left", present(true), session.left.writable, () => remove(true)],
+      ["Delete %s on the right", present(false), session.right.writable, () => remove(false)],
+    ] as const) {
+      if (paths.length && allowed) sideActions.push({ label: label.replace("%s", what(paths)), disabled: !!op, run });
+    }
     const items: MenuItem[] = [
       row.container
         ? { label: row.expanded ? "Collapse" : "Expand", keys: row.expanded ? "←" : "→", run: () => toggle(path) }
@@ -500,13 +512,7 @@
       const [a, b] = pair;
       items.push({ label: "Compare these two", run: () => onCompareRows(a, b) });
     }
-    items.push(
-      "separator",
-      { label: `Copy${many} to the right`, disabled: !canCopy[1] || !!op, run: () => copy(true) },
-      { label: `Copy${many} to the left`, disabled: !canCopy[0] || !!op, run: () => copy(false) },
-      { label: `Delete${many} on the left`, disabled: !canDelete[0] || !!op, run: () => remove(true) },
-      { label: `Delete${many} on the right`, disabled: !canDelete[1] || !!op, run: () => remove(false) },
-    );
+    if (sideActions.length) items.push("separator", ...sideActions);
     for (const [left, side, name] of [[true, row.node.left, "left"], [false, row.node.right, "right"]] as const) {
       if (!side) continue;
       items.push(
