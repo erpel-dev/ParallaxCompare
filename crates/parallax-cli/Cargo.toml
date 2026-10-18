@@ -2,6 +2,7 @@
 name = "parallax-cli"
 description = "Command-line interface of ParallaxCompare"
 version.workspace = true
+license.workspace = true
 edition.workspace = true
 repository.workspace = true
 rust-version.workspace = true

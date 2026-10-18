@@ -248,3 +248,7 @@ This is the first version of the MVP described in the concept. Not done yet:
 - saved sessions and settings, report export
 - the planned tree-sitter highlighting and structural diff (syntect is used for now)
 - remote sources (SFTP, S3)
+
+## License
+
+MIT, see [LICENSE](LICENSE).
