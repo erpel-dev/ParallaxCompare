@@ -9,6 +9,7 @@
   import Nav, { type NavActions } from "./Nav.svelte";
   import { notify } from "./toast.svelte";
   import PathBar, { type SideEdit } from "./PathBar.svelte";
+  import { scaledWheel, scrollScale, spacerHeight, windowOffset } from "./vscroll";
   import { formatSize, formatTime } from "./format";
   import {
     allFolders,
@@ -80,7 +81,11 @@
     void version;
     return result ? countFiles(result.root) : null;
   });
-  const first = $derived(Math.max(0, Math.floor(scrollTop / ROW) - 10));
+  // Huge trees scroll through a scaled spacer (see vscroll.ts); `vTop` is the
+  // scroll position in row pixels.
+  const scale = $derived(scrollScale(rows.length * ROW, viewHeight));
+  const vTop = $derived(scrollTop * scale);
+  const first = $derived(Math.max(0, Math.floor(vTop / ROW) - 10));
   const last = $derived(Math.min(rows.length, first + Math.ceil(viewHeight / ROW) + 20));
   const selectedIndex = $derived(selected === null ? -1 : rows.findIndex((r) => r.path === selected));
   const selectedRow = $derived(selectedIndex >= 0 ? rows[selectedIndex] : null);
@@ -234,8 +239,9 @@
     await tick();
     if (!viewport) return;
     const top = index * ROW;
-    if (top < viewport.scrollTop + ROW) viewport.scrollTop = Math.max(0, top - ROW);
-    else if (top + ROW > viewport.scrollTop + viewHeight) viewport.scrollTop = top + 2 * ROW - viewHeight;
+    const at = viewport.scrollTop * scale;
+    if (top < at + ROW) viewport.scrollTop = Math.max(0, top - ROW) / scale;
+    else if (top + ROW > at + viewHeight) viewport.scrollTop = (top + 2 * ROW - viewHeight) / scale;
   }
 
   function onKey(e: KeyboardEvent) {
@@ -285,7 +291,7 @@
         if (e.key === "F10" && !e.shiftKey) return;
         if (row && viewport) {
           const r = viewport.getBoundingClientRect();
-          rowMenu(row.path, r.left + 40, r.top + selectedIndex * ROW - viewport.scrollTop + ROW);
+          rowMenu(row.path, r.left + 40, r.top + selectedIndex * ROW - vTop + ROW);
         }
         e.preventDefault();
         return;
@@ -662,6 +668,7 @@
     bind:this={viewport}
     bind:clientHeight={viewHeight}
     onscroll={(e) => (scrollTop = e.currentTarget.scrollTop)}
+    onwheel={(e) => viewport && scaledWheel(viewport, scale, e, ROW) && e.preventDefault()}
     onkeydown={onKey}
     tabindex="0"
     role="tree"
@@ -669,8 +676,8 @@
     {#if result && rows.length === 0 && !running}
       <div class="empty">{result.root.status === "same" ? "Both sides are identical." : "Nothing matches the current filter."}</div>
     {/if}
-    <div class="spacer" style:height="{rows.length * ROW}px">
-      <div class="window" style:transform="translateY({first * ROW}px)">
+    <div class="spacer" style:height="{spacerHeight(rows.length * ROW)}px">
+      <div class="window" style:transform="translateY({windowOffset(scrollTop, scale, first, ROW)}px)">
         {#each rows.slice(first, last) as row (row.path)}
           <!-- svelte-ignore a11y_click_events_have_key_events -->
           <div
@@ -681,7 +688,11 @@
             aria-selected={selection.has(row.path)}
             aria-expanded={row.container ? row.expanded : undefined}
             tabindex="-1"
-            onclick={(e) => click(e, row.path)}
+            onclick={(e) => {
+              click(e, row.path);
+              // A focused row would lose the focus for good once scrolled out of the page.
+              viewport?.focus({ preventScroll: true });
+            }}
             ondblclick={() => activate(row.path, row.container)}
             oncontextmenu={(e) => {
               e.preventDefault();

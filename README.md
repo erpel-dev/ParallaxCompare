@@ -108,6 +108,8 @@ Measured with the CLI on two Linux kernel releases (v6.11 and v6.12, ~87 000 fil
 
 Opening files with the content views (same machine): a 12 MB ARXML (242 000 lines) diffs in about 35 ms, and highlighting anywhere in it takes under 10 ms. A 5 MB Latin-1 A2L with 10 000 changed lines diffs in 0.1 s; with histogram instead of Myers it takes 0.9 s, which is why Myers is the default. A 300-page PDF extracts in 0.18 s, and a 100 000-row XLSX in 0.2 s.
 
+In the desktop app (release build, same kind of VM), two 1-million-line files (63 MB each) are on screen about 2 seconds after start, and two 3-million-line files (200 MB each) after about 4. Jumping anywhere, with F7/F8, Home/End or the overview strip, shows the rows within 0.1 s. While the scrollbar is dragged, rows not loaded yet show as grey bars and fill in when it stops. Views taller than a browser can lay out (WebKit stops painting past about 16.7 million pixels, or 880 000 lines) scroll through a scaled scroll area, so the end of any file stays reachable.
+
 Folder compares use every core: with 4 threads they run 3.5–3.8× faster, at about 370 % CPU. A text diff of a single file runs on one core; the desktop app only renders and highlights the visible rows.
 
 ## Usage

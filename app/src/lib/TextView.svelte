@@ -23,6 +23,7 @@
   import Dropdown from "./Dropdown.svelte";
   import Nav, { type NavActions } from "./Nav.svelte";
   import PathBar, { type SideEdit } from "./PathBar.svelte";
+  import { scaledWheel, scrollScale, spacerHeight, windowOffset } from "./vscroll";
   import { formatSize } from "./format";
 
   let {
@@ -43,6 +44,13 @@
 
   const ROW = 19;
   const CHUNK = 200;
+  /** Loaded chunks kept; those farthest from the view are dropped beyond this. */
+  const KEEP_CHUNKS = 60;
+  /**
+   * Requests at a time. The backend answers them one after another, so more would
+   * only queue up rows the view has scrolled past by the time they come back.
+   */
+  const PARALLEL = 2;
   const SIDE_NAMES: [SideName, SideName] = ["left", "right"];
 
   let options = $state(defaultDiffOptions());
@@ -57,7 +65,11 @@
   // Rows are fetched lazily in chunks; the counter re-renders when chunks arrive.
   let cache = new Map<number, RowView>();
   let pending = new Set<number>();
+  let loaded = new Set<number>();
+  let inFlight = 0;
   let cacheVersion = $state(0);
+  /** Changes when the rows are replaced (new diff, edit), so older answers are dropped. */
+  let generation = 0;
 
   let viewport = $state<HTMLDivElement>();
   let scrollTop = $state(0);
@@ -119,7 +131,11 @@
     for (const h of hits) buckets.add(Math.floor((h.row / total) * 600));
     return [...buckets].map((b) => b / 600);
   });
-  const first = $derived(Math.max(0, Math.floor(scrollTop / ROW) - 20));
+  // Very long files scroll through a scaled spacer (see vscroll.ts); `vTop`
+  // is the scroll position in row pixels.
+  const scale = $derived(scrollScale(total * ROW, viewHeight));
+  const vTop = $derived(scrollTop * scale);
+  const first = $derived(Math.max(0, Math.floor(vTop / ROW) - 20));
   const last = $derived(Math.min(total, first + Math.ceil(viewHeight / ROW) + 40));
   const visible = $derived.by(() => {
     void cacheVersion;
@@ -177,6 +193,8 @@
   function resetRows() {
     cache = new Map();
     pending = new Set();
+    loaded = new Set();
+    generation++;
     cacheVersion++;
     ensureLoaded();
   }
@@ -184,25 +202,62 @@
   async function fetchChunk(chunk: number) {
     if (!info || pending.has(chunk)) return;
     pending.add(chunk);
+    inFlight++;
     const id = info.id;
-    const version = cacheVersion;
+    const gen = generation;
+    let failed = false;
     try {
       const rows = await api.fileRows(id, chunk * CHUNK, CHUNK, theme());
       // Rows of an older diff, from before an edit.
-      if (info?.id !== id || version !== cacheVersion) return;
+      if (info?.id !== id || gen !== generation) return;
       rows.forEach((row, i) => cache.set(chunk * CHUNK + i, row));
+      loaded.add(chunk);
+      if (loaded.size > KEEP_CHUNKS) evict();
       cacheVersion++;
       placeCaret();
     } catch (e) {
+      failed = true;
       pending.delete(chunk);
       error = String(e);
+    } finally {
+      inFlight--;
+      // The next request goes to what is on screen now. After a failure the
+      // next scroll retries, rather than a loop here.
+      if (!failed) ensureLoaded();
     }
+  }
+
+  /** Drops the loaded chunks farthest from the view, so memory stays bounded in huge files. */
+  function evict() {
+    const here = Math.floor(first / CHUNK);
+    const far = [...loaded].sort((a, b) => Math.abs(b - here) - Math.abs(a - here));
+    for (const chunk of far.slice(0, loaded.size - KEEP_CHUNKS)) {
+      loaded.delete(chunk);
+      pending.delete(chunk);
+      for (let i = chunk * CHUNK; i < (chunk + 1) * CHUNK; i++) cache.delete(i);
+    }
+  }
+
+  /** The chunks to load, most needed first: those on screen, then their neighbours. */
+  function wantedChunks(): number[] {
+    const from = Math.floor(first / CHUNK);
+    const to = Math.floor(Math.max(first, last - 1) / CHUNK);
+    const list: number[] = [];
+    if (caretWanted) list.push(Math.floor(caretWanted.hint / CHUNK));
+    for (let c = from; c <= to; c++) list.push(c);
+    // So that scrolling on finds its rows loaded already.
+    if ((to + 1) * CHUNK < total) list.push(to + 1);
+    if (from > 0) list.push(from - 1);
+    return list;
   }
 
   function ensureLoaded() {
     if (!info) return;
-    for (let c = Math.floor(first / CHUNK); c <= Math.floor(Math.max(first, last - 1) / CHUNK); c++) fetchChunk(c);
-    if (caretWanted) fetchChunk(Math.floor(caretWanted.hint / CHUNK));
+    while (inFlight < PARALLEL) {
+      const next = wantedChunks().find((c) => !pending.has(c));
+      if (next === undefined) return;
+      fetchChunk(next);
+    }
   }
 
   $effect(() => {
@@ -211,18 +266,23 @@
     ensureLoaded();
   });
 
+  /** Scrolls so that row pixel `v` is at the top. */
+  function scrollToV(v: number) {
+    if (viewport) viewport.scrollTop = Math.max(0, v) / scale;
+  }
+
   function goTo(i: number) {
     if (!info || !viewport || !info.sections.length) return;
     section = Math.max(0, Math.min(info.sections.length - 1, i));
     const start = info.sections[section].start;
     selected = start;
-    viewport.scrollTop = Math.max(0, (start - 3) * ROW);
+    scrollToV((start - 3) * ROW);
   }
 
   function next(dir: 1 | -1) {
     if (!info?.sections.length) return;
     if (section === -1) {
-      const top = Math.floor(scrollTop / ROW);
+      const top = Math.floor(vTop / ROW);
       const idx = info.sections.findIndex((s) => s.start > top);
       goTo(dir === 1 ? (idx === -1 ? info.sections.length - 1 : idx) : Math.max(0, (idx === -1 ? info.sections.length : idx) - 1));
     } else {
@@ -234,9 +294,7 @@
   function reveal(row: number) {
     if (!viewport) return;
     const top = row * ROW;
-    if (top < viewport.scrollTop || top + ROW > viewport.scrollTop + viewHeight) {
-      viewport.scrollTop = Math.max(0, top - viewHeight / 3);
-    }
+    if (top < vTop || top + ROW > vTop + viewHeight) scrollToV(top - viewHeight / 3);
   }
 
   // ---- Editing ----
@@ -599,7 +657,7 @@
       truncated = false;
       return;
     }
-    const from = keep && currentHit ? currentHit : { row: selected ?? Math.floor(scrollTop / ROW), side: 0 as const, start: 0 };
+    const from = keep && currentHit ? currentHit : { row: selected ?? Math.floor(vTop / ROW), side: 0 as const, start: 0 };
     try {
       const r = await api.searchDiff(info.id, findQuery, $state.snapshot(findOptions));
       if (run !== searchRun) return;
@@ -633,9 +691,7 @@
     section = -1;
     if (viewport) {
       const top = h.row * ROW;
-      if (top < viewport.scrollTop || top + ROW > viewport.scrollTop + viewHeight) {
-        viewport.scrollTop = Math.max(0, top - viewHeight / 3);
-      }
+      if (top < vTop || top + ROW > vTop + viewHeight) scrollToV(top - viewHeight / 3);
     }
     revealHitWanted = true;
     tick().then(revealHitSideways);
@@ -696,6 +752,14 @@
 
   // ---- Keys, mouse ----
 
+  /**
+   * Keeps keyboard focus on the scroll area: a clicked row would take it, and lose
+   * it for good once scrolling takes that row out of the page.
+   */
+  function keepFocus() {
+    viewport?.focus({ preventScroll: true });
+  }
+
   function onKey(e: KeyboardEvent) {
     // Keys typed into the line editor.
     if (e.target instanceof HTMLInputElement) return;
@@ -714,11 +778,23 @@
     } else if (e.key === "ArrowUp" && selected !== null) {
       selected = Math.max(0, selected - 1);
       reveal(selected);
+    } else if (e.key === "PageDown" || e.key === "PageUp") {
+      const page = Math.max(1, Math.floor(viewHeight / ROW) - 2) * (e.key === "PageDown" ? 1 : -1);
+      if (selected !== null) selected = Math.max(0, Math.min(total - 1, selected + page));
+      scrollToV(vTop + page * ROW);
+    } else if (e.key === "Home" || e.key === "End") {
+      const end = e.key === "End";
+      if (selected !== null) selected = end ? total - 1 : 0;
+      scrollToV(end ? total * ROW : 0);
     } else return;
     e.preventDefault();
   }
 
   function onWheel(e: WheelEvent) {
+    if (viewport && scaledWheel(viewport, scale, e, ROW)) {
+      e.preventDefault();
+      return;
+    }
     const dx = e.shiftKey ? e.deltaY : e.deltaX;
     if (dx) {
       hscroll = Math.max(0, Math.min(40000, hscroll + dx));
@@ -730,7 +806,7 @@
     if (!viewport || !total) return;
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     const row = Math.floor(((e.clientY - rect.top) / rect.height) * total);
-    viewport.scrollTop = Math.max(0, row * ROW - viewHeight / 2);
+    scrollToV(row * ROW - viewHeight / 2);
     section = -1;
   }
 
@@ -928,7 +1004,7 @@
         {#each hitMarks as m (m)}
           <em style:top="{m * 100}%"></em>
         {/each}
-        <b style:top="{((scrollTop / ROW) / total) * 100}%" style:height="{Math.min(100, (viewHeight / ROW / total) * 100)}%"></b>
+        <b style:top="{((vTop / ROW) / total) * 100}%" style:height="{Math.min(100, (viewHeight / ROW / total) * 100)}%"></b>
       {/if}
     </div>
     <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
@@ -942,11 +1018,11 @@
       tabindex="0"
       role="grid"
     >
-      <div class="spacer" style:height="{total * ROW}px">
-        <div class="window" style:transform="translateY({first * ROW}px)">
+      <div class="spacer" style:height="{spacerHeight(total * ROW)}px">
+        <div class="window" style:transform="translateY({windowOffset(scrollTop, scale, first, ROW)}px)">
           {#each visible as { index, row } (index)}
             <!-- svelte-ignore a11y_click_events_have_key_events -->
-            <div class="row {row?.k ?? 'equal'}" class:cur={index === selected} role="row" tabindex="-1" onclick={() => (selected = index)}>
+            <div class="row {row?.k ?? 'equal'}" class:loading={!row} class:cur={index === selected} role="row" tabindex="-1" onclick={() => { selected = index; keepFocus(); }}>
               {#each [row?.l, row?.r] as line, side (side)}
                 {@const s = side as 0 | 1}
                 {#if side === 1}
@@ -1040,6 +1116,17 @@
   }
   .grow {
     flex: 1;
+  }
+  /* Rows still loading: faint bars where the text will be. */
+  .row.loading .code::after {
+    content: "";
+    display: block;
+    height: 7px;
+    margin: 6px 0 0 8px;
+    width: 45%;
+    border-radius: 3px;
+    background: var(--line);
+    opacity: 0.6;
   }
   .count {
     color: var(--dim);
