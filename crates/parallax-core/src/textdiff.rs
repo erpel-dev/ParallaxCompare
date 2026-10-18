@@ -215,11 +215,30 @@ const MAX_INTRALINE_LEN: usize = 4000;
 /// which gives more readable results than a character diff.
 pub fn intraline(left: &str, right: &str) -> (Vec<Range<u32>>, Vec<Range<u32>>) {
     if left.len() > MAX_INTRALINE_LEN || right.len() > MAX_INTRALINE_LEN {
-        let whole = |s: &str| {
-            let len = utf16_len(s) as u32;
-            std::iter::once(0..len).filter(|r| !r.is_empty()).collect()
-        };
-        return (whole(left), whole(right));
+        // Long lines (minified code): what both share at the start and the end is
+        // equal; only the part between is compared, or marked as a whole.
+        let prefix = left
+            .char_indices()
+            .zip(right.chars())
+            .find(|((_, a), b)| a != b)
+            .map_or(left.len().min(right.len()), |((i, _), _)| i);
+        let (l, r) = (&left[prefix..], &right[prefix..]);
+        let mut suffix = 0;
+        for (a, b) in l.chars().rev().zip(r.chars().rev()) {
+            if a != b {
+                break;
+            }
+            suffix += a.len_utf8();
+        }
+        let (l, r) = (&l[..l.len() - suffix], &r[..r.len() - suffix]);
+        let offset = utf16_len(&left[..prefix]) as u32;
+        let shift = |v: Vec<Range<u32>>| v.into_iter().map(|x| x.start + offset..x.end + offset).collect::<Vec<_>>();
+        if l.len() <= MAX_INTRALINE_LEN && r.len() <= MAX_INTRALINE_LEN {
+            let (a, b) = intraline(l, r);
+            return (shift(a), shift(b));
+        }
+        let whole = |s: &str| std::iter::once(0..utf16_len(s) as u32).filter(|r| !r.is_empty()).collect();
+        return (shift(whole(l)), shift(whole(r)));
     }
     let a = tokenize(left);
     let b = tokenize(right);
@@ -335,6 +354,22 @@ mod tests {
         let opts = DiffOptions { whitespace: WhitespaceMode::Normalize, ..Default::default() };
         let relaxed = diff_docs(&a, &b, &opts);
         assert_eq!(kinds(&relaxed), vec![RowKind::Minor]);
+    }
+
+    /// Minified code: only the changed part of a long line is marked, also far into it.
+    #[test]
+    fn intraline_long_lines() {
+        let a = format!("{}var a=1;{}", "var x=0;".repeat(5000), "var z=9;".repeat(10));
+        let b = format!("{}var a=2;{}", "var x=0;".repeat(5000), "var z=9;".repeat(10));
+        let (l, r) = intraline(&a, &b);
+        assert_eq!(l, vec![40006..40007]);
+        assert_eq!(r, vec![40006..40007]);
+        // Long changed middles are marked as a whole, with their offset.
+        let c = format!("{}{}", "é".repeat(10), "x".repeat(9000));
+        let d = format!("{}{}", "é".repeat(10), "y".repeat(9000));
+        let (l, r) = intraline(&c, &d);
+        let whole = 10..9010;
+        assert_eq!((l, r), (vec![whole.clone()], vec![whole]));
     }
 
     #[test]

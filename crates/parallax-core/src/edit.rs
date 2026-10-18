@@ -208,6 +208,18 @@ impl EditSession {
         Some(self.apply(to, range, text))
     }
 
+    /// Writes every line break of `side` as `newline` (`"\n"`, `"\r\n"` or `"\r"`).
+    pub fn set_line_endings(&mut self, side: Side, newline: &str) -> Option<Edited> {
+        let doc = self.doc(side);
+        let text = doc.text.replace("\r\n", "\n").replace('\r', "\n");
+        let text = if newline == "\n" { text } else { text.replace('\n', newline) };
+        if text == doc.text {
+            return None;
+        }
+        let len = doc.text.len();
+        Some(self.apply(side, 0..len, text))
+    }
+
     /// The text of the lines of `side` shown in `rows`, each with a `\n`.
     pub fn rows_text(&self, side: Side, rows: Range<u32>) -> String {
         let n = self.diff.rows.len();
@@ -500,6 +512,20 @@ mod tests {
             s.undo();
             assert_eq!(text(&s, Side::Left), start);
         }
+    }
+
+    #[test]
+    fn converting_line_endings() {
+        let mut s = session("a\r\nb\r\nc", "a\nb\nc");
+        assert!(s.set_line_endings(Side::Right, "\n").is_none(), "already LF");
+        s.set_line_endings(Side::Left, "\n").unwrap();
+        assert_eq!(text(&s, Side::Left), "a\nb\nc");
+        assert_eq!(s.doc(Side::Left).newline, "\n", "new lines follow");
+        assert!(s.diff().sections.is_empty());
+        s.undo();
+        assert_eq!(text(&s, Side::Left), "a\r\nb\r\nc");
+        s.set_line_endings(Side::Right, "\r\n").unwrap();
+        assert_eq!(text(&s, Side::Right), "a\r\nb\r\nc");
     }
 
     #[test]

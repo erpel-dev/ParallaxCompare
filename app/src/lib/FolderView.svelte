@@ -444,7 +444,8 @@
 
   async function copy(toRight: boolean) {
     if (!result) return;
-    const all = present(!toRight);
+    // What exists on the side copied from.
+    const all = present(toRight);
     // Files matched across folders are copied over their match.
     const pairs = all.map((p) => rowByPath.get(p)).filter((r): r is FlatRow & { rightPath: string } => !!r?.rightPath && !!r.node.left && !!r.node.right);
     const paths = all.filter((p) => !pairs.some((r) => r.path === p));

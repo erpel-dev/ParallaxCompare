@@ -637,6 +637,28 @@ pub fn render(view: View, name: &str, data: &[u8]) -> Result<String> {
     }
 }
 
+/// For files that differ in bytes but are ≈ similar: the first of `views` in which
+/// they look the same, and why they are similar. A file opened from a folder
+/// compare is shown in that view, so ≈ does not open on a page of differences.
+pub fn similar_view(name: &str, left: &[u8], right: &[u8], views: &[View]) -> Option<(View, &'static str)> {
+    const MAX: usize = 64 * 1024 * 1024;
+    if left == right || left.len().max(right.len()) > MAX {
+        return None;
+    }
+    let reason = content_equal(name, left, right)?;
+    if views.first() == Some(&View::Image) {
+        return Some((View::Image, reason));
+    }
+    views
+        .iter()
+        .filter(|v| !matches!(v, View::Text | View::Hex | View::Image))
+        .find(|&&v| match (render(v, name, left), render(v, name, right)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        })
+        .map(|&v| (v, reason))
+}
+
 /// Views whose edited text can be saved back into the file it was made from.
 pub fn can_write_back(view: View) -> bool {
     view == View::EcucValues

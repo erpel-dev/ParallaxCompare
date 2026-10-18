@@ -92,6 +92,20 @@
   });
 
   const matches = (name: string) => !filter || name.toLowerCase().includes(filter.toLowerCase());
+
+  // A filled-in field is selected on focus, so typing replaces e.g. the default branch.
+  let selecting = false;
+  function selectAll(e: FocusEvent) {
+    const el = e.currentTarget as HTMLInputElement;
+    if (el.value) {
+      el.select();
+      selecting = true;
+    }
+  }
+  function keepSelected(e: MouseEvent) {
+    if (selecting) e.preventDefault();
+    selecting = false;
+  }
 </script>
 
 <div class="picker">
@@ -123,8 +137,8 @@
 
   {#if value.kind === "gitRev"}
     <div class="row">
-      <input type="text" class="mono grow" placeholder="Branch, tag, commit or HEAD~2" bind:value={value.rev} spellcheck="false" />
-      <input type="text" class="mono sub" placeholder="sub-folder (optional)" bind:value={value.subpath} spellcheck="false" />
+      <input type="text" class="mono grow" placeholder="Branch, tag, commit or HEAD~2" bind:value={value.rev} spellcheck="false" onfocus={selectAll} onmouseup={keepSelected} />
+      <input type="text" class="mono sub" placeholder="sub-folder" title="Sub-folder to compare (optional)" bind:value={value.subpath} spellcheck="false" onfocus={selectAll} onmouseup={keepSelected} />
     </div>
     {#if refsError}
       <p class="hint error">{refsError}</p>

@@ -726,6 +726,16 @@ fn data_url(mime: &str, bytes: &[u8]) -> String {
 }
 
 /// Explains why byte-different files show no differences in the text view.
+fn eol_name(e: LineEnding) -> &'static str {
+    match e {
+        LineEnding::Lf => "LF",
+        LineEnding::CrLf => "CRLF",
+        LineEnding::Cr => "CR",
+        LineEnding::Mixed => "mixed",
+        LineEnding::None => "no line break",
+    }
+}
+
 fn invisible_difference(left: &TextDoc, right: &TextDoc, l: &[u8], r: &[u8], minor: u32) -> String {
     let mut reasons = Vec::new();
     if left.encoding != right.encoding {
@@ -735,7 +745,7 @@ fn invisible_difference(left: &TextDoc, right: &TextDoc, l: &[u8], r: &[u8], min
         reasons.push("byte order mark".to_string());
     }
     if left.line_ending != right.line_ending {
-        reasons.push(format!("line endings ({:?} vs {:?})", left.line_ending, right.line_ending));
+        reasons.push(format!("line endings ({} vs {})", eol_name(left.line_ending), eol_name(right.line_ending)));
     }
     if l.ends_with(b"\n") != r.ends_with(b"\n") {
         reasons.push("newline at end of file".to_string());
@@ -778,6 +788,20 @@ pub async fn open_file_diff(
         );
         let mut chosen = view.filter(|v| views.contains(v)).unwrap_or(views[0]);
         let mut note = None;
+        // ≈ similar files open in the view where they are equal, and say why.
+        if view.is_none()
+            && !identical
+            && let (Some(l), Some(r)) = (&left_data, &right_data)
+            && let Some((similar, reason)) = convert::similar_view(&name, l, r, &views)
+        {
+            chosen = similar;
+            note = Some(if similar == View::Image {
+                let meta = if views.contains(&View::ImageMetadata) { " “Image metadata” shows how." } else { "" };
+                format!("≈ Similar: {reason}. The pixels are identical; the files differ in metadata or encoding.{meta}")
+            } else {
+                format!("≈ Similar: {reason}. Shown as “{}”, where the files are equal; “Text” shows every difference in the bytes.", similar.label())
+            });
+        }
         let view_options = views.iter().map(|&v| ViewOption { id: v, label: v.label() }).collect();
 
         let mut image = None;
@@ -792,7 +816,7 @@ pub async fn open_file_diff(
                             format: s.format.clone(),
                         })
                     };
-                    note = d.note.clone();
+                    note = d.note.clone().or(note);
                     image = Some(ImageView {
                         left: side(&d.left),
                         right: side(&d.right),
@@ -973,6 +997,9 @@ pub struct LineView {
     /// Number of UTF-16 units cut from the end of a very long line.
     #[serde(skip_serializing_if = "Option::is_none")]
     x: Option<u32>,
+    /// Number of UTF-16 units cut from the start, so the first change shows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    o: Option<u32>,
     /// The file's last line, without the terminator the other file has.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     nn: bool,
@@ -982,24 +1009,46 @@ impl LineView {
     fn new(n: u32, line: &str, spans: Vec<Span>, marks: Vec<(u32, u32)>) -> Self {
         let total = text::utf16_len(line) as u32;
         if total <= MAX_SHOWN_LINE {
-            return LineView { n, t: line.to_string(), s: spans, m: marks, x: None, nn: false };
+            return LineView { n, t: line.to_string(), s: spans, m: marks, x: None, o: None, nn: false };
         }
-        let mut units = 0u32;
-        let cut = line
-            .char_indices()
-            .find(|(_, c)| {
-                units += c.len_utf16() as u32;
-                units > MAX_SHOWN_LINE
-            })
-            .map_or(line.len(), |(i, _)| i);
-        let shown = text::utf16_len(&line[..cut]) as u32;
-        let clip = |(a, b): (u32, u32)| (a < shown).then(|| (a, b.min(shown)));
+        // The window shown: from the start, or from shortly before the first change
+        // when that lies beyond what the start would show.
+        let first_mark = marks.first().map_or(0, |m| m.0);
+        let from_units = if first_mark + 100 > MAX_SHOWN_LINE { first_mark.saturating_sub(200) } else { 0 };
+        let byte_at = |target: u32| {
+            let mut units = 0u32;
+            line.char_indices()
+                .find(|(_, c)| {
+                    let hit = units >= target;
+                    units += c.len_utf16() as u32;
+                    hit
+                })
+                .map_or(line.len(), |(i, _)| i)
+        };
+        let start = byte_at(from_units);
+        let skipped = text::utf16_len(&line[..start]) as u32;
+        let end = start + {
+            let rest = &line[start..];
+            let mut units = 0u32;
+            rest.char_indices()
+                .find(|(_, c)| {
+                    units += c.len_utf16() as u32;
+                    units > MAX_SHOWN_LINE
+                })
+                .map_or(rest.len(), |(i, _)| i)
+        };
+        let shown = text::utf16_len(&line[start..end]) as u32;
+        let clip = |(a, b): (u32, u32)| {
+            let (a, b) = (a.max(skipped) - skipped, b.saturating_sub(skipped).min(shown));
+            (a < b).then_some((a, b))
+        };
         LineView {
             n,
-            t: line[..cut].to_string(),
+            t: line[start..end].to_string(),
             s: spans.into_iter().filter_map(|Span(a, b, c)| clip((a, b)).map(|(a, b)| Span(a, b, c))).collect(),
             m: marks.into_iter().filter_map(clip).collect(),
-            x: Some(total - shown),
+            x: (total > skipped + shown).then_some(total - skipped - shown),
+            o: (skipped > 0).then_some(skipped),
             nn: false,
         }
     }
@@ -1129,6 +1178,8 @@ pub struct EditInfo {
     can_undo: bool,
     can_redo: bool,
     identical: bool,
+    /// The line endings of each side as they are now.
+    line_endings: [LineEnding; 2],
     /// The row where the edit happened, to bring it into view.
     focus_row: Option<u32>,
     /// Where typing continues after an edit from the line editor.
@@ -1165,6 +1216,7 @@ fn edit_info(fd: &FileDiff, focus: Option<Edited>, caret: Option<(Side, usize)>)
         can_redo: e.can_redo(),
         // Equal text of a converted view says nothing about the bytes.
         identical: fd.view == View::Text && e.doc(Side::Left).text == e.doc(Side::Right).text,
+        line_endings: SIDES.map(|s| e.doc(s).line_ending),
         focus_row: focus.map(|f| e.row_of_line(f.side, f.line)),
         caret,
     }
@@ -1284,6 +1336,22 @@ pub async fn replace_rows(
     with_diff(state, id, move |fd| {
         check_editable(fd, side)?;
         Ok((fd.edit.replace_rows(side, start..end, &text, replace), None))
+    })
+    .await
+}
+
+/// Writes every line break of `side` as `ending` ("LF", "CRLF" or "CR").
+#[tauri::command]
+pub async fn set_line_endings(state: State<'_, AppState>, id: u64, side: Side, ending: String) -> CmdResult<EditInfo> {
+    let newline = match ending.as_str() {
+        "LF" => "\n",
+        "CRLF" => "\r\n",
+        "CR" => "\r",
+        other => return Err(format!("Unknown line ending {other}.")),
+    };
+    with_diff(state, id, move |fd| {
+        check_editable(fd, side)?;
+        Ok((fd.edit.set_line_endings(side, newline), None))
     })
     .await
 }

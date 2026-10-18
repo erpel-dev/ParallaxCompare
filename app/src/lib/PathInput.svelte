@@ -57,9 +57,16 @@
     timer = setTimeout(refresh, 120);
   }
 
+  // A field that already holds a path is selected as a whole when it gets the
+  // focus, so typing replaces it; the click that focused it must not undo that.
+  let keepSelection = false;
   function focused() {
     recent = recentPaths();
-    open = true;
+    if (value && input) {
+      input.select();
+      keepSelection = true;
+    }
+    // The list opens on typing or ↓, so it does not cover the fields below on a click.
     refresh();
   }
 
@@ -152,6 +159,10 @@
     autocomplete="off"
     oninput={typed}
     onfocus={focused}
+    onmouseup={(e) => {
+      if (keepSelection) e.preventDefault();
+      keepSelection = false;
+    }}
     onkeydown={onKey}
     onblur={() => {
       open = false;

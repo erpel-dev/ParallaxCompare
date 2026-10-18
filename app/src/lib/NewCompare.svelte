@@ -52,6 +52,26 @@
 
   let recent = $state(recentComparisons());
 
+  const title = (c: SavedComparison, depth: number) =>
+    `${sourceName(c.left, depth)} ↔ ${sourceName(c.right, depth)}${c.mergeBase ? " (merge-base)" : ""}`;
+
+  /** Titles for the recent list, naming parent folders where two would otherwise read the same. */
+  const titles = $derived.by(() => {
+    const depth = recent.map(() => 1);
+    for (let round = 0; round < 4; round++) {
+      const shown = recent.map((c, i) => title(c, depth[i]));
+      let clash = false;
+      shown.forEach((t, i) => {
+        if (shown.indexOf(t) !== shown.lastIndexOf(t)) {
+          depth[i]++;
+          clash = true;
+        }
+      });
+      if (!clash) break;
+    }
+    return recent.map((c, i) => title(c, depth[i]));
+  });
+
   function ago(ms: number): string {
     const s = Math.max(0, (Date.now() - ms) / 1000);
     if (s < 60) return "just now";
@@ -140,14 +160,14 @@
   {#if recent.length}
     <section class="recent" aria-label="Recent comparisons">
       <header>Recent comparisons</header>
-      {#each recent as c (comparisonKey(c))}
+      {#each recent as c, i (comparisonKey(c))}
         <div class="entry">
           <button
             class="open"
             onclick={() => onCompare(c.left, c.right, { ...c.options }, c.mergeBase)}
             title="Compare again with the same options"
           >
-            <span class="names">{sourceName(c.left)} ↔ {sourceName(c.right)}{c.mergeBase ? " (merge-base)" : ""}</span>
+            <span class="names">{titles[i]}</span>
             <span class="paths mono">{sourceText(c.left)}  ↔  {sourceText(c.right)}</span>
           </button>
           <span class="when">{c.pinned ? "pinned" : ago(c.used)}</span>

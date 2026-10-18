@@ -25,10 +25,11 @@ export interface FileHistory {
   commits: (CommitInfo & { spec: SourceSpec })[];
 }
 
-/** The last part of a source: a file or folder name, or a Git revision. */
-export function sourceName(spec: SourceSpec): string {
+/** The last `depth` parts of a source's path (a file or folder name by default), or its Git revision. */
+export function sourceName(spec: SourceSpec, depth = 1): string {
   if (spec.type === "gitRev" && !spec.subpath) return spec.rev;
-  return sourceText(spec).replace(/[\\/]+$/, "").split(/[\\/:!]/).pop() ?? "";
+  const parts = sourceText(spec).replace(/[\\/]+$/, "").split(/[\\/:!]/).filter(Boolean);
+  return parts.slice(-depth).join("/");
 }
 
 export interface SourceOptions {
@@ -112,6 +113,8 @@ export interface LineView {
   m: [number, number][];
   /** Characters cut from the end of a very long line. */
   x?: number;
+  /** Characters cut from the start of a very long line, so its first change shows. */
+  o?: number;
   /** The file's last line, without the line break the other file has. */
   nn?: boolean;
 }
@@ -262,6 +265,7 @@ export interface EditInfo {
   canUndo: boolean;
   canRedo: boolean;
   identical: boolean;
+  lineEndings: [FileSide["lineEnding"], FileSide["lineEnding"]];
   focusRow: number | null;
   caret: { row: number; line: number; col: number } | null;
 }
@@ -368,6 +372,8 @@ export const api = {
     invoke<{ status: Node["status"]; message: string | null }[]>("compare_pairs", { id, pairs, options }),
   copyFileAs: (id: number, from: string, to: string, toRight: boolean, options: CompareOptions) =>
     invoke<OpResult>("copy_file_as", { id, from, to, toRight, options }),
+  setLineEndings: (id: number, side: SideName, ending: "LF" | "CRLF" | "CR") =>
+    invoke<EditInfo>("set_line_endings", { id, side, ending }),
   undo: (id: number) => invoke<EditInfo>("undo", { id }),
   redo: (id: number) => invoke<EditInfo>("redo", { id }),
   updateDiff: (id: number, options: DiffOptions, syntax: string | null) =>

@@ -41,7 +41,8 @@
 
   const badge = $derived(
     ({
-      folder: ["DIR", "fs"],
+      // A file opened from a folder comparison is a file.
+      folder: suffix ? ["FILE", "fs"] : ["DIR", "fs"],
       file: ["FILE", "fs"],
       archive: ["ARC", "arc"],
       gitRev: ["GIT", "git"],

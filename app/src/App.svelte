@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { ask } from "@tauri-apps/plugin-dialog";
@@ -62,6 +62,12 @@
   /** Files being dragged over the window, and the side they would replace. */
   let drop = $state<{ side: SideName | "both"; count: number } | null>(null);
   let mainEl = $state<HTMLElement>();
+  let tabBar = $state<HTMLElement>();
+  // The active tab is scrolled into view when the bar is too narrow for all tabs.
+  $effect(() => {
+    const key = active;
+    tick().then(() => tabBar?.querySelector(`[data-key="${CSS.escape(String(key))}"]`)?.scrollIntoView({ block: "nearest", inline: "nearest" }));
+  });
 
   function add(tab: Tab) {
     tabs.push(tab);
@@ -389,7 +395,11 @@
     else if ((mod && e.shiftKey && key === "p") || (mod && !e.shiftKey && key === "k") || e.key === "F1") {
       paletteOpen = !paletteOpen;
     } else if (e.ctrlKey && e.key === "Tab") cycle(e.shiftKey ? -1 : 1);
-    else return;
+    // Ctrl+1 … Ctrl+8 pick a tab, Ctrl+9 the last.
+    else if (mod && !e.shiftKey && !e.altKey && /^[1-9]$/.test(e.key) && tabs.length) {
+      const n = Number(e.key);
+      active = tabs[n === 9 ? tabs.length - 1 : Math.min(n, tabs.length) - 1].key;
+    } else return;
     e.preventDefault();
   }
 
@@ -428,11 +438,22 @@
 <svelte:window onkeydown={onKey} onmouseup={onMouseUp} />
 
 <div class="app">
-  <nav class="tabs" aria-label="Comparisons">
+  <nav
+    class="tabs"
+    aria-label="Comparisons"
+    bind:this={tabBar}
+    onwheel={(e) => {
+      // The wheel scrolls the tabs sideways.
+      if (tabBar && e.deltaY && !e.deltaX) {
+        tabBar.scrollLeft += e.deltaY;
+        e.preventDefault();
+      }
+    }}
+  >
     {#each tabs as tab (tab.key)}
-      <div class="tab" class:on={tab.key === active}>
+      <div class="tab" class:on={tab.key === active} data-key={tab.key}>
         <button class="label" onclick={() => (active = tab.key)} title={tab.title}>
-          <span>{tab.kind === "folder" ? "📁" : tab.kind === "text" ? "📄" : "＋"}</span>{tab.title}{tab.kind === "text" && tab.dirty ? " ●" : ""}
+          <span>{tab.kind === "folder" ? "📁" : tab.kind === "text" ? "📄" : "＋"}</span><span class="name">{tab.title}</span>{tab.kind === "text" && tab.dirty ? " ●" : ""}
         </button>
         <button class="x" onclick={() => close(tab.key)} title="Close (Ctrl+W)">×</button>
       </div>
@@ -498,12 +519,30 @@
     overflow-x: auto;
     flex: none;
   }
+  /* Tabs shrink to fit; past that the bar scrolls, without a scrollbar over the titles. */
+  .tabs {
+    scrollbar-width: none;
+  }
+  .tabs::-webkit-scrollbar {
+    display: none;
+  }
   .tab {
     display: flex;
     align-items: center;
     border-right: 1px solid var(--line);
     border-top: 2px solid transparent;
     max-width: 280px;
+    min-width: 96px;
+    flex: 0 1 auto;
+  }
+  .tab .label {
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+  }
+  .label .name {
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .tab.on {
     background: var(--panel);
@@ -517,6 +556,7 @@
   .label {
     display: flex;
     gap: 6px;
+    text-align: left;
     padding: 6px 4px 6px 12px;
     overflow: hidden;
     text-overflow: ellipsis;

@@ -183,6 +183,28 @@
     if (from >= 0) marks.push({ top: from / B, height: (to - from) / B });
     return marks;
   });
+  /**
+   * The difference the counter shows: the one moved to while it is on screen,
+   * else the first one on screen, so the count follows scrolling.
+   */
+  /** The sections above the view, and the one shown in it (-1 for none). */
+  const viewSections = $derived.by(() => {
+    if (!info) return { above: 0, shown: -1 };
+    const top = Math.floor(vTop / ROW);
+    const bottom = top + Math.max(1, Math.floor(viewHeight / ROW));
+    const onScreen = (i: number) => info!.sections[i].end > top && info!.sections[i].start < bottom;
+    // The first section that ends below the top of the view.
+    let lo = 0;
+    let hi = info.sections.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (info.sections[mid].end <= top) lo = mid + 1;
+      else hi = mid;
+    }
+    if (section >= 0 && section < info.sections.length && onScreen(section)) return { above: lo, shown: section };
+    return { above: lo, shown: lo < info.sections.length && onScreen(lo) ? lo : -1 };
+  });
+  const shownSection = $derived(viewSections.shown);
   const sectionStarts = $derived(new Map((info?.sections ?? []).map((s, i) => [s.start, i])));
   /** The section the toolbar's copy buttons act on. */
   const currentSection = $derived.by(() => {
@@ -311,11 +333,47 @@
     const start = info.sections[section].start;
     selected = start;
     scrollToV((start - 3) * ROW);
+    revealMarkWanted = true;
   }
+
+  /** After moving to a difference: the code scrolls sideways so its first change shows. */
+  let revealMarkWanted = false;
+  function revealMarkSideways() {
+    if (!revealMarkWanted || !viewport) return;
+    const row = viewport.querySelector<HTMLElement>(".row.cur");
+    if (!row) return;
+    revealMarkWanted = false;
+    const el = row.querySelector<HTMLElement>(".mk");
+    const cell = el?.closest<HTMLElement>(".code");
+    if (!el || !cell) {
+      hscroll = 0;
+      return;
+    }
+    const [a, c] = [el.getBoundingClientRect(), cell.getBoundingClientRect()];
+    if (a.left < c.left + 6 || a.left > c.right - 40) {
+      hscroll = Math.max(0, Math.min(40000, hscroll + a.left - c.left - c.width / 3));
+    }
+  }
+
+  let detail = $state<HTMLElement>();
+  // The detail lines show the selected row's first change, also in a long line.
+  $effect(() => {
+    void selectedRow;
+    tick().then(() => {
+      if (!detail) return;
+      const el = detail.querySelector<HTMLElement>(".mk");
+      const box = detail.getBoundingClientRect();
+      if (!el) detail.scrollLeft = 0;
+      else if (el.getBoundingClientRect().right > box.right) {
+        detail.scrollLeft += el.getBoundingClientRect().left - box.left - box.width / 3;
+      }
+    });
+  });
 
   function next(dir: 1 | -1) {
     if (!info?.sections.length) return;
-    if (section === -1) {
+    // After scrolling away from the difference moved to, Next and Prev go on from the view.
+    if (section === -1 || shownSection !== section) {
       const top = Math.floor(vTop / ROW);
       const idx = info.sections.findIndex((s) => s.start > top);
       goTo(dir === 1 ? (idx === -1 ? info.sections.length - 1 : idx) : Math.max(0, (idx === -1 ? info.sections.length : idx) - 1));
@@ -371,8 +429,8 @@
       stats: e.stats,
       identical: e.identical,
       note: null,
-      left: { ...info.left, lines: e.lines[0], exists: e.exists[0] },
-      right: { ...info.right, lines: e.lines[1], exists: e.exists[1] },
+      left: { ...info.left, lines: e.lines[0], exists: e.exists[0], lineEnding: e.lineEndings[0] },
+      right: { ...info.right, lines: e.lines[1], exists: e.exists[1], lineEnding: e.lineEndings[1] },
     };
     anchor = null;
     dirty = e.dirty;
@@ -429,7 +487,7 @@
     const row = cache.get(index);
     if (!row || !editable[side]) return;
     const line = lineOf(side, row);
-    if (line?.x) {
+    if (line?.x || line?.o) {
       error = "This line is too long to edit here.";
       return;
     }
@@ -595,6 +653,25 @@
     if (!text) return;
     e.preventDefault();
     replaceLines(text, anchor !== null);
+  }
+
+  /** Line endings the other side can take over: both sides have a single, different kind. */
+  const eolFix = $derived.by(() => {
+    if (!info || info.view !== "text" || !info.left.exists || !info.right.exists) return null;
+    const single = (e: string) => e === "LF" || e === "CRLF" || e === "CR";
+    const [l, r] = [info.left.lineEnding, info.right.lineEnding];
+    if (l === r || (!single(l) && !single(r))) return null;
+    return { left: single(r) && editable[0] ? r : null, right: single(l) && editable[1] ? l : null } as {
+      left: "LF" | "CRLF" | "CR" | null;
+      right: "LF" | "CRLF" | "CR" | null;
+    };
+  });
+
+  function setLineEndings(side: 0 | 1, ending: "LF" | "CRLF" | "CR") {
+    if (!info) return;
+    const id = info.id;
+    editing = null;
+    enqueue(() => api.setLineEndings(id, SIDE_NAMES[side], ending)).then(applyEdit);
   }
 
   function undo() {
@@ -835,7 +912,10 @@
   $effect(() => {
     void cacheVersion;
     void first;
-    tick().then(revealHitSideways);
+    tick().then(() => {
+      revealHitSideways();
+      revealMarkSideways();
+    });
   });
 
   function findKey(e: KeyboardEvent) {
@@ -858,11 +938,17 @@
     if (mod && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "f") openFind();
     else if (e.key === "F3" && findOpen) nextHit(e.shiftKey ? -1 : 1);
     else if (mod && e.key.toLowerCase() === "g" && findOpen) nextHit(e.shiftKey ? -1 : 1);
+    // F7/F8 also when the focus has left the scroll area (which handles them otherwise), but not in a field.
+    else if ((e.key === "F7" || e.key === "F8") && !e.defaultPrevented && !isField(e.target))
+      next(e.key === "F8" ? 1 : -1);
     else return;
     e.preventDefault();
   }
 
   // ---- Keys, mouse ----
+
+  const isField = (t: EventTarget | null) =>
+    t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement;
 
   /**
    * Keeps keyboard focus on the scroll area: a clicked row would take it, and lose
@@ -967,7 +1053,8 @@
   const eolLabel = (s: FileDiffInfo["left"]) => {
     if (!s.exists) return "missing";
     if (info?.view === "image") return formatSize(s.size);
-    const kind = info?.view === "text" ? `${s.encoding}${s.bom ? " BOM" : ""} · ${s.lineEnding}` : s.encoding;
+    const eol = s.lineEnding === "None" ? "no line break" : s.lineEnding === "Mixed" ? "mixed line endings" : s.lineEnding;
+    const kind = info?.view === "text" ? `${s.encoding}${s.bom ? " BOM" : ""} · ${eol}` : s.encoding;
     return `${kind} · ${formatSize(s.size)} · ${s.lines.toLocaleString()} lines`;
   };
 
@@ -1017,7 +1104,15 @@
     <button onclick={() => next(-1)} disabled={!info?.sections.length} title="Previous difference (F7)">◀ Prev</button>
     <button onclick={() => next(1)} disabled={!info?.sections.length} title="Next difference (F8)">Next ▶</button>
     {#if info}
-      <span class="count">{section >= 0 ? section + 1 : "–"} / {info.sections.length}</span>
+      <span class="count" title={shownSection >= 0 || !info.sections.length ? undefined : "No difference on screen; the view is between these two"}
+        >{shownSection >= 0
+          ? shownSection + 1
+          : viewSections.above === 0
+            ? "–"
+            : viewSections.above < info.sections.length
+              ? `${viewSections.above}–${viewSections.above + 1}`
+              : `${viewSections.above}›`} / {info.sections.length}</span
+      >
     {/if}
     {#if editable[0] || editable[1]}
       <span class="sep"></span>
@@ -1095,6 +1190,13 @@
     </div>
   {/if}
 
+  {#if eolFix && (eolFix.left || eolFix.right)}
+    <div class="banner">
+      Line endings differ ({info?.left.lineEnding === "None" ? "none" : info?.left.lineEnding} vs {info?.right.lineEnding === "None" ? "none" : info?.right.lineEnding}).
+      {#if eolFix.left}<button onclick={() => setLineEndings(0, eolFix.left!)}>Use {eolFix.left} on the left</button>{/if}
+      {#if eolFix.right}<button onclick={() => setLineEndings(1, eolFix.right!)}>Use {eolFix.right} on the right</button>{/if}
+    </div>
+  {/if}
   {#if changedOnDisk}
     <div class="banner warn">
       The file changed on disk. <button onclick={reloadFromDisk}>Reload</button> discards your unsaved edits.
@@ -1174,7 +1276,7 @@
                 {:else if line}
                   <div class="ln">{line.n + 1}</div>
                   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                  <div class="code" class:editable={editable[s]} class:sel={anchor !== null && s === activeSide && lineRange && index >= lineRange[0] && index < lineRange[1]} onclick={() => (activeSide = s)} ondblclick={(e) => startEdit(e, s, index)}><span class="text" style:transform="translateX({-hscroll}px)">{#each segments(line, hitsAt.get(index * 2 + s)) as seg, si (si)}<span class:mk={seg.mark} class:hit={seg.hit} class:now={seg.now} style:color={seg.now ? null : seg.color}>{seg.text}</span>{/each}</span>{#if line.nn}<span class="cut" title="The other file ends with a line break">no line break at end</span>{/if}{#if line.x}<span class="cut" title="The line is cut for display">… {line.x.toLocaleString()} more characters</span>{/if}</div>
+                  <div class="code" class:editable={editable[s]} class:sel={anchor !== null && s === activeSide && lineRange && index >= lineRange[0] && index < lineRange[1]} onclick={() => (activeSide = s)} ondblclick={(e) => startEdit(e, s, index)}><span class="text" style:transform="translateX({-hscroll}px)">{#if line.o}<span class="cut lead" title="The start of the line is left out, so its first change shows">{line.o.toLocaleString()} characters …</span>{/if}{#each segments(line, hitsAt.get(index * 2 + s)) as seg, si (si)}<span class:mk={seg.mark} class:hit={seg.hit} class:now={seg.now} style:color={seg.now ? null : seg.color}>{seg.text}</span>{/each}</span>{#if line.nn}<span class="cut" title="The other file ends with a line break">no line break at end</span>{/if}{#if line.x}<span class="cut" title="The line is cut for display">… {line.x.toLocaleString()} more characters</span>{/if}</div>
                 {:else if row}
                   <div class="ln fill"></div>
                   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -1193,7 +1295,7 @@
 
   {/if}
 
-  <div class="detail mono" hidden={info?.view === "image"}>
+  <div class="detail mono" bind:this={detail} hidden={info?.view === "image"}>
     {#each [["Left", selectedRow?.l], ["Right", selectedRow?.r]] as const as [label, line] (label)}
       <div class="dline">
         <span class="lbl">{label}</span>
@@ -1487,6 +1589,10 @@
     color: var(--dim);
     font-family: var(--ui);
     font-size: 11px;
+  }
+  .cut.lead {
+    margin-left: 0;
+    margin-right: 8px;
   }
   .detail[hidden] {
     display: none;

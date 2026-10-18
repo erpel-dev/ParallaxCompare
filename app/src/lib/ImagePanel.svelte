@@ -6,8 +6,42 @@
   type Mode = "side" | "overlay" | "blink";
   let mode = $state<Mode>("side");
   let showMask = $state(true);
-  let fit = $state(true);
+  /** The scale the images are drawn at; null fits them to the window, small ones enlarged. */
+  let zoom = $state<number | null>(null);
+  let areaW = $state(0);
+  let areaH = $state(0);
   let blinkRight = $state(false);
+
+  // One scale for both sides, so they stay comparable.
+  const fitScale = $derived.by(() => {
+    const shown = mode === "side" ? [image.left, image.right] : [image.left];
+    const w = Math.max(0, ...shown.map((s) => s?.width ?? 0));
+    const h = Math.max(0, ...shown.map((s) => s?.height ?? 0));
+    if (!w || !h || !areaW || !areaH) return 1;
+    const cellW = (mode === "side" ? areaW / 2 : areaW) - 20;
+    const cellH = areaH - 40;
+    return Math.max(0.01, Math.min(64, cellW / w, cellH / h));
+  });
+  const scale = $derived(zoom ?? fitScale);
+  const sizeOf = (side: { width: number; height: number } | null) =>
+    side?.width ? `width: ${side.width * scale}px; height: ${side.height * scale}px` : undefined;
+  function zoomBy(factor: number) {
+    zoom = Math.max(0.01, Math.min(64, scale * factor));
+  }
+  function onWheel(e: WheelEvent) {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    zoomBy(e.deltaY < 0 ? 1.25 : 0.8);
+  }
+
+  // Zoomed in, both sides scroll together.
+  const cells: HTMLElement[] = $state([]);
+  function syncScroll(i: number) {
+    const [from, to] = [cells[i], cells[1 - i]];
+    if (!from || !to) return;
+    if (to.scrollLeft !== from.scrollLeft) to.scrollLeft = from.scrollLeft;
+    if (to.scrollTop !== from.scrollTop) to.scrollTop = from.scrollTop;
+  }
 
   $effect(() => {
     if (mode !== "blink") return;
@@ -25,7 +59,12 @@
     {/each}
     <span class="sep"></span>
     <label title={mode === "side" ? "Outline the areas with differing pixels" : "Mark each differing pixel"}><input type="checkbox" bind:checked={showMask} disabled={!image.mask} /> {mode === "side" ? "Outline differences" : "Highlight differing pixels"}</label>
-    <label><input type="checkbox" bind:checked={fit} /> Fit to window</label>
+    <span class="zoom">
+      <button class:on={zoom === null} onclick={() => (zoom = null)} title="Fit the images to the window">Fit</button>
+      <button onclick={() => zoomBy(0.8)} title="Zoom out (Ctrl+wheel)">−</button>
+      <button class:on={zoom === 1} onclick={() => (zoom = 1)} title="Actual size">{Math.round(scale * 100)} %</button>
+      <button onclick={() => zoomBy(1.25)} title="Zoom in (Ctrl+wheel)">+</button>
+    </span>
     <span class="summary">
       {#if image.totalPixels}
         {#if image.differentPixels === 0}
@@ -38,13 +77,14 @@
     </span>
   </div>
 
+  <div class="area" bind:clientWidth={areaW} bind:clientHeight={areaH} onwheel={onWheel}>
   {#if mode === "side"}
     <div class="sides">
       {#each [image.left, image.right] as side, i (i)}
-        <div class="cell">
+        <div class="cell" bind:this={cells[i]} onscroll={() => syncScroll(i)}>
           {#if side}
             <div class="meta">{side.format}{side.width ? ` · ${side.width}×${side.height}` : ""}</div>
-            <div class="stack" class:fit>
+            <div class="stack" style={sizeOf(side)}>
               <img src={side.url} alt={i === 0 ? "left image" : "right image"} />
               {#if showMask && image.outline !== null && side.width}
                 <!-- The differing areas outlined: the image stays visible however much differs. -->
@@ -65,12 +105,13 @@
       <div class="meta">
         {mode === "blink" ? (blinkRight ? "Right" : "Left") : "Left, with the differing pixels of the right image highlighted"}
       </div>
-      <div class="stack" class:fit>
+      <div class="stack" style={sizeOf(image.left)}>
         <img src={mode === "blink" && blinkRight ? image.right.url : image.left.url} alt="compared" class:dim={mode === "overlay"} />
         {#if mode === "overlay" && image.mask}<img class="mask strong" src={image.mask} alt="" />{/if}
       </div>
     </div>
   {/if}
+  </div>
 </div>
 
 <style>
@@ -131,9 +172,19 @@
     display: block;
     image-rendering: pixelated;
   }
-  .stack.fit img {
-    max-width: 100%;
-    max-height: calc(100vh - 260px);
+  .stack[style] img {
+    width: 100%;
+    height: 100%;
+  }
+  .area {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .zoom {
+    display: flex;
+    gap: 2px;
   }
   .stack .mask {
     position: absolute;

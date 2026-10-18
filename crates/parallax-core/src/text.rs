@@ -79,9 +79,13 @@ impl TextDoc {
     pub fn splice(&mut self, range: Range<usize>, with: &str) -> String {
         let removed = self.text[range.clone()].to_string();
         self.text.replace_range(range, with);
-        let (lines, line_ending, _) = split_lines(&self.text);
+        let (lines, line_ending, newline) = split_lines(&self.text);
         self.lines = lines;
         self.line_ending = line_ending;
+        // New lines are written like the most common terminator; without any, as before.
+        if line_ending != LineEnding::None {
+            self.newline = newline;
+        }
         removed
     }
 
