@@ -1,0 +1,6 @@
+---
+description: Never credit an AI assistant as an author, co-author, committer, or contributor
+alwaysApply: true
+---
+
+Follow the authorship and attribution policy in the repository root AGENTS.md for all work, including commits, pull requests, source files, documentation, and contributor lists. Use the user's configured Git identity and omit AI attribution trailers, signatures, footers, and session links.
