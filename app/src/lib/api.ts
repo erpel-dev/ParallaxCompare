@@ -197,6 +197,8 @@ export type View =
   | "templateOutline"
   | "conanGraph"
   | "normalizedConan"
+  | "pythonOutline"
+  | "perlOutline"
   | "table"
   | "certificate"
   | "email";

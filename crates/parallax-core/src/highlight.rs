@@ -42,6 +42,9 @@ const CUSTOM_SYNTAXES: &[&str] = &[
     include_str!("syntaxes/parallax-views.sublime-syntax"),
 ];
 
+/// Extensions the bundled grammars do not list.
+const EXTENSION_ALIASES: &[(&str, &str)] = &[("psgi", "Perl"), ("pyw", "Python")];
+
 /// XML dialects that the bundled XML grammar does not list.
 const XML_EXTENSIONS: &[&str] = &[
     "arxml", "odx", "odx-d", "odx-c", "odx-v", "odx-f", "odx-e", "odx-cs", "odx-m", "cdd", "cdfx", "fibex", "xdm",
@@ -89,6 +92,10 @@ pub fn detect_syntax(path: &str, first_line: &str) -> Option<&'static SyntaxRefe
     ss.find_syntax_by_extension(name)
         .or_else(|| ext.as_deref().and_then(|ext| ss.find_syntax_by_extension(ext)))
         .or_else(|| ext.as_deref().filter(|e| XML_EXTENSIONS.contains(e)).and_then(|_| ss.find_syntax_by_name("XML")))
+        .or_else(|| {
+            let ext = ext.as_deref()?;
+            EXTENSION_ALIASES.iter().find(|(e, _)| *e == ext).and_then(|(_, s)| ss.find_syntax_by_name(s))
+        })
         .or_else(|| ss.find_syntax_by_first_line(first_line))
         .filter(|s| s.name != "Plain Text")
 }
@@ -227,6 +234,12 @@ mod tests {
         assert_eq!(name("default", "[settings]").as_deref(), Some("Conan"));
         assert_eq!(name("conan.lock", "{").as_deref(), Some("JSON"));
         assert_eq!(name("conanfile.py", "").as_deref(), Some("Python"));
+        assert_eq!(name("stubs/os.pyi", "").as_deref(), Some("Python"));
+        assert_eq!(name("run", "#!/usr/bin/env python3").as_deref(), Some("Python"));
+        for p in ["Shop/Cart.pm", "build.pl", "t/basic.t", "app.psgi"] {
+            assert_eq!(name(p, "").as_deref(), Some("Perl"), "{p}");
+        }
+        assert_eq!(name("tool", "#!/usr/bin/perl -w").as_deref(), Some("Perl"));
     }
 
     #[test]

@@ -31,7 +31,9 @@ mod notebook;
 mod office;
 mod onnx;
 mod parquet;
+mod perl;
 mod pretty;
+mod python;
 mod rst;
 mod safetensors;
 mod sqlite;
@@ -142,6 +144,10 @@ pub enum View {
     ConanGraph,
     /// conanfile.txt, profiles, conaninfo.txt: sections sorted, comments and spacing dropped.
     NormalizedConan,
+    /// Python: imports, assignments, classes and functions with a checksum of each body.
+    PythonOutline,
+    /// Perl: per package the modules used, variables and subs with a checksum of each body.
+    PerlOutline,
 }
 
 impl View {
@@ -194,6 +200,7 @@ impl View {
             View::TemplateOutline => "Template outline",
             View::ConanGraph => "Conan graph",
             View::NormalizedConan => "Normalized",
+            View::PythonOutline | View::PerlOutline => "Code outline",
         }
     }
 }
@@ -254,6 +261,8 @@ enum Kind {
     /// conanfile.txt, a profile, conaninfo.txt or conanbuildinfo.txt.
     ConanIni,
     ConanManifest,
+    Python,
+    Perl,
 }
 
 fn extension(name: &str) -> String {
@@ -367,6 +376,9 @@ fn kind_of(name: &str, data: &[u8]) -> Kind {
     if lockfile::format_of(name).is_some() {
         return Kind::Lockfile;
     }
+    if let Some(kind) = script_kind(&ext, data) {
+        return kind;
+    }
     if conan::is_graph_json(name, data) {
         return Kind::ConanGraph;
     }
@@ -457,11 +469,27 @@ pub fn views_for(name: &str, data: &[u8]) -> Vec<View> {
         Kind::NeedsJson => vec![View::Needs, View::PrettyJson, View::Text],
         Kind::Ftl => vec![View::Text, View::TemplateOutline],
         Kind::ConanGraph => vec![View::ConanGraph, View::PrettyJson, View::Text],
+        Kind::Python => vec![View::Text, View::PythonOutline],
+        Kind::Perl => vec![View::Text, View::PerlOutline],
         Kind::ConanIni => vec![View::Text, View::NormalizedConan],
         Kind::ConanManifest => vec![View::Text],
     };
     views.push(View::Hex);
     views
+}
+
+/// Python and Perl by extension, `.t` tests and scripts without one by their first line.
+fn script_kind(ext: &str, data: &[u8]) -> Option<Kind> {
+    let first = data.split(|&b| b == b'\n').next().unwrap_or_default();
+    let shebang = |lang: &[u8]| first.starts_with(b"#!") && first.windows(lang.len()).any(|w| w == lang);
+    match ext {
+        "py" | "pyi" | "pyw" => Some(Kind::Python),
+        "pl" | "pm" | "psgi" => Some(Kind::Perl),
+        "t" if shebang(b"perl") || data.windows(4).take(4096).any(|w| w == b"use ") => Some(Kind::Perl),
+        "" if shebang(b"python") => Some(Kind::Python),
+        "" if shebang(b"perl") => Some(Kind::Perl),
+        _ => None,
+    }
 }
 
 /// Views for a pair of files (either side may be missing): those both support, in
@@ -537,6 +565,8 @@ pub fn render(view: View, name: &str, data: &[u8]) -> Result<String> {
         View::Needs => Ok(needs::render_rst(&text::decode(data).text)),
         View::TemplateOutline => Ok(ftl::outline(&text::decode(data).text)),
         View::ConanGraph => conan::graph(data),
+        View::PythonOutline => Ok(python::outline(&text::decode(data).text)),
+        View::PerlOutline => Ok(perl::outline(&text::decode(data).text)),
         View::NormalizedConan => Ok(conan::normalized(&text::decode(data).text)),
     }
 }
@@ -553,6 +583,13 @@ pub fn has_content_rule(name: &str) -> bool {
         || matches!(
             extension(name).as_str(),
             "a2l"
+                | "py"
+                | "pyi"
+                | "pyw"
+                | "pl"
+                | "pm"
+                | "t"
+                | "psgi"
                 | "ftl"
                 | "ftlh"
                 | "ftlx"
@@ -689,6 +726,14 @@ pub fn content_equal(name: &str, left: &[u8], right: &[u8]) -> Option<&'static s
             }
             return needs::same_rst_needs(&l, &r)
                 .then_some("same needs, only their order or the text around them differ");
+        }
+        Kind::Python => {
+            let (l, r) = (text::decode(left).text, text::decode(right).text);
+            return python::same_code(&l, &r).then_some("same code, only comments or formatting differ");
+        }
+        Kind::Perl => {
+            let (l, r) = (text::decode(left).text, text::decode(right).text);
+            return perl::same_code(&l, &r).then_some("same code, only comments, POD or formatting differ");
         }
         Kind::ConanGraph => {
             return conan::same_graph(left, right)?
@@ -1007,5 +1052,49 @@ mod tests {
             content_equal("conanmanifest.txt", b"1\na: 1\n", b"2\na: 1\n"),
             Some("same files and checksums, only the time differs")
         );
+    }
+
+    #[test]
+    fn python_and_perl_source() {
+        let fixture =
+            |f: &str| std::fs::read(format!("{}/tests/fixtures/source/{f}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        // Python: Black's reformatting is the same code, a change is not.
+        let (py, black, py2) =
+            (fixture("inventory-v1.py"), fixture("inventory-v1-black.py"), fixture("inventory-v2.py"));
+        assert_eq!(views_for("shop/inventory.py", &py), vec![View::Text, View::PythonOutline, View::Hex]);
+        assert_eq!(content_equal("inventory.py", &py, &black), Some("same code, only comments or formatting differ"));
+        assert_eq!(content_equal("inventory.py", &py, &py2), None);
+        let (o1, o2) = (
+            render(View::PythonOutline, "inventory.py", &py).unwrap(),
+            render(View::PythonOutline, "inventory.py", &black).unwrap(),
+        );
+        assert_eq!(o1, o2, "the outline does not change with formatting");
+        assert!(o1.contains("\nclass Inventory(object):\n    \"All items, by SKU.\"  # docstring "), "{o1}");
+        assert!(o1.contains("\n    def low_stock(self, counts, limit=LOW_STOCK):  # code "), "{o1}");
+        let changed = render(View::PythonOutline, "inventory.py", &py2).unwrap();
+        assert!(
+            changed.contains("\n    def total(self, counts, currency=\"EUR\"):  # code ")
+                && changed.contains("\n    def remove(self, sku):  # code "),
+            "{changed}"
+        );
+        assert!(changed.contains("\nLOW_STOCK = 3\n"), "{changed}");
+
+        // Perl: comments, POD and layout do not count.
+        let (pm, tidy, pm2) = (fixture("Cart-v1.pm"), fixture("Cart-v1-tidy.pm"), fixture("Cart-v2.pm"));
+        assert_eq!(views_for("lib/Shop/Cart.pm", &pm), vec![View::Text, View::PerlOutline, View::Hex]);
+        assert_eq!(content_equal("Cart.pm", &pm, &tidy), Some("same code, only comments, POD or formatting differ"));
+        assert_eq!(content_equal("Cart.pm", &pm, &pm2), None);
+        let (p1, p2) =
+            (render(View::PerlOutline, "Cart.pm", &pm).unwrap(), render(View::PerlOutline, "Cart.pm", &tidy).unwrap());
+        assert_eq!(p1, p2);
+        assert!(p1.starts_with("package Shop::Cart;\nuse Carp qw(croak);\nuse List::Util qw(sum0);\nuse strict;\nuse warnings;\nour $VERSION = '1.02';\nuse constant TAX => 0.19;\n"), "{p1}");
+        assert!(p1.contains("\nsub add  # code ") && p1.contains("\n# data "), "{p1}");
+        assert!(render(View::PerlOutline, "Cart.pm", &pm2).unwrap().contains("\nsub clear  # code "));
+
+        // Scripts by their first line; `.t` tests.
+        assert_eq!(views_for("bin/tool", b"#!/usr/bin/env python3\nprint(1)\n")[1], View::PythonOutline);
+        assert_eq!(views_for("bin/tool", b"#!/usr/bin/perl -w\nprint 1;\n")[1], View::PerlOutline);
+        assert_eq!(views_for("t/basic.t", b"use Test::More;\nok(1);\n")[1], View::PerlOutline);
+        assert!(has_content_rule("x.py") && has_content_rule("Cart.pm") && has_content_rule("run.pl"));
     }
 }
