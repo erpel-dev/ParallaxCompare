@@ -2,8 +2,12 @@
   import { onMount, tick } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { ask } from "@tauri-apps/plugin-dialog";
-  import { api, defaultCompareOptions, type CompareResult, type Node, type OpResult, type PathsChanged, type SessionInfo, type Side } from "./api";
+  import { api, defaultCompareOptions, sourceText, type CompareResult, type Node, type OpResult, type PathsChanged, type SessionInfo, type Side } from "./api";
+  import type { Command } from "./commands";
+  import Dropdown from "./Dropdown.svelte";
+  import Menu, { type MenuItem } from "./Menu.svelte";
   import Nav, { type NavActions } from "./Nav.svelte";
+  import { notify } from "./toast.svelte";
   import PathBar, { type SideEdit } from "./PathBar.svelte";
   import { formatSize, formatTime } from "./format";
   import {
@@ -276,6 +280,15 @@
         if (row) activate(row.path, row.container);
         e.preventDefault();
         return;
+      case "ContextMenu":
+      case "F10":
+        if (e.key === "F10" && !e.shiftKey) return;
+        if (row && viewport) {
+          const r = viewport.getBoundingClientRect();
+          rowMenu(row.path, r.left + 40, r.top + selectedIndex * ROW - viewport.scrollTop + ROW);
+        }
+        e.preventDefault();
+        return;
       case "Delete":
         if (canDelete[1] && !canDelete[0]) remove(false);
         else if (canDelete[0] && !canDelete[1]) remove(true);
@@ -439,6 +452,123 @@
     flushChanges();
   }
 
+  let pathbars = $state<PathBar[]>([]);
+  let menu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  const optionsChanged = $derived.by(() => {
+    const d = defaultCompareOptions();
+    return (
+      options.mode !== d.mode ||
+      options.ignoreLineEndings !== d.ignoreLineEndings ||
+      options.compareContents !== d.compareContents ||
+      options.excludes.join("\n") !== d.excludes.join("\n")
+    );
+  });
+
+  /** Opens, reveals or copies the path of one side of a row. */
+  async function onSide(path: string, left: boolean, action: "open" | "reveal" | "copy") {
+    try {
+      const spec = await api.sideSource(session.id, left, path);
+      if (action === "copy") {
+        await navigator.clipboard.writeText(sourceText(spec));
+        notify("Path copied", "info");
+      } else {
+        await api.openSource(spec, action === "reveal");
+      }
+    } catch (e) {
+      notify(String(e));
+    }
+  }
+
+  /** The context menu for the row at `path`: it acts on the selection, like the toolbar. */
+  function rowMenu(path: string, x: number, y: number) {
+    if (!selection.has(path)) selectOnly(path);
+    const row = rows.find((r) => r.path === path);
+    if (!row) return;
+    const many = selection.size > 1 ? ` ${selection.size} items` : "";
+    const items: MenuItem[] = [
+      row.container
+        ? { label: row.expanded ? "Collapse" : "Expand", keys: row.expanded ? "←" : "→", run: () => toggle(path) }
+        : { label: "Open comparison", keys: "Enter", run: () => onOpenFile(path) },
+    ];
+    if (pair && onCompareRows) {
+      const [a, b] = pair;
+      items.push({ label: "Compare these two", run: () => onCompareRows(a, b) });
+    }
+    items.push(
+      "separator",
+      { label: `Copy${many} to the right`, disabled: !canCopy[1] || !!op, run: () => copy(true) },
+      { label: `Copy${many} to the left`, disabled: !canCopy[0] || !!op, run: () => copy(false) },
+      { label: `Delete${many} on the left`, disabled: !canDelete[0] || !!op, run: () => remove(true) },
+      { label: `Delete${many} on the right`, disabled: !canDelete[1] || !!op, run: () => remove(false) },
+    );
+    for (const [left, side, name] of [[true, row.node.left, "left"], [false, row.node.right, "right"]] as const) {
+      if (!side) continue;
+      items.push(
+        "separator",
+        { label: `Open ${name} in default app`, run: () => onSide(path, left, "open") },
+        { label: `Show ${name} in file manager`, run: () => onSide(path, left, "reveal") },
+        { label: `Copy ${name} path`, run: () => onSide(path, left, "copy") },
+      );
+    }
+    menu = { x, y, items };
+  }
+
+  /** What this view offers in the command palette. */
+  export function commands(): Command[] {
+    const group = "Folder";
+    const filters = [["all", "All"], ["diffs", "Differences"], ["same", "Same"], ["orphans", "Only on one side"]] as const;
+    return [
+      { group, title: "Compare again", keys: "F5", enabled: !running, run: () => run(true) },
+      { group, title: "Swap left and right", run: onSwap },
+      {
+        group,
+        title: "Compare the two selected rows",
+        enabled: !!pair && !!onCompareRows,
+        run: () => pair && onCompareRows?.(pair[0], pair[1]),
+      },
+      ...filters.map(([id, label]) => ({
+        group,
+        title: `Show: ${label}`,
+        run: () => {
+          filter = id;
+          version++;
+        },
+      })),
+      { group, title: "Expand all folders", run: () => setAll(true) },
+      { group, title: "Collapse all folders", run: () => setAll(false) },
+      { group, title: "Copy selection to the right", enabled: canCopy[1] && !op, run: () => copy(true) },
+      { group, title: "Copy selection to the left", enabled: canCopy[0] && !op, run: () => copy(false) },
+      { group, title: "Delete selection on the left", enabled: canDelete[0] && !op, run: () => remove(true) },
+      { group, title: "Delete selection on the right", enabled: canDelete[1] && !op, run: () => remove(false) },
+      { group, title: "Select all rows", keys: "Ctrl+A", run: () => (selection = new Set(rows.map((r) => r.path))) },
+      {
+        group,
+        title: options.mode === "content" ? "Compare by size and date (faster)" : "Compare by content",
+        run: () => {
+          options.mode = options.mode === "content" ? "quick" : "content";
+          run();
+        },
+      },
+      {
+        group,
+        title: `${options.ignoreLineEndings ? "Stop ignoring" : "Ignore"} CRLF/LF differences`,
+        run: () => {
+          options.ignoreLineEndings = !options.ignoreLineEndings;
+          run();
+        },
+      },
+      {
+        group,
+        title: `${options.compareContents ? "Stop marking" : "Mark"} documents and images with equal content as similar`,
+        run: () => {
+          options.compareContents = !options.compareContents;
+          run();
+        },
+      },
+      ...pathbars.flatMap((bar) => bar?.commands() ?? []),
+    ];
+  }
+
   const canCopy = $derived.by(() => {
     void version;
     return [session.left.writable && present(false).length > 0, session.right.writable && present(true).length > 0];
@@ -488,29 +618,36 @@
     <button disabled={!canCopy[0] || !!op} onclick={() => copy(false)} title="Copy the selection to the left side">← Copy</button>
     <button disabled={!canDelete[0] || !!op} onclick={() => remove(true)} title="Delete the selection on the left side">Delete ◀</button>
     <button disabled={!canDelete[1] || !!op} onclick={() => remove(false)} title="Delete the selection on the right side">Delete ▶</button>
-    <span class="sep"></span>
-    <select bind:value={options.mode} onchange={() => run()} title="Compare rule">
-      <option value="content">Content</option>
-      <option value="quick">Size &amp; date</option>
-    </select>
-    <label class="check"><input type="checkbox" bind:checked={options.ignoreLineEndings} onchange={() => run()} /> Ignore CRLF/LF</label>
-    <label class="check" title="Documents (PDF, Word, Excel, PowerPoint, OpenDocument) with the same text and images with the same pixels are marked ≈ instead of ≠">
-      <input type="checkbox" bind:checked={options.compareContents} onchange={() => run()} /> By content
-    </label>
-    <input
-      type="text"
-      class="excludes mono"
-      bind:value={excludesText}
-      onkeydown={(e) => e.key === "Enter" && applyExcludes()}
-      onblur={applyExcludes}
-      title="Excluded names or paths (globs, comma separated)"
-      placeholder="Exclude: *.o, build/**"
-    />
+    <span class="grow"></span>
+    <Dropdown label="Options" title="Compare rule, line endings, excluded files" changed={optionsChanged}>
+      <div class="field">
+        <span>Compare by</span>
+        <select bind:value={options.mode} onchange={() => run()}>
+          <option value="content">Content</option>
+          <option value="quick">Size &amp; date (faster)</option>
+        </select>
+      </div>
+      <label><input type="checkbox" bind:checked={options.ignoreLineEndings} onchange={() => run()} /> Ignore CRLF/LF differences</label>
+      <label title="Documents (PDF, Word, Excel, PowerPoint, OpenDocument) with the same text and images with the same pixels are marked ≈ instead of ≠">
+        <input type="checkbox" bind:checked={options.compareContents} onchange={() => run()} /> Equal content counts as similar (≈)
+      </label>
+      <div class="field">
+        <span>Exclude (globs, comma separated)</span>
+        <input
+          type="text"
+          class="mono"
+          bind:value={excludesText}
+          onkeydown={(e) => e.key === "Enter" && applyExcludes()}
+          onblur={applyExcludes}
+          placeholder="*.o, build/**"
+        />
+      </div>
+    </Dropdown>
   </div>
 
   <div class="pathbars">
-    <PathBar info={session.left} edit={edit?.[0]} title="Left" />
-    <PathBar info={session.right} edit={edit?.[1]} title="Right" />
+    <PathBar bind:this={pathbars[0]} info={session.left} edit={edit?.[0]} title="Left" />
+    <PathBar bind:this={pathbars[1]} info={session.right} edit={edit?.[1]} title="Right" />
   </div>
 
   <div class="head">
@@ -546,6 +683,10 @@
             tabindex="-1"
             onclick={(e) => click(e, row.path)}
             ondblclick={() => activate(row.path, row.container)}
+            oncontextmenu={(e) => {
+              e.preventDefault();
+              rowMenu(row.path, e.clientX, e.clientY);
+            }}
             title={row.node.message ?? ""}
           >
             {#each [row.node.left, row.node.right] as side, i (i)}
@@ -599,6 +740,9 @@
     {#if targets.length > 1}<span>{targets.length} selected</span>{/if}
     {#if error}<span class="c-err" title={error}>{error}</span>{/if}
   </div>
+  {#if menu}
+    <Menu items={menu.items} x={menu.x} y={menu.y} onClose={() => (menu = null)} />
+  {/if}
 </div>
 
 <style>
@@ -623,8 +767,8 @@
     align-items: center;
     margin: 0 4px;
   }
-  .excludes {
-    width: 130px;
+  .grow {
+    flex: 1;
   }
   .pathbars,
   .head {

@@ -7,9 +7,13 @@
   import NewCompare from "./lib/NewCompare.svelte";
   import type { SideEdit } from "./lib/PathBar.svelte";
   import TextView from "./lib/TextView.svelte";
-  import { api, sourceText, type SessionInfo, type SourceOptions, type SourceSpec } from "./lib/api";
+  import { api, sourceName, sourceText, type SessionInfo, type SourceOptions, type SourceSpec } from "./lib/api";
   import type { NavActions } from "./lib/Nav.svelte";
-  import { rememberPaths } from "./lib/recent";
+  import type { Command } from "./lib/commands";
+  import Palette from "./lib/Palette.svelte";
+  import { recentComparisons, rememberComparison, rememberPaths } from "./lib/recent";
+  import { clearErrors, notify } from "./lib/toast.svelte";
+  import Toasts from "./lib/Toasts.svelte";
   import type { RowSide } from "./lib/tree";
   import { baseName } from "./lib/format";
 
@@ -50,7 +54,9 @@
   let active = $state(0);
   let nextKey = 1;
   let revealCount = 0;
-  let error = $state("");
+  let paletteOpen = $state(false);
+  /** The views of the comparison tabs, for their commands. */
+  let views: Record<number, { commands(): Command[] }> = $state({});
   /** The new-comparison forms, by tab, to fill in dropped paths. */
   let pickers: Record<number, NewCompare> = $state({});
   /** Files being dragged over the window, and the side they would replace. */
@@ -71,14 +77,8 @@
     return `${side(session.left)} ↔ ${side(session.right)}`;
   }
 
-  /** The last part of a source: a file or folder name, or a Git revision. */
-  function nameOf(spec: SourceSpec): string {
-    if (spec.type === "gitRev" && !spec.subpath) return spec.rev;
-    return sourceText(spec).replace(/[\\/]+$/, "").split(/[\\/:!]/).pop() ?? "";
-  }
-
-  function describe(r: Request): string {
-    return `${nameOf(r.left)} ↔ ${nameOf(r.right)}`;
+  function describe(r: Pick<Request, "left" | "right">): string {
+    return `${sourceName(r.left)} ↔ ${sourceName(r.right)}`;
   }
 
   function sessionTab(session: SessionInfo, request: Request, shared: Shared = {}): SessionTab {
@@ -102,10 +102,11 @@
 
   function remember(request: Request) {
     rememberPaths(sourceText(request.left), sourceText(request.right));
+    rememberComparison($state.snapshot(request));
+    clearErrors();
   }
 
   async function start(request: Request, replaceKey?: number) {
-    error = "";
     try {
       const session = await api.openSession(request.left, request.right, request.options, request.mergeBase);
       const tab = sessionTab(session, request);
@@ -115,7 +116,7 @@
       active = tab.key;
       remember(request);
     } catch (e) {
-      error = String(e);
+      notify(String(e));
     }
   }
 
@@ -160,12 +161,11 @@
   ): Promise<boolean> {
     const current = await requestOf(tab).catch(() => null);
     if (!(await confirmDiscard(unsaved(tab)))) return false;
-    error = "";
     let session: SessionInfo;
     try {
       session = await api.openSession(request.left, request.right, request.options, request.mergeBase);
     } catch (e) {
-      error = String(e);
+      notify(String(e));
       return false;
     }
     if (!tabs.some((t) => t.key === tab.key)) {
@@ -197,7 +197,7 @@
     try {
       request = await requestOf(tab, changes);
     } catch (e) {
-      error = String(e);
+      notify(String(e));
       return false;
     }
     return replace(tab, request);
@@ -222,7 +222,7 @@
       const r = await requestOf(tab);
       await replace(tab, { ...r, left: r.right, right: r.left });
     } catch (e) {
-      error = String(e);
+      notify(String(e));
     }
   }
 
@@ -233,7 +233,7 @@
       parent.reveal = { path: tab.path, n: ++revealCount };
       active = parent.key;
     } else if (tab.up) {
-      replace(tab, tab.up, "new", tab.request ? nameOf(tab.request.left) : undefined);
+      replace(tab, tab.up, "new", tab.request ? sourceName(tab.request.left) : undefined);
     }
   }
 
@@ -264,7 +264,7 @@
       ]);
       await start({ left, right, options: tab.request.options, mergeBase: false });
     } catch (e) {
-      error = String(e);
+      notify(String(e));
     }
   }
 
@@ -339,14 +339,58 @@
     else await changeSides(tab, { [side]: spec(paths[0]) });
   }
 
-  function onKey(e: KeyboardEvent) {
-    if ((e.ctrlKey || e.metaKey) && e.key === "w") {
-      close(active);
-      e.preventDefault();
-    } else if ((e.ctrlKey || e.metaKey) && e.key === "t") {
-      newTab();
-      e.preventDefault();
+  function cycle(step: number) {
+    const index = tabs.findIndex((t) => t.key === active);
+    active = tabs[(index + step + tabs.length) % tabs.length].key;
+  }
+
+  /** The app's own commands, then the current tab's. */
+  function appCommands(): Command[] {
+    const group = "App";
+    const list: Command[] = [
+      { group, title: "New comparison", keys: "Ctrl+T", run: newTab },
+      { group, title: "Close tab", keys: "Ctrl+W", run: () => close(active) },
+      { group, title: "Next tab", keys: "Ctrl+Tab", enabled: tabs.length > 1, run: () => cycle(1) },
+      { group, title: "Previous tab", keys: "Ctrl+Shift+Tab", enabled: tabs.length > 1, run: () => cycle(-1) },
+    ];
+    const tab = tabs.find((t) => t.key === active);
+    if (tab && tab.kind !== "new") {
+      const nav = navFor(tab);
+      list.push(
+        { group: "Navigate", title: nav.back ? nav.backTitle : "Back", keys: "Mouse back", enabled: !!nav.back, run: () => nav.back?.() },
+        { group: "Navigate", title: nav.forward ? nav.forwardTitle : "Forward", enabled: !!nav.forward, run: () => nav.forward?.() },
+        { group: "Navigate", title: nav.up ? nav.upTitle : "Up one level", enabled: !!nav.up, run: () => nav.up?.() },
+      );
     }
+    for (const t of tabs) {
+      if (t.key !== active) list.push({ group: "Go to tab", title: t.title, run: () => (active = t.key) });
+    }
+    for (const c of recentComparisons()) {
+      list.push({
+        group: c.pinned ? "Pinned" : "Recent",
+        title: describe(c) === `${sourceText(c.left)} ↔ ${sourceText(c.right)}`
+          ? describe(c)
+          : `${describe(c)}  ·  ${sourceText(c.left)} ↔ ${sourceText(c.right)}`,
+        run: () => start({ left: c.left, right: c.right, options: c.options, mergeBase: c.mergeBase }),
+      });
+    }
+    return list;
+  }
+
+  function allCommands(): Command[] {
+    return [...(views[active]?.commands() ?? []), ...appCommands()];
+  }
+
+  function onKey(e: KeyboardEvent) {
+    const mod = e.ctrlKey || e.metaKey;
+    const key = e.key.toLowerCase();
+    if (mod && key === "w") close(active);
+    else if (mod && key === "t") newTab();
+    else if ((mod && e.shiftKey && key === "p") || (mod && !e.shiftKey && key === "k") || e.key === "F1") {
+      paletteOpen = !paletteOpen;
+    } else if (e.ctrlKey && e.key === "Tab") cycle(e.shiftKey ? -1 : 1);
+    else return;
+    e.preventDefault();
   }
 
   onMount(async () => {
@@ -396,13 +440,6 @@
     <button class="add" onclick={newTab} title="New comparison (Ctrl+T)">＋</button>
   </nav>
 
-  {#if error}
-    <div class="error">
-      {error}
-      <button onclick={() => (error = "")}>Dismiss</button>
-    </div>
-  {/if}
-
   <main bind:this={mainEl}>
     {#each tabs as tab (tab.key)}
       <section class="page" hidden={tab.key !== active}>
@@ -413,6 +450,7 @@
           />
         {:else if tab.kind === "folder"}
           <FolderView
+            bind:this={views[tab.key]}
             session={tab.session}
             onOpenFile={(p) => openFile(tab.session, p)}
             onSwap={() => swap(tab)}
@@ -423,6 +461,7 @@
           />
         {:else}
           <TextView
+            bind:this={views[tab.key]}
             session={tab.session}
             path={tab.path}
             onDirty={(d) => (tab.dirty = d)}
@@ -440,6 +479,11 @@
     {/if}
   </main>
 </div>
+
+{#if paletteOpen}
+  <Palette commands={allCommands()} onClose={() => (paletteOpen = false)} />
+{/if}
+<Toasts />
 
 <style>
   .app {
@@ -492,16 +536,6 @@
     background: none;
     border: none;
     color: var(--dim);
-  }
-  .error {
-    display: flex;
-    gap: 12px;
-    align-items: center;
-    justify-content: space-between;
-    padding: 6px 12px;
-    background: var(--row-changed);
-    color: var(--text);
-    border-bottom: 1px solid var(--line);
   }
   main {
     flex: 1;

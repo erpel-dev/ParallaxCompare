@@ -16,9 +16,11 @@
   import { tick } from "svelte";
   import { open } from "@tauri-apps/plugin-dialog";
   import { api, sourceText, type FileHistory, type SourceInfo } from "./api";
+  import type { Command } from "./commands";
   import { formatTime } from "./format";
   import PathInput from "./PathInput.svelte";
   import SidePicker, { toSpec, type PickerValue } from "./SidePicker.svelte";
+  import { notify } from "./toast.svelte";
 
   let {
     info,
@@ -172,6 +174,7 @@
     try {
       await navigator.clipboard.writeText(sourceText(menuSpec!));
       menu = false;
+      notify("Path copied", "info");
     } catch (e) {
       menuError = String(e);
     }
@@ -198,6 +201,55 @@
   /** Closes the menu and popovers on a click elsewhere. */
   function outside(e: MouseEvent) {
     if ((menu || historyOpen) && bar && !bar.contains(e.target as Node)) menu = historyOpen = false;
+  }
+
+  /** Runs an action on the side as compared now; failures become a notice. */
+  async function act(action: (spec: SourceSpec) => Promise<unknown>) {
+    try {
+      await action(await current());
+    } catch (e) {
+      notify(String(e));
+    }
+  }
+
+  /** What this side offers in the command palette. */
+  export function commands(): Command[] {
+    if (!edit) return [];
+    const group = `${title} side`;
+    const list: Command[] = [
+      { group, title: "Edit path…", run: startEdit },
+      { group, title: info.kind === "gitRev" ? "Choose another revision…" : "Choose with the file dialog…", run: browse },
+      { group, title: "Change side: folder, file, Git ref or worktree…", run: () => openPicker() },
+    ];
+    if (edit.file) {
+      list.push({
+        group,
+        title: "Git history of this file…",
+        run: () => {
+          menuSpec = null;
+          showHistory();
+        },
+      });
+    }
+    list.push(
+      {
+        group,
+        title: "Open in default app",
+        enabled: info.kind !== "gitRev" && info.kind !== "archive",
+        run: () => act((s) => api.openSource(s, false)),
+      },
+      { group, title: "Show in file manager", enabled: info.kind !== "gitRev", run: () => act((s) => api.openSource(s, true)) },
+      {
+        group,
+        title: "Copy path",
+        run: () =>
+          act(async (s) => {
+            await navigator.clipboard.writeText(sourceText(s));
+            notify("Path copied", "info");
+          }),
+      },
+    );
+    return list;
   }
 
   async function submitPicker(e: SubmitEvent) {

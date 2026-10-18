@@ -675,7 +675,8 @@ fn invisible_difference(left: &TextDoc, right: &TextDoc, l: &[u8], r: &[u8], min
         reasons.push("newline at end of file".to_string());
     }
     if minor > 0 {
-        reasons.push(format!("{minor} lines with whitespace or case differences that the current rules ignore"));
+        let lines = if minor == 1 { "line" } else { "lines" };
+        reasons.push(format!("{minor} {lines} with whitespace or case differences that the current rules ignore"));
     }
     if reasons.is_empty() {
         "The files differ in bytes that the text view does not show.".into()

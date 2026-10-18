@@ -1,6 +1,13 @@
 <script lang="ts">
   import SidePicker, { toSpec, type PickerValue } from "./SidePicker.svelte";
-  import { api, type SourceOptions, type SourceSpec } from "./api";
+  import { api, sourceName, sourceText, type SourceOptions, type SourceSpec } from "./api";
+  import {
+    comparisonKey,
+    forgetComparison,
+    pinComparison,
+    recentComparisons,
+    type SavedComparison,
+  } from "./recent";
 
   let {
     onCompare,
@@ -41,6 +48,46 @@
   async function picked(path: string, was: PickerValue): Promise<PickerValue> {
     const info = await api.inspectPath(path).catch(() => null);
     return { ...was, kind: info && !info.isDir ? "file" : "folder", path, rev: "", subpath: "" };
+  }
+
+  let recent = $state(recentComparisons());
+
+  function ago(ms: number): string {
+    const s = Math.max(0, (Date.now() - ms) / 1000);
+    if (s < 60) return "just now";
+    if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+    if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+    const days = Math.floor(s / 86400);
+    return days === 1 ? "yesterday" : `${days} days ago`;
+  }
+
+  async function pickerFor(spec: SourceSpec): Promise<PickerValue> {
+    switch (spec.type) {
+      case "gitRev":
+        return { kind: "gitRev", path: spec.repo, rev: spec.rev, subpath: spec.subpath ?? "" };
+      case "gitWorktree":
+        return { kind: "gitWorktree", path: spec.repo, rev: "", subpath: "" };
+      case "local":
+        return picked(spec.path, left);
+    }
+  }
+
+  /** Puts a recent comparison into the form, to change it before comparing. */
+  async function edit(c: SavedComparison) {
+    left = await pickerFor(c.left);
+    right = await pickerFor(c.right);
+    options = { ...c.options };
+    mergeBase = c.mergeBase;
+  }
+
+  function pin(c: SavedComparison) {
+    pinComparison(comparisonKey(c), !c.pinned);
+    recent = recentComparisons();
+  }
+
+  function forget(c: SavedComparison) {
+    forgetComparison(comparisonKey(c));
+    recent = recentComparisons();
   }
 
   /** Fills in dropped paths; with both sides given, compares right away. */
@@ -89,6 +136,28 @@
       <button type="submit" class="primary" disabled={!ready}>Compare</button>
     </footer>
   </form>
+
+  {#if recent.length}
+    <section class="recent" aria-label="Recent comparisons">
+      <header>Recent comparisons</header>
+      {#each recent as c (comparisonKey(c))}
+        <div class="entry">
+          <button
+            class="open"
+            onclick={() => onCompare(c.left, c.right, { ...c.options }, c.mergeBase)}
+            title="Compare again with the same options"
+          >
+            <span class="names">{sourceName(c.left)} ↔ {sourceName(c.right)}{c.mergeBase ? " (merge-base)" : ""}</span>
+            <span class="paths mono">{sourceText(c.left)}  ↔  {sourceText(c.right)}</span>
+          </button>
+          <span class="when">{c.pinned ? "pinned" : ago(c.used)}</span>
+          <button class="icon" class:pinned={c.pinned} onclick={() => pin(c)} title={c.pinned ? "Unpin" : "Pin: keep at the top"}>{c.pinned ? "★" : "☆"}</button>
+          <button class="icon" onclick={() => edit(c)} title="Put into the form above to change it">✎</button>
+          <button class="icon" onclick={() => forget(c)} title="Remove from the list">✕</button>
+        </div>
+      {/each}
+    </section>
+  {/if}
 </div>
 
 <style>
@@ -148,6 +217,75 @@
     background: var(--input);
     padding: 1px 4px;
     border-radius: 3px;
+  }
+  .recent {
+    max-width: 980px;
+    margin: 20px auto 0;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .recent header {
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--line);
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--dim);
+  }
+  .entry {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px 2px 4px;
+    border-bottom: 1px solid var(--line);
+  }
+  .entry:last-child {
+    border-bottom: none;
+  }
+  .entry:hover {
+    background: var(--panel-2);
+  }
+  .open {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1px;
+    border: none;
+    background: none;
+    text-align: left;
+    padding: 5px 10px;
+  }
+  .names {
+    font-weight: 600;
+  }
+  .paths {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: pre;
+    font-size: 11px;
+    color: var(--dim);
+  }
+  .when {
+    flex: none;
+    font-size: 11px;
+    color: var(--dim);
+    margin-right: 6px;
+  }
+  .icon {
+    flex: none;
+    border: none;
+    background: none;
+    color: var(--dim);
+    padding: 2px 6px;
+  }
+  .icon:hover,
+  .icon.pinned {
+    color: var(--accent);
   }
   @media (max-width: 760px) {
     .sides {

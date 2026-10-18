@@ -19,6 +19,8 @@
     type View,
   } from "./api";
   import ImagePanel from "./ImagePanel.svelte";
+  import type { Command } from "./commands";
+  import Dropdown from "./Dropdown.svelte";
   import Nav, { type NavActions } from "./Nav.svelte";
   import PathBar, { type SideEdit } from "./PathBar.svelte";
   import { formatSize } from "./format";
@@ -463,6 +465,82 @@
   }
 
   /** Whitespace, case and grammar changes keep the edits. */
+  let pathbars = $state<PathBar[]>([]);
+  const hasSyntax = $derived(
+    info?.view === "text" || info?.view === "prettyXml" || info?.view === "prettyJson" || info?.view === "chatTemplate",
+  );
+  const optionsChanged = $derived.by(() => {
+    const d = defaultDiffOptions();
+    return (
+      options.whitespace !== d.whitespace || options.ignoreCase !== d.ignoreCase || options.histogram !== d.histogram || !!syntaxOverride
+    );
+  });
+
+  /** What this view offers in the command palette. */
+  export function commands(): Command[] {
+    const group = "Text";
+    const text = !!info && info.view !== "image";
+    const list: Command[] = [
+      { group, title: "Previous difference", keys: "F7", enabled: text && !!info?.sections.length, run: () => next(-1) },
+      { group, title: "Next difference", keys: "F8", enabled: text && !!info?.sections.length, run: () => next(1) },
+      { group, title: "Find in both files", keys: "Ctrl+F", enabled: text, run: openFind },
+    ];
+    if (onSwap) list.push({ group, title: "Swap left and right", run: onSwap });
+    if (editable[0] || editable[1]) {
+      list.push(
+        { group, title: "Copy difference to the left", keys: "Alt+←", enabled: editable[0] && currentSection >= 0, run: () => copySection(currentSection, 0) },
+        { group, title: "Copy difference to the right", keys: "Alt+→", enabled: editable[1] && currentSection >= 0, run: () => copySection(currentSection, 1) },
+        { group, title: "Undo", keys: "Ctrl+Z", enabled: canUndo, run: undo },
+        { group, title: "Redo", keys: "Ctrl+Y", enabled: canRedo, run: redo },
+        { group, title: "Save", keys: "Ctrl+S", enabled: anyDirty, run: save },
+      );
+    }
+    const ws = [["exact", "Whitespace: exact"], ["normalize", "Whitespace: ignore changes"], ["ignoreAll", "Whitespace: ignore all"]] as const;
+    for (const [id, title] of ws) {
+      list.push({
+        group,
+        title,
+        enabled: options.whitespace !== id,
+        run: () => {
+          options.whitespace = id;
+          settingsChanged();
+        },
+      });
+    }
+    list.push(
+      {
+        group,
+        title: options.ignoreCase ? "Match case" : "Ignore case",
+        run: () => {
+          options.ignoreCase = !options.ignoreCase;
+          settingsChanged();
+        },
+      },
+      {
+        group,
+        title: options.histogram ? "Use the Myers diff" : "Use the histogram diff",
+        run: () => {
+          options.histogram = !options.histogram;
+          settingsChanged();
+        },
+      },
+    );
+    for (const v of info?.views ?? []) {
+      if (v.id === view) continue;
+      list.push({
+        group,
+        title: `Show as: ${v.label}`,
+        enabled: !anyDirty,
+        run: () => {
+          view = v.id;
+          syntaxOverride = "";
+          load();
+        },
+      });
+    }
+    return [...list, ...pathbars.flatMap((bar) => bar?.commands() ?? [])];
+  }
+
   function settingsChanged() {
     if (!info || (!anyDirty && !canUndo)) {
       load(true);
@@ -751,23 +829,32 @@
     {/if}
     <span class="sep"></span>
     <button class:on={findOpen} onclick={() => (findOpen ? closeFind() : openFind())} disabled={!info} title="Find in both files (Ctrl+F)">Find</button>
-    <span class="sep"></span>
-    <select bind:value={options.whitespace} onchange={settingsChanged} title="Whitespace rule">
-      <option value="exact">Whitespace: exact</option>
-      <option value="normalize">Whitespace: ignore changes</option>
-      <option value="ignoreAll">Whitespace: ignore all</option>
-    </select>
-    <button class:on={options.ignoreCase} onclick={() => { options.ignoreCase = !options.ignoreCase; settingsChanged(); }}>Ignore case</button>
-    <button class:on={options.histogram} onclick={() => { options.histogram = !options.histogram; settingsChanged(); }} title="Histogram diff instead of Myers: can read better for moved code, slower on files with many repeated lines">Histogram</button>
-    {#if info?.view === "text" || info?.view === "prettyXml" || info?.view === "prettyJson" || info?.view === "chatTemplate"}
-    <span class="sep"></span>
-    <select bind:value={syntaxOverride} onchange={settingsChanged} title="Syntax highlighting">
-      <option value="">Syntax: auto{info?.syntax && !syntaxOverride ? ` (${info.syntax})` : ""}</option>
-      {#each syntaxNames as name (name)}
-        <option value={name}>{name}</option>
-      {/each}
-    </select>
-    {/if}
+    <span class="grow"></span>
+    <Dropdown label="Options" title="Whitespace, case, diff algorithm, syntax highlighting" changed={optionsChanged}>
+      <div class="field">
+        <span>Whitespace</span>
+        <select bind:value={options.whitespace} onchange={settingsChanged}>
+          <option value="exact">Exact</option>
+          <option value="normalize">Ignore changes in whitespace</option>
+          <option value="ignoreAll">Ignore all whitespace</option>
+        </select>
+      </div>
+      <label><input type="checkbox" bind:checked={options.ignoreCase} onchange={settingsChanged} /> Ignore case</label>
+      <label title="Can read better for moved code; slower on files with many repeated lines">
+        <input type="checkbox" bind:checked={options.histogram} onchange={settingsChanged} /> Histogram diff instead of Myers
+      </label>
+      {#if hasSyntax}
+        <div class="field">
+          <span>Syntax highlighting</span>
+          <select bind:value={syntaxOverride} onchange={settingsChanged}>
+            <option value="">Automatic{info?.syntax && !syntaxOverride ? ` (${info.syntax})` : ""}</option>
+            {#each syntaxNames as name (name)}
+              <option value={name}>{name}</option>
+            {/each}
+          </select>
+        </div>
+      {/if}
+    </Dropdown>
     {/if}
   </div>
 
@@ -799,8 +886,8 @@
   {/if}
 
   <div class="pathbars">
-    <PathBar info={session.left} suffix={path} modified={dirty[0]} edit={edit?.[0]} title="Left" />
-    <PathBar info={session.right} suffix={path} modified={dirty[1]} edit={edit?.[1]} title="Right" />
+    <PathBar bind:this={pathbars[0]} info={session.left} suffix={path} modified={dirty[0]} edit={edit?.[0]} title="Left" />
+    <PathBar bind:this={pathbars[1]} info={session.right} suffix={path} modified={dirty[1]} edit={edit?.[1]} title="Right" />
   </div>
   {#if info}
     <div class="meta">
@@ -822,7 +909,7 @@
     <div class="banner ok">The files are identical.</div>
   {:else if info && info.view !== "image" && !info.sections.length && !loading}
     <div class="banner ok">
-      No differences in this view{info.view !== "text" ? " — the files differ only in bytes this view does not show" : ""}{info.stats.minor ? ` (${info.stats.minor} lines differ only in ignored whitespace or case)` : ""}.
+      No differences in this view{info.view !== "text" ? " — the files differ only in bytes this view does not show" : ""}{info.stats.minor ? ` (${info.stats.minor} ${info.stats.minor === 1 ? "line differs" : "lines differ"} only in ignored whitespace or case)` : ""}.
     </div>
   {/if}
 
@@ -948,6 +1035,9 @@
     padding: 6px 8px;
     background: var(--panel);
     border-bottom: 1px solid var(--line);
+  }
+  .grow {
+    flex: 1;
   }
   .count {
     color: var(--dim);

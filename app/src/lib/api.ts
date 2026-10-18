@@ -25,6 +25,12 @@ export interface FileHistory {
   commits: (CommitInfo & { spec: SourceSpec })[];
 }
 
+/** The last part of a source: a file or folder name, or a Git revision. */
+export function sourceName(spec: SourceSpec): string {
+  if (spec.type === "gitRev" && !spec.subpath) return spec.rev;
+  return sourceText(spec).replace(/[\\/]+$/, "").split(/[\\/:!]/).pop() ?? "";
+}
+
 export interface SourceOptions {
   expandArchives: boolean;
   respectGitignore: boolean;
