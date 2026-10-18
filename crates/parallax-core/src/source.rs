@@ -343,7 +343,7 @@ mod tests {
     fn child_of_folder_archive_and_git() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("sub")).unwrap();
-        let zip = dir.path().join("sub/pack.zip");
+        let zip = dir.path().join("sub").join("pack.zip");
         let mut w = zip::ZipWriter::new(std::fs::File::create(&zip).unwrap());
         w.start_file("inner/a.txt", zip::write::SimpleFileOptions::default()).unwrap();
         std::io::Write::write_all(&mut w, b"hello").unwrap();
