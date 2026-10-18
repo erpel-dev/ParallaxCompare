@@ -198,6 +198,82 @@ pub async fn side_source(state: State<'_, AppState>, id: u64, left: bool, rel: S
     .await
 }
 
+/// Completions for a path being typed in a path field.
+#[tauri::command]
+pub async fn complete_path(text: String) -> CmdResult<Vec<String>> {
+    blocking(move || Ok(parallax_core::source::complete(&text, 40))).await
+}
+
+/// The folder containing a source, for comparing one level up.
+#[tauri::command]
+pub async fn source_parent(spec: SourceSpec) -> CmdResult<Option<SourceSpec>> {
+    blocking(move || Ok(spec.parent())).await
+}
+
+/// Opens a source with the system's default app, or with `reveal` shows it in the
+/// file manager (for a path inside an archive: the archive).
+#[tauri::command]
+pub async fn open_source(spec: SourceSpec, reveal: bool) -> CmdResult<()> {
+    blocking(move || {
+        if reveal {
+            let path =
+                spec.container_path().ok_or("only files and folders on disk can be shown in the file manager")?;
+            tauri_plugin_opener::reveal_item_in_dir(path).map_err(err)
+        } else {
+            let path = spec.disk_path().ok_or("only files and folders on disk can be opened in another app")?;
+            tauri_plugin_opener::open_path(path, None::<&str>).map_err(err)
+        }
+    })
+    .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileHistory {
+    /// The file in the working tree, when the repository has one.
+    worktree: Option<SourceSpec>,
+    /// Each commit that changed the file, newest first, with the file as of that commit.
+    commits: Vec<HistoryEntry>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryEntry {
+    #[serde(flatten)]
+    commit: parallax_core::vfs::git::CommitInfo,
+    spec: SourceSpec,
+}
+
+/// The commits that changed the file a source points to, starting from its
+/// revision (or HEAD for a file in the working tree).
+#[tauri::command]
+pub async fn file_history(spec: SourceSpec) -> CmdResult<FileHistory> {
+    blocking(move || {
+        let at = spec.git_location().map_err(err)?;
+        let git = GitRepo::discover(&at.repo).map_err(err)?;
+        // History of the branch or tag the side is on; for a commit picked from the
+        // history, or the working tree, of HEAD, so newer commits stay listed.
+        let refs = git.refs(0).map_err(err)?;
+        let named = |rev: &str| refs.branches.iter().chain(&refs.tags).chain(&refs.remotes).any(|r| r.name == rev);
+        let start = at.rev.as_deref().filter(|r| named(r)).unwrap_or("HEAD");
+        let commits = git.file_log(start, &at.path, 300, 50_000).map_err(err)?;
+        let worktree = git.workdir().map(|w| SourceSpec::Local { path: w.join(&at.path).display().to_string() });
+        let commits = commits
+            .into_iter()
+            .map(|commit| {
+                let spec = SourceSpec::GitRev {
+                    repo: at.repo.clone(),
+                    rev: commit.short_id.clone(),
+                    subpath: at.path.clone(),
+                };
+                HistoryEntry { commit, spec }
+            })
+            .collect();
+        Ok(FileHistory { worktree, commits })
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn git_refs(repo: String) -> CmdResult<RefList> {
     blocking(move || GitRepo::discover(&repo).and_then(|r| r.refs(40)).map_err(err)).await

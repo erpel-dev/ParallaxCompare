@@ -214,3 +214,24 @@ export function countFiles(root: Node): Counts {
   walk(root);
   return c;
 }
+
+/** One side of a row: the path, and whether it is the left side's entry. */
+export interface RowSide {
+  path: string;
+  left: boolean;
+}
+
+/**
+ * The two entries to compare when two rows are selected: preferably the first
+ * row's left entry with the second row's right one, so a file renamed between
+ * the sides (left only, right only) pairs up whichever order the rows are in.
+ * `null` when a file would be paired with a folder.
+ */
+export function pairRows(a: FlatRow, b: FlatRow): [RowSide, RowSide] | null {
+  const sides = (r: FlatRow) => [r.node.left && { path: r.path, left: true }, r.node.right && { path: r.path, left: false }];
+  const [al, ar] = sides(a);
+  const [bl, br] = sides(b);
+  const pair = (al && br ? [al, br] : bl && ar ? [bl, ar] : [al ?? ar, bl ?? br]) as [RowSide | null, RowSide | null];
+  if (!pair[0] || !pair[1] || a.container !== b.container) return null;
+  return pair as [RowSide, RowSide];
+}

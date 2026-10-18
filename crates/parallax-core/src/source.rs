@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::vfs::git::{GitRepo, GitTreeFs};
 use crate::vfs::local::LocalFs;
 use crate::vfs::mount::ArchiveMount;
-use crate::vfs::{Entry, EntryKind, Vfs, join, normalize};
+use crate::vfs::{Entry, EntryKind, Vfs, join, normalize, split_parent};
 use crate::{Error, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +58,8 @@ impl Default for SourceOptions {
 #[serde(rename_all = "camelCase")]
 pub enum SourceKind {
     Folder,
+    /// A single local file (not inside an archive).
+    File,
     Archive,
     GitRev,
     GitWorktree,
@@ -158,6 +160,77 @@ impl SourceSpec {
         })
     }
 
+    /// The folder containing this source, e.g. to compare one level up. `None` at
+    /// the top: a file system root, or the root of a Git revision or worktree.
+    pub fn parent(&self) -> Option<SourceSpec> {
+        match self {
+            SourceSpec::Local { path } => match path.split_once('!') {
+                Some((outer, inner)) => {
+                    let inner = normalize(inner)?;
+                    if inner.is_empty() {
+                        return local_parent(outer);
+                    }
+                    let (dir, _) = split_parent(&inner);
+                    let path = if dir.is_empty() { outer.to_string() } else { format!("{outer}!/{dir}") };
+                    Some(SourceSpec::Local { path })
+                }
+                None => local_parent(path),
+            },
+            SourceSpec::GitRev { repo, rev, subpath } => {
+                let subpath = normalize(subpath)?;
+                if subpath.is_empty() {
+                    return None;
+                }
+                let (dir, _) = split_parent(&subpath);
+                Some(SourceSpec::GitRev { repo: repo.clone(), rev: rev.clone(), subpath: dir.to_string() })
+            }
+            SourceSpec::GitWorktree { .. } => None,
+        }
+    }
+
+    /// The file or folder on disk, when the source is one (not inside an archive or a Git revision).
+    pub fn disk_path(&self) -> Option<PathBuf> {
+        match self {
+            SourceSpec::Local { path } if !path.contains('!') => Some(PathBuf::from(path)),
+            SourceSpec::GitWorktree { repo } => Some(PathBuf::from(repo)),
+            _ => None,
+        }
+    }
+
+    /// The file on disk that holds the source: the archive for a path inside one.
+    pub fn container_path(&self) -> Option<PathBuf> {
+        match self {
+            SourceSpec::Local { path } => Some(PathBuf::from(path.split('!').next().unwrap_or(path))),
+            _ => self.disk_path(),
+        }
+    }
+
+    /// Where a file is in Git: the repository, the revision (`None` for the working
+    /// tree) and the path inside the repository.
+    pub fn git_location(&self) -> Result<GitLocation> {
+        match self {
+            SourceSpec::GitRev { repo, rev, subpath } => Ok(GitLocation {
+                repo: repo.clone(),
+                rev: Some(rev.clone()),
+                path: normalize(subpath).ok_or_else(|| Error::InvalidSource(subpath.clone()))?,
+            }),
+            _ => {
+                let path = self
+                    .disk_path()
+                    .ok_or_else(|| Error::InvalidSource("the file is inside an archive, not in Git".into()))?;
+                let full = std::fs::canonicalize(&path).map_err(|e| Error::io(path.display().to_string(), e))?;
+                let git = GitRepo::discover(full.parent().unwrap_or(&full))?;
+                let workdir = git
+                    .workdir()
+                    .and_then(|w| std::fs::canonicalize(w).ok())
+                    .ok_or_else(|| Error::InvalidSource("bare repository".into()))?;
+                let rel = full.strip_prefix(&workdir).map_err(|_| Error::InvalidSource(path.display().to_string()))?;
+                let rel = rel.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
+                Ok(GitLocation { repo: plain_path(&workdir), rev: None, path: rel })
+            }
+        }
+    }
+
     pub fn open(&self, opts: SourceOptions) -> Result<Source> {
         match self {
             SourceSpec::Local { path } => open_local(self, path, opts),
@@ -169,6 +242,7 @@ impl SourceSpec {
                 let tree: Arc<dyn Vfs> = Arc::new(GitTreeFs::new(git, resolved.tree, label));
                 let vfs = Arc::new(ArchiveMount::new(tree, opts.expand_archives));
                 let root = normalize(subpath).ok_or_else(|| Error::InvalidSource(subpath.clone()))?;
+                let display = if root.is_empty() { repo.clone() } else { format!("{repo} › {root}") };
                 Ok(Source {
                     spec: self.clone(),
                     vfs,
@@ -176,7 +250,7 @@ impl SourceSpec {
                     watch: None,
                     info: SourceInfo {
                         kind: SourceKind::GitRev,
-                        display: repo.clone(),
+                        display,
                         rev: Some(rev.clone()),
                         commit: short,
                         commit_summary: resolved.commit.map(|c| c.summary),
@@ -247,7 +321,13 @@ fn open_local(spec: &SourceSpec, path: &str, opts: SourceOptions) -> Result<Sour
         root,
         watch,
         info: SourceInfo {
-            kind: if in_archive { SourceKind::Archive } else { SourceKind::Folder },
+            kind: if in_archive {
+                SourceKind::Archive
+            } else if meta.is_dir() {
+                SourceKind::Folder
+            } else {
+                SourceKind::File
+            },
             display: path.to_string(),
             rev: None,
             commit: None,
@@ -261,6 +341,81 @@ fn open_local(spec: &SourceSpec, path: &str, opts: SourceOptions) -> Result<Sour
         source.stat("")?;
     }
     Ok(source)
+}
+
+/// The folder containing a local path, made absolute so that relative paths
+/// given on the command line have a parent too.
+fn local_parent(path: &str) -> Option<SourceSpec> {
+    let path = std::path::absolute(path.trim_end_matches(['/', '\\'])).ok()?;
+    let parent = path.parent()?;
+    Some(SourceSpec::Local { path: parent.display().to_string() })
+}
+
+/// A canonical path as people write it: without the `\\?\` prefix Windows adds.
+fn plain_path(path: &Path) -> String {
+    let text = path.display().to_string();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with("UNC\\") => rest.to_string(),
+        _ => text,
+    }
+}
+
+/// Where a file is in Git, see [`SourceSpec::git_location`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitLocation {
+    /// The repository as given, or its working directory.
+    pub repo: String,
+    pub rev: Option<String>,
+    pub path: String,
+}
+
+/// Completions for a path being typed: entries of the folder named so far that
+/// start with the last part, folders ending in `/`. After `repo@`, the
+/// repository's branches and tags. At most `limit`.
+pub fn complete(text: &str, limit: usize) -> Vec<String> {
+    if text.contains('!') {
+        return Vec::new();
+    }
+    if let Some(at) = text.rfind('@') {
+        let (repo, rev) = (&text[..at], &text[at + 1..]);
+        if !repo.is_empty() && !Path::new(text).exists() && Path::new(repo).is_dir() && !rev.contains(':') {
+            let Ok(refs) = GitRepo::discover(repo).and_then(|g| g.refs(0)) else { return Vec::new() };
+            return refs
+                .branches
+                .iter()
+                .chain(&refs.tags)
+                .chain(&refs.remotes)
+                .filter(|r| r.name.starts_with(rev))
+                .take(limit)
+                .map(|r| format!("{repo}@{}", r.name))
+                .collect();
+        }
+    }
+    let cut = text.rfind(['/', '\\']).map(|i| i + 1).unwrap_or(0);
+    let (dir, prefix) = text.split_at(cut);
+    if dir.is_empty() {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let sep = if dir.ends_with('\\') { '\\' } else { '/' };
+    let lower = prefix.to_lowercase();
+    let mut found: Vec<(bool, String)> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let hidden = name.starts_with('.') && !prefix.starts_with('.');
+            let matches = name.starts_with(prefix) || name.to_lowercase().starts_with(&lower);
+            (matches && !hidden).then(|| (e.path().is_dir(), name))
+        })
+        .collect();
+    // Folders first, then by name.
+    found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase())));
+    found
+        .into_iter()
+        .take(limit)
+        .map(|(is_dir, name)| if is_dir { format!("{dir}{name}{sep}") } else { format!("{dir}{name}") })
+        .collect()
 }
 
 /// `path` (a local path, possibly `a.zip!/dir`) joined with `rel`: the first file on
@@ -369,5 +524,40 @@ mod tests {
             git.child("lib/x.rs").unwrap(),
             SourceSpec::GitRev { repo: root, rev: "main".into(), subpath: "src/lib/x.rs".into() }
         );
+    }
+
+    #[test]
+    fn parent_of_sources() {
+        let local = |p: &str| SourceSpec::Local { path: p.into() };
+        // Local paths come back absolute, which on Windows adds the drive.
+        let abs = |p: &str| local(&std::path::absolute(p).unwrap().display().to_string());
+        assert_eq!(local("/data/a/b").parent(), Some(abs("/data/a")));
+        assert_eq!(local("/data/a/b/").parent(), Some(abs("/data/a")));
+        assert_eq!(local("/").parent(), None);
+        assert_eq!(local("/x/pack.zip!/bin/lib").parent(), Some(local("/x/pack.zip!/bin")));
+        assert_eq!(local("/x/pack.zip!/bin").parent(), Some(local("/x/pack.zip")));
+        assert_eq!(local("/x/pack.zip!/").parent(), Some(abs("/x")));
+        let git = |s: &str| SourceSpec::GitRev { repo: "r".into(), rev: "main".into(), subpath: s.into() };
+        assert_eq!(git("src/lib").parent(), Some(git("src")));
+        assert_eq!(git("src").parent(), Some(git("")));
+        assert_eq!(git("").parent(), None);
+        assert_eq!(SourceSpec::GitWorktree { repo: "r".into() }.parent(), None);
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(local("A").parent(), Some(local(&cwd.display().to_string())));
+    }
+
+    #[test]
+    fn completes_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("Src")).unwrap();
+        std::fs::write(dir.path().join("setup.py"), "").unwrap();
+        std::fs::write(dir.path().join(".secret"), "").unwrap();
+        std::fs::write(dir.path().join("other"), "").unwrap();
+        let root = format!("{}/", dir.path().display());
+        assert_eq!(complete(&format!("{root}s"), 10), vec![format!("{root}Src/"), format!("{root}setup.py")]);
+        assert_eq!(complete(&root, 10), vec![format!("{root}Src/"), format!("{root}other"), format!("{root}setup.py")]);
+        assert_eq!(complete(&format!("{root}."), 10), vec![format!("{root}.secret")]);
+        assert_eq!(complete(&format!("{root}s"), 1).len(), 1);
+        assert!(complete("no-folder-part", 10).is_empty());
     }
 }

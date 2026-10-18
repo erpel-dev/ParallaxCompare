@@ -773,3 +773,34 @@ fn java_classes_and_jars() {
     let rebuilt = statuses(&jar("app-1.0.jar"), &jar("app-1.0-rebuilt.jar"), &without_rules);
     assert_eq!(status_of(&rebuilt, class), Status::Different);
 }
+
+#[test]
+fn file_history_and_git_location() {
+    let dir = make_repo();
+    let repo = dir.path();
+    write(repo, &[("src/cart.ts", "export const MAX = 75;\n")]);
+    git(repo, &["commit", "-q", "-am", "raise the limit"]);
+    let git_repo = parallax_core::vfs::git::GitRepo::discover(repo).unwrap();
+
+    let log = git_repo.file_log("HEAD", "src/cart.ts", 50, 1000).unwrap();
+    let summaries: Vec<&str> = log.iter().map(|c| c.summary.as_str()).collect();
+    assert_eq!(summaries, ["raise the limit", "initial"]);
+    // Commits on another branch count from there; the limit applies.
+    let log = git_repo.file_log("feature", "src/cart.ts", 50, 1000).unwrap();
+    assert_eq!(log.iter().map(|c| c.summary.as_str()).collect::<Vec<_>>(), ["feature work", "initial"]);
+    assert_eq!(git_repo.file_log("HEAD", "src/cart.ts", 1, 1000).unwrap().len(), 1);
+    assert!(git_repo.file_log("HEAD", "missing.txt", 50, 1000).unwrap().is_empty());
+
+    // A file in the working tree is found in its repository.
+    let local = SourceSpec::Local { path: repo.join("src/cart.ts").display().to_string() };
+    let at = local.git_location().unwrap();
+    assert_eq!(at.path, "src/cart.ts");
+    assert_eq!(at.rev, None);
+    assert_eq!(fs::canonicalize(&at.repo).unwrap(), fs::canonicalize(repo).unwrap());
+    let rev = SourceSpec::parse(&format!("{}@feature:src/cart.ts", repo.display()));
+    assert_eq!(rev.git_location().unwrap().rev.as_deref(), Some("feature"));
+
+    // Branch names complete after `repo@`.
+    let done = parallax_core::source::complete(&format!("{}@fe", repo.display()), 10);
+    assert_eq!(done, [format!("{}@feature", repo.display())]);
+}

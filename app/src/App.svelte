@@ -7,7 +7,10 @@
   import NewCompare from "./lib/NewCompare.svelte";
   import type { SideEdit } from "./lib/PathBar.svelte";
   import TextView from "./lib/TextView.svelte";
-  import { api, type SessionInfo, type SourceOptions, type SourceSpec } from "./lib/api";
+  import { api, sourceText, type SessionInfo, type SourceOptions, type SourceSpec } from "./lib/api";
+  import type { NavActions } from "./lib/Nav.svelte";
+  import { rememberPaths } from "./lib/recent";
+  import type { RowSide } from "./lib/tree";
   import { baseName } from "./lib/format";
 
   interface Request {
@@ -17,25 +20,36 @@
     mergeBase: boolean;
   }
 
-  type Tab =
-    | { key: number; kind: "new"; title: string }
-    | { key: number; kind: "folder"; title: string; session: SessionInfo; request: Request }
-    | {
-        key: number;
-        kind: "text";
-        title: string;
-        session: SessionInfo;
-        path: string;
-        /** Set for a comparison of two files; a file opened from a folder comparison shares that session. */
-        request?: Request;
-        dirty?: boolean;
-      };
-  type SessionTab = Exclude<Tab, { kind: "new" }>;
+  /** What every comparison tab keeps besides its session. */
+  interface Shared {
+    /** Earlier and later comparisons shown in this tab, for back and forward. */
+    back?: Request[];
+    forward?: Request[];
+    /** Both sides one folder up; `null` when either side is at the top. */
+    up?: Request | null;
+    /** A row for the folder view to select and scroll to; `n` makes each request new. */
+    reveal?: { path: string; n: number };
+  }
+
+  type FolderTab = { key: number; kind: "folder"; title: string; session: SessionInfo; request: Request } & Shared;
+  type TextTab = {
+    key: number;
+    kind: "text";
+    title: string;
+    session: SessionInfo;
+    path: string;
+    /** Set for a comparison of two files; a file opened from a folder comparison shares that session. */
+    request?: Request;
+    dirty?: boolean;
+  } & Shared;
+  type Tab = { key: number; kind: "new"; title: string } | FolderTab | TextTab;
+  type SessionTab = FolderTab | TextTab;
   type SideName = "left" | "right";
 
   let tabs = $state<Tab[]>([]);
   let active = $state(0);
   let nextKey = 1;
+  let revealCount = 0;
   let error = $state("");
   /** The new-comparison forms, by tab, to fill in dropped paths. */
   let pickers: Record<number, NewCompare> = $state({});
@@ -57,11 +71,37 @@
     return `${side(session.left)} ↔ ${side(session.right)}`;
   }
 
-  function sessionTab(session: SessionInfo, request: Request): Tab {
+  /** The last part of a source: a file or folder name, or a Git revision. */
+  function nameOf(spec: SourceSpec): string {
+    if (spec.type === "gitRev" && !spec.subpath) return spec.rev;
+    return sourceText(spec).replace(/[\\/]+$/, "").split(/[\\/:!]/).pop() ?? "";
+  }
+
+  function describe(r: Request): string {
+    return `${nameOf(r.left)} ↔ ${nameOf(r.right)}`;
+  }
+
+  function sessionTab(session: SessionInfo, request: Request, shared: Shared = {}): SessionTab {
     const key = nextKey++;
-    return session.isFile
-      ? { key, kind: "text", title: titleFor(session), session, path: "", request }
-      : { key, kind: "folder", title: titleFor(session), session, request };
+    const title = titleFor(session);
+    const tab: SessionTab = session.isFile
+      ? { key, kind: "text", title, session, path: "", request, ...shared }
+      : { key, kind: "folder", title, session, request, ...shared };
+    findUp(key, request);
+    return tab;
+  }
+
+  /** Works out what "one level up" compares, once the tab exists. */
+  async function findUp(key: number, request: Request) {
+    const [left, right] = await Promise.all([api.sourceParent(request.left), api.sourceParent(request.right)]).catch(
+      () => [null, null],
+    );
+    const tab = tabs.find((t) => t.key === key);
+    if (tab && tab.kind !== "new") tab.up = left && right ? { ...request, left, right } : null;
+  }
+
+  function remember(request: Request) {
+    rememberPaths(sourceText(request.left), sourceText(request.right));
   }
 
   async function start(request: Request, replaceKey?: number) {
@@ -73,6 +113,7 @@
       if (index >= 0) tabs[index] = tab;
       else tabs.push(tab);
       active = tab.key;
+      remember(request);
     } catch (e) {
       error = String(e);
     }
@@ -88,11 +129,36 @@
     }
   }
 
+  /** The folder comparison a file was opened from. */
+  function parentOf(tab: SessionTab): FolderTab | undefined {
+    if (tab.kind !== "text" || tab.request) return undefined;
+    return tabs.find((t): t is FolderTab => t.kind === "folder" && t.session.id === tab.session.id);
+  }
+
+  /**
+   * What `tab` compares, with some sides replaced. For a file opened from a folder
+   * comparison, its sides are that file on each side.
+   */
+  async function requestOf(tab: SessionTab, changes: Partial<Record<SideName, SourceSpec>> = {}): Promise<Request> {
+    if (tab.request) return { ...tab.request, ...changes };
+    const side = (s: SideName) => (changes[s] ? Promise.resolve(changes[s]) : sideSpec(tab, s));
+    const [left, right] = await Promise.all([side("left"), side("right")]);
+    const options = parentOf(tab)?.request.options ?? { expandArchives: true, respectGitignore: true };
+    return { left, right, options, mergeBase: false };
+  }
+
   /**
    * Compares `request` in place of what `tab` shows. The old comparison stays
-   * until the new one has opened, so a mistyped path costs nothing.
+   * until the new one has opened, so a mistyped path costs nothing. `how` says
+   * how the tab's back/forward history moves; `reveal` names a row to select.
    */
-  async function replace(tab: SessionTab, request: Request): Promise<boolean> {
+  async function replace(
+    tab: SessionTab,
+    request: Request,
+    how: "new" | "back" | "forward" = "new",
+    reveal?: string,
+  ): Promise<boolean> {
+    const current = await requestOf(tab).catch(() => null);
     if (!(await confirmDiscard(unsaved(tab)))) return false;
     error = "";
     let session: SessionInfo;
@@ -107,28 +173,29 @@
       return false;
     }
     release(tab);
-    const next = sessionTab(session, request);
+    const [back, forward] = [tab.back ?? [], tab.forward ?? []];
+    const keep = (list: Request[]) => (current ? [...list, current].slice(-50) : list);
+    const history =
+      how === "back"
+        ? { back: back.slice(0, -1), forward: keep(forward) }
+        : how === "forward"
+          ? { back: keep(back), forward: forward.slice(0, -1) }
+          : { back: keep(back), forward: [] };
+    const next = sessionTab(session, request, {
+      ...history,
+      reveal: reveal ? { path: reveal, n: ++revealCount } : undefined,
+    });
     tabs[tabs.findIndex((t) => t.key === tab.key)] = next;
     active = next.key;
+    remember(request);
     return true;
   }
 
-  /**
-   * Compares `tab` with some sides replaced. A file opened from a folder comparison
-   * becomes a comparison of its own, its other side being that file as before.
-   */
+  /** Compares `tab` with some sides replaced; a file from a folder comparison becomes a comparison of its own. */
   async function changeSides(tab: SessionTab, changes: Partial<Record<SideName, SourceSpec>>): Promise<boolean> {
     let request: Request;
     try {
-      if (tab.request) {
-        request = { ...tab.request, ...changes };
-      } else {
-        const side = (s: SideName) => (changes[s] ? Promise.resolve(changes[s]) : sideSpec(tab, s));
-        const [left, right] = await Promise.all([side("left"), side("right")]);
-        const parent = tabs.find((t) => t.kind === "folder" && t.session.id === tab.session.id) as SessionTab | undefined;
-        const options = parent?.request?.options ?? { expandArchives: true, respectGitignore: true };
-        request = { left, right, options, mergeBase: false };
-      }
+      request = await requestOf(tab, changes);
     } catch (e) {
       error = String(e);
       return false;
@@ -148,6 +215,57 @@
       file: tab.kind === "text",
     });
     return [make("left"), make("right")];
+  }
+
+  async function swap(tab: SessionTab) {
+    try {
+      const r = await requestOf(tab);
+      await replace(tab, { ...r, left: r.right, right: r.left });
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  /** One level up: from a file back to its folder comparison, otherwise both sides' parent folders. */
+  function goUp(tab: SessionTab) {
+    const parent = parentOf(tab);
+    if (parent && tab.kind === "text") {
+      parent.reveal = { path: tab.path, n: ++revealCount };
+      active = parent.key;
+    } else if (tab.up) {
+      replace(tab, tab.up, "new", tab.request ? nameOf(tab.request.left) : undefined);
+    }
+  }
+
+  function navFor(tab: SessionTab): NavActions {
+    const back = tab.back?.at(-1);
+    const forward = tab.forward?.at(-1);
+    const parent = parentOf(tab);
+    return {
+      back: back ? () => replace(tab, back, "back") : null,
+      backTitle: back ? `Back to ${describe(back)}` : "Back",
+      forward: forward ? () => replace(tab, forward, "forward") : null,
+      forwardTitle: forward ? `Forward to ${describe(forward)}` : "Forward",
+      up: parent || tab.up ? () => goUp(tab) : null,
+      upTitle: parent
+        ? "Back to the folder comparison"
+        : tab.up
+          ? `One level up: ${describe(tab.up)}`
+          : "Both sides are at the top",
+    };
+  }
+
+  /** Compares two rows of a folder comparison with each other, in a new tab. */
+  async function compareRows(tab: FolderTab, a: RowSide, b: RowSide) {
+    try {
+      const [left, right] = await Promise.all([
+        api.sideSource(tab.session.id, a.left, a.path),
+        api.sideSource(tab.session.id, b.left, b.path),
+      ]);
+      await start({ left, right, options: tab.request.options, mergeBase: false });
+    } catch (e) {
+      error = String(e);
+    }
   }
 
   /** File tabs with unsaved edits among those that closing `tab` closes. */
@@ -180,12 +298,17 @@
       active = existing.key;
       return;
     }
-    add({ key: nextKey++, kind: "text", title: baseName(path), session, path,  });
+    add({ key: nextKey++, kind: "text", title: baseName(path), session, path });
   }
 
-  function swap(tab: Extract<Tab, { kind: "folder" }>) {
-    const r = tab.request;
-    replace(tab, { ...r, left: r.right, right: r.left });
+  /** The mouse's back and forward buttons move through the active tab's history. */
+  function onMouseUp(e: MouseEvent) {
+    if (e.button !== 3 && e.button !== 4) return;
+    const tab = tabs.find((t) => t.key === active);
+    if (!tab || tab.kind === "new") return;
+    const nav = navFor(tab);
+    (e.button === 3 ? nav.back : nav.forward)?.();
+    e.preventDefault();
   }
 
   function dropSide(x: number, count: number): SideName | "both" {
@@ -258,7 +381,7 @@
   });
 </script>
 
-<svelte:window onkeydown={onKey} />
+<svelte:window onkeydown={onKey} onmouseup={onMouseUp} />
 
 <div class="app">
   <nav class="tabs" aria-label="Comparisons">
@@ -293,10 +416,20 @@
             session={tab.session}
             onOpenFile={(p) => openFile(tab.session, p)}
             onSwap={() => swap(tab)}
+            onCompareRows={(a, b) => compareRows(tab, a, b)}
             edit={sideEdits(tab)}
+            nav={navFor(tab)}
+            reveal={tab.reveal}
           />
         {:else}
-          <TextView session={tab.session} path={tab.path} onDirty={(d) => (tab.dirty = d)} edit={sideEdits(tab)} />
+          <TextView
+            session={tab.session}
+            path={tab.path}
+            onDirty={(d) => (tab.dirty = d)}
+            onSwap={() => swap(tab)}
+            edit={sideEdits(tab)}
+            nav={navFor(tab)}
+          />
         {/if}
       </section>
     {/each}

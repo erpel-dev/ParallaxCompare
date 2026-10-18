@@ -71,9 +71,9 @@
   >
     <header>New comparison</header>
     <div class="sides">
-      <SidePicker title="Left" bind:value={left} />
+      <SidePicker title="Left" bind:value={left} onEnter={submit} />
       <button type="button" class="swap" title="Swap sides" onclick={swap}>⇄</button>
-      <SidePicker title="Right" bind:value={right} />
+      <SidePicker title="Right" bind:value={right} onEnter={submit} />
     </div>
     <div class="opts">
       <label title="Replace the left revision by its merge-base with the right one: shows only what the right side changed since it branched off">

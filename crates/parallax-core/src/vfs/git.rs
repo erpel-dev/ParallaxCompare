@@ -167,6 +167,38 @@ impl GitRepo {
     }
 }
 
+impl GitRepo {
+    /// The commits reachable from `rev` that changed the file at `path` (added,
+    /// modified or deleted it), newest first. Renames are not followed. Stops after
+    /// `limit` commits found or `scan` commits looked at.
+    pub fn file_log(&self, rev: &str, path: &str, limit: usize, scan: usize) -> Result<Vec<CommitInfo>> {
+        self.with(|repo| {
+            let start = repo.rev_parse_single(rev).map_err(Error::git)?;
+            let entry_at = |id: gix::ObjectId| -> Option<gix::ObjectId> {
+                let tree = repo.find_commit(id).ok()?.tree().ok()?;
+                tree.lookup_entry_by_path(path).ok().flatten().map(|e| e.object_id())
+            };
+            let mut out = Vec::new();
+            let walk = start.ancestors().all().map_err(Error::git)?;
+            for info in walk.take(scan).filter_map(|i| i.ok()) {
+                let here = entry_at(info.id);
+                let parent = info.parent_ids().next().map(|p| entry_at(p.detach()));
+                let changed = match parent {
+                    Some(before) => before != here,
+                    None => here.is_some(),
+                };
+                if changed && let Ok(commit) = repo.find_commit(info.id) {
+                    out.push(commit_info(&commit));
+                    if out.len() >= limit {
+                        break;
+                    }
+                }
+            }
+            Ok(out)
+        })
+    }
+}
+
 fn commit_info(commit: &gix::Commit<'_>) -> CommitInfo {
     let summary = commit.message().map(|m| m.summary().to_str_lossy().into_owned()).unwrap_or_default();
     let time = commit.time().map(|t| t.seconds).unwrap_or(0);

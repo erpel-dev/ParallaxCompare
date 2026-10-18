@@ -15,7 +15,9 @@
 <script lang="ts">
   import { tick } from "svelte";
   import { open } from "@tauri-apps/plugin-dialog";
-  import { api, sourceText, type SourceInfo } from "./api";
+  import { api, sourceText, type FileHistory, type SourceInfo } from "./api";
+  import { formatTime } from "./format";
+  import PathInput from "./PathInput.svelte";
   import SidePicker, { toSpec, type PickerValue } from "./SidePicker.svelte";
 
   let {
@@ -27,7 +29,13 @@
   }: { info: SourceInfo; suffix?: string; modified?: boolean; edit?: SideEdit; title?: string } = $props();
 
   const badge = $derived(
-    { folder: ["DIR", "fs"], archive: ["ARC", "arc"], gitRev: ["GIT", "git"], gitWorktree: ["WT", "wt"] }[info.kind],
+    ({
+      folder: ["DIR", "fs"],
+      file: ["FILE", "fs"],
+      archive: ["ARC", "arc"],
+      gitRev: ["GIT", "git"],
+      gitWorktree: ["WT", "wt"],
+    })[info.kind],
   );
 
   let editing = $state(false);
@@ -37,6 +45,15 @@
   let input = $state<HTMLInputElement>();
   let picking = $state(false);
   let picker = $state<PickerValue>({ kind: "folder", path: "", rev: "", subpath: "" });
+  let menu = $state(false);
+  let bar = $state<HTMLDivElement>();
+  let menuError = $state("");
+  /** The side as of opening the menu, to tell which actions apply. */
+  let menuSpec = $state<SourceSpec | null>(null);
+  let history = $state<FileHistory | null>(null);
+  let historyOpen = $state(false);
+  let historyError = $state("");
+  let currentText = $state("");
 
   async function current(): Promise<SourceSpec> {
     try {
@@ -76,17 +93,6 @@
     if (original?.type === "gitWorktree" && spec.type === "local") spec = { type: "gitWorktree", repo: spec.path };
     if (await apply(spec)) editing = false;
     else input?.focus();
-  }
-
-  function onKey(e: KeyboardEvent) {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      commit();
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      e.stopPropagation();
-      editing = false;
-    }
   }
 
   /**
@@ -134,7 +140,64 @@
     if (!edit || busy) return;
     picker = pickerValue(spec ?? (await current()));
     editing = false;
+    menu = false;
     picking = true;
+  }
+
+  async function openMenu() {
+    if (!edit || busy) return;
+    if (menu) {
+      menu = false;
+      return;
+    }
+    menuError = "";
+    menuSpec = await current();
+    picking = historyOpen = false;
+    menu = true;
+  }
+
+  const onDisk = (spec: SourceSpec | null) =>
+    !!spec && (spec.type === "gitWorktree" || (spec.type === "local" && !spec.path.includes("!")));
+
+  async function openWith(reveal: boolean) {
+    try {
+      await api.openSource(menuSpec!, reveal);
+      menu = false;
+    } catch (e) {
+      menuError = String(e);
+    }
+  }
+
+  async function copyPath() {
+    try {
+      await navigator.clipboard.writeText(sourceText(menuSpec!));
+      menu = false;
+    } catch (e) {
+      menuError = String(e);
+    }
+  }
+
+  async function showHistory() {
+    const spec = menuSpec ?? (await current());
+    menu = false;
+    history = null;
+    historyError = "";
+    currentText = sourceText(spec);
+    historyOpen = true;
+    try {
+      history = await api.fileHistory(spec);
+    } catch (e) {
+      historyError = String(e);
+    }
+  }
+
+  async function pickVersion(spec: SourceSpec) {
+    if (await apply(spec)) historyOpen = false;
+  }
+
+  /** Closes the menu and popovers on a click elsewhere. */
+  function outside(e: MouseEvent) {
+    if ((menu || historyOpen) && bar && !bar.contains(e.target as Node)) menu = historyOpen = false;
   }
 
   async function submitPicker(e: SubmitEvent) {
@@ -144,19 +207,22 @@
   }
 </script>
 
-<div class="bar" class:editable={!!edit} title={editing ? "" : info.commitSummary ?? info.display}>
+<svelte:window onmousedown={outside} />
+
+<div class="bar" bind:this={bar} class:editable={!!edit} title={editing ? "" : info.commitSummary ?? info.display}>
   <span class="badge {badge[1]}">{badge[0]}</span>
   {#if editing}
-    <input
-      class="path mono edit"
-      bind:this={input}
-      bind:value={text}
-      onkeydown={onKey}
-      onblur={() => !busy && (editing = false)}
-      disabled={busy}
-      spellcheck="false"
-      aria-label="{title} path"
-    />
+    <div class="path edit">
+      <PathInput
+        bind:value={text}
+        bind:input
+        disabled={busy}
+        label="{title} path"
+        onEnter={commit}
+        onEscape={() => (editing = false)}
+        onblur={() => !busy && (editing = false)}
+      />
+    </div>
   {:else if edit}
     <button class="path mono" onclick={startEdit} title="Click to compare with another path ({info.display})">
       <span dir="ltr">{info.display}{suffix ? ` › ${suffix}` : ""}</span>
@@ -176,7 +242,49 @@
       disabled={busy}
       title={info.kind === "gitRev" ? "Choose another revision" : edit.file || info.kind === "archive" ? "Choose another file" : "Choose another folder"}
     >{info.kind === "gitRev" ? "⎇" : "📂"}</button>
-    <button class="icon" onclick={() => openPicker()} disabled={busy} title="Change this side: folder, file, Git ref or worktree">▾</button>
+    <button class="icon" class:on={menu} onclick={openMenu} disabled={busy} title="More: change this side, history, open">▾</button>
+  {/if}
+
+  {#if menu}
+    <div class="menu" role="menu">
+      <button role="menuitem" onclick={() => openPicker(menuSpec ?? undefined)}>Change side…</button>
+      {#if edit?.file}
+        <button role="menuitem" onclick={showHistory}>Git history of this file…</button>
+      {/if}
+      <hr />
+      <button role="menuitem" onclick={() => openWith(false)} disabled={!onDisk(menuSpec)}>Open in default app</button>
+      <button role="menuitem" onclick={() => openWith(true)} disabled={menuSpec?.type === "gitRev"}>Show in file manager</button>
+      <button role="menuitem" onclick={copyPath}>Copy path</button>
+      {#if menuError}<p class="err">{menuError}</p>{/if}
+    </div>
+  {/if}
+
+  {#if historyOpen}
+    <div class="popover history">
+      <header>Git history · {title} side</header>
+      {#if historyError}
+        <p class="err">{historyError}</p>
+      {:else if !history}
+        <p class="dim">Reading history…</p>
+      {:else}
+        <div class="commits">
+          {#if history.worktree}
+            <button class="commit" class:on={sourceText(history.worktree) === currentText} onclick={() => pickVersion(history!.worktree!)}>
+              <span class="id mono">working tree</span><span class="summary">the file on disk, with uncommitted changes</span>
+            </button>
+          {/if}
+          {#each history.commits as c (c.id)}
+            <button class="commit" class:on={sourceText(c.spec) === currentText} onclick={() => pickVersion(c.spec)}>
+              <span class="id mono">{c.shortId}</span>
+              <span class="summary">{c.summary}</span>
+              <span class="when">{formatTime(c.time)}</span>
+            </button>
+          {/each}
+          {#if !history.commits.length}<p class="dim">No commit changed this file.</p>{/if}
+        </div>
+      {/if}
+      <footer><button onclick={() => (historyOpen = false)}>Close</button></footer>
+    </div>
   {/if}
 
   {#if picking}
@@ -191,7 +299,7 @@
         }
       }}
     >
-      <SidePicker title="{title} side" bind:value={picker} />
+      <SidePicker title="{title} side" bind:value={picker} onEnter={() => bar?.querySelector<HTMLFormElement>("form.popover")?.requestSubmit()} />
       <footer>
         <button type="button" onclick={() => (picking = false)}>Cancel</button>
         <button type="submit" class="primary" disabled={busy || !picker.path.trim()}>Compare</button>
@@ -251,8 +359,100 @@
   }
   .path.edit {
     direction: ltr;
+    display: flex;
+    padding: 0;
+    border: none;
+    overflow: visible;
+  }
+  .path.edit :global(input) {
+    padding: 1px 6px;
     border-color: var(--accent);
-    outline: none;
+  }
+  .icon.on {
+    border-color: var(--accent);
+  }
+  .menu {
+    position: absolute;
+    top: calc(100% + 2px);
+    right: 8px;
+    z-index: 25;
+    display: flex;
+    flex-direction: column;
+    min-width: 220px;
+    padding: 4px 0;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  }
+  .menu button {
+    border: none;
+    border-radius: 0;
+    background: none;
+    text-align: left;
+    padding: 5px 14px;
+  }
+  .menu button:hover:not(:disabled) {
+    background: var(--sel);
+  }
+  .menu hr {
+    width: 100%;
+    border: none;
+    border-top: 1px solid var(--line);
+    margin: 4px 0;
+  }
+  .err {
+    margin: 4px 14px;
+    color: var(--error);
+    font-size: 12px;
+    white-space: normal;
+  }
+  .dim {
+    color: var(--dim);
+    margin: 6px 0;
+  }
+  .history header {
+    font-weight: 600;
+  }
+  .commits {
+    display: flex;
+    flex-direction: column;
+    max-height: 320px;
+    overflow: auto;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--input);
+  }
+  .commit {
+    display: flex;
+    gap: 10px;
+    border: none;
+    border-radius: 0;
+    background: none;
+    padding: 4px 8px;
+    text-align: left;
+  }
+  .commit:hover {
+    background: var(--panel);
+  }
+  .commit.on {
+    background: var(--sel);
+  }
+  .commit .id {
+    flex: none;
+    color: #e6a974;
+  }
+  .commit .summary {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .commit .when {
+    flex: none;
+    color: var(--dim);
+    font-size: 11px;
   }
   .icon {
     padding: 0 6px;

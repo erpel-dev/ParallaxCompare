@@ -19,6 +19,7 @@
     type View,
   } from "./api";
   import ImagePanel from "./ImagePanel.svelte";
+  import Nav, { type NavActions } from "./Nav.svelte";
   import PathBar, { type SideEdit } from "./PathBar.svelte";
   import { formatSize } from "./format";
 
@@ -26,8 +27,17 @@
     session,
     path,
     onDirty,
+    onSwap,
     edit,
-  }: { session: SessionInfo; path: string; onDirty?: (dirty: boolean) => void; edit?: [SideEdit, SideEdit] } = $props();
+    nav,
+  }: {
+    session: SessionInfo;
+    path: string;
+    onDirty?: (dirty: boolean) => void;
+    onSwap?: () => void;
+    edit?: [SideEdit, SideEdit];
+    nav?: NavActions;
+  } = $props();
 
   const ROW = 19;
   const CHUNK = 200;
@@ -714,6 +724,9 @@
 
 <div class="view" bind:this={root}>
   <div class="toolbar">
+    {#if nav}<Nav {nav} />{/if}
+    {#if onSwap}<button onclick={onSwap} title="Swap left and right">⇄ Swap</button>{/if}
+    {#if nav || onSwap}<span class="sep"></span>{/if}
     {#if info && info.views.length > 1}
       <select bind:value={view} onchange={() => { syntaxOverride = ""; load(); }} disabled={anyDirty} title={anyDirty ? "Save or undo the edits to change the view" : "How the files are shown"}>
         {#each info.views as v (v.id)}

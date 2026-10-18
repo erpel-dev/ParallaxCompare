@@ -3,6 +3,7 @@
   import { listen } from "@tauri-apps/api/event";
   import { ask } from "@tauri-apps/plugin-dialog";
   import { api, defaultCompareOptions, type CompareResult, type Node, type OpResult, type PathsChanged, type SessionInfo, type Side } from "./api";
+  import Nav, { type NavActions } from "./Nav.svelte";
   import PathBar, { type SideEdit } from "./PathBar.svelte";
   import { formatSize, formatTime } from "./format";
   import {
@@ -13,18 +14,31 @@
     filesBelow,
     findNode,
     flatten,
+    pairRows,
     refreshTarget,
     replaceNode,
     type Filter,
+    type RowSide,
   } from "./tree";
 
   let {
     session,
     onOpenFile,
     onSwap,
+    onCompareRows,
     edit,
-  }: { session: SessionInfo; onOpenFile: (path: string) => void; onSwap: () => void; edit?: [SideEdit, SideEdit] } =
-    $props();
+    nav,
+    reveal,
+  }: {
+    session: SessionInfo;
+    onOpenFile: (path: string) => void;
+    onSwap: () => void;
+    onCompareRows?: (a: RowSide, b: RowSide) => void;
+    edit?: [SideEdit, SideEdit];
+    nav?: NavActions;
+    /** A row to select and scroll to, e.g. the file just left with "up"; `n` repeats a request. */
+    reveal?: { path: string; n: number };
+  } = $props();
 
   const ROW = 22;
 
@@ -66,6 +80,39 @@
   const last = $derived(Math.min(rows.length, first + Math.ceil(viewHeight / ROW) + 20));
   const selectedIndex = $derived(selected === null ? -1 : rows.findIndex((r) => r.path === selected));
   const selectedRow = $derived(selectedIndex >= 0 ? rows[selectedIndex] : null);
+  /** With two rows selected: the entries "Compare these" compares. */
+  const pair = $derived.by(() => {
+    if (selection.size !== 2) return null;
+    const picked = rows.filter((r) => selection.has(r.path));
+    return picked.length === 2 ? pairRows(picked[0], picked[1]) : null;
+  });
+
+  // Reveal a row once the comparison is there; folders on the way are opened.
+  let revealed = 0;
+  $effect(() => {
+    if (!reveal || !result || reveal.n === revealed) return;
+    revealed = reveal.n;
+    revealPath(reveal.path);
+  });
+
+  async function revealPath(path: string) {
+    if (!result) return;
+    const parts = path.split("/");
+    for (let i = 1; i < parts.length; i++) {
+      const folder = parts.slice(0, i).join("/");
+      if (!expanded.has(folder)) await toggle(folder);
+    }
+    if (filter !== "all" && !rows.some((r) => r.path === path)) {
+      filter = "all";
+      version++;
+    }
+    await tick();
+    const index = rows.findIndex((r) => r.path === path);
+    if (index < 0) return;
+    selectOnly(path);
+    await ensureVisible(index);
+    viewport?.focus();
+  }
 
   async function run(invalidate = false) {
     running = true;
@@ -421,8 +468,14 @@
 
 <div class="view">
   <div class="toolbar">
+    {#if nav}<Nav {nav} /><span class="sep"></span>{/if}
     <button onclick={() => run(true)} disabled={running} title="Compare again (F5)">⟳ Refresh</button>
     <button onclick={onSwap} title="Swap left and right">⇄ Swap</button>
+    <button
+      disabled={!pair || !onCompareRows}
+      onclick={() => pair && onCompareRows?.(pair[0], pair[1])}
+      title="Compare the two selected rows with each other, e.g. a file renamed between the sides (select with Ctrl+click)"
+    >⇆ Compare these</button>
     <span class="sep"></span>
     {#each [["all", "All"], ["diffs", "Diffs"], ["same", "Same"], ["orphans", "Orphans"]] as const as [id, label] (id)}
       <button class:on={filter === id} onclick={() => { filter = id; version++; }}>{label}</button>

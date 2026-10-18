@@ -18,13 +18,20 @@ export function sourceText(spec: SourceSpec): string {
   }
 }
 
+export interface FileHistory {
+  /** The file in the working tree, when the repository has one. */
+  worktree: SourceSpec | null;
+  /** The commits that changed the file, newest first. */
+  commits: (CommitInfo & { spec: SourceSpec })[];
+}
+
 export interface SourceOptions {
   expandArchives: boolean;
   respectGitignore: boolean;
 }
 
 export interface SourceInfo {
-  kind: "folder" | "archive" | "gitRev" | "gitWorktree";
+  kind: "folder" | "file" | "archive" | "gitRev" | "gitWorktree";
   display: string;
   rev: string | null;
   commit: string | null;
@@ -301,6 +308,10 @@ export const api = {
   gitRefs: (repo: string) => invoke<RefList>("git_refs", { repo }),
   parseSource: (text: string) => invoke<SourceSpec>("parse_source", { text }),
   sideSource: (id: number, left: boolean, rel: string) => invoke<SourceSpec>("side_source", { id, left, rel }),
+  completePath: (text: string) => invoke<string[]>("complete_path", { text }),
+  sourceParent: (spec: SourceSpec) => invoke<SourceSpec | null>("source_parent", { spec }),
+  openSource: (spec: SourceSpec, reveal: boolean) => invoke<void>("open_source", { spec, reveal }),
+  fileHistory: (spec: SourceSpec) => invoke<FileHistory>("file_history", { spec }),
   openSession: (left: SourceSpec, right: SourceSpec, options: SourceOptions, mergeBase: boolean) =>
     invoke<SessionInfo>("open_session", { left, right, options, mergeBase }),
   closeSession: (id: number) => invoke<void>("close_session", { id }),

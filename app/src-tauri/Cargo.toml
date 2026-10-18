@@ -17,3 +17,4 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 parking_lot = "0.12"
 base64 = "0.22"
+tauri-plugin-opener = "2"

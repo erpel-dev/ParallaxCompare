@@ -24,8 +24,13 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
   import { api, type RefList } from "./api";
+  import PathInput from "./PathInput.svelte";
 
-  let { title, value = $bindable() }: { title: string; value: PickerValue } = $props();
+  let {
+    title,
+    value = $bindable(),
+    onEnter,
+  }: { title: string; value: PickerValue; onEnter?: () => void } = $props();
 
   const kinds: { id: PickerKind; label: string }[] = [
     { id: "folder", label: "Folder" },
@@ -100,12 +105,11 @@
   </div>
 
   <div class="row">
-    <input
-      type="text"
-      class="mono grow"
-      placeholder={value.kind === "gitRev" || value.kind === "gitWorktree" ? "Repository folder" : value.kind === "file" ? "File or archive (a.zip!/sub/dir also works)" : "Folder"}
+    <PathInput
       bind:value={value.path}
-      spellcheck="false"
+      label="{title} path"
+      placeholder={value.kind === "gitRev" || value.kind === "gitWorktree" ? "Repository folder" : value.kind === "file" ? "File or archive (a.zip!/sub/dir also works)" : "Folder"}
+      {onEnter}
     />
     <button type="button" onclick={browse}>Browse…</button>
   </div>

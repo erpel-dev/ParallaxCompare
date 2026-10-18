@@ -132,11 +132,14 @@ git difftool --dir-diff main feature/x     # or simply: parallax-compare .@main 
 
 To compare against something else without starting over, change a side from its path bar above the panes:
 
-- click the path, type another one (any form from the table below, e.g. `repo@v1.4`) and press Enter; Esc cancels
-- 📂 opens the file or folder dialog (⎇ the branch list for a Git side), ▾ switches the side to a folder, file, Git ref or worktree
+- click the path, type another one (any form from the table below, e.g. `repo@v1.4`) and press Enter; Esc cancels. While typing, recently compared paths and the entries of the folder typed so far are suggested: Tab completes (after `repo@`, branch and tag names), ↑/↓ choose
+- 📂 opens the file or folder dialog (⎇ the branch list for a Git side)
+- ▾ opens a menu: *Change side…* (folder, file, Git ref or worktree), *Git history of this file…* (pick the working tree or any commit that changed the file for this side), *Open in default app*, *Show in file manager*, *Copy path*
 - drop a file or folder from your file manager onto the left or right half of the window; drop two to replace both sides, or onto a *New comparison* tab to fill it in
 
 The tab keeps its options and the other side. If the new path cannot be opened, the old comparison stays. In a file opened from a folder comparison, changing one side compares that file with any other file, also one with a different name.
+
+Each tab remembers what it compared before: ← and → in the toolbar (or the mouse's back and forward buttons) go back and forth, and ↑ goes one level up: from a file opened in a folder comparison back to that row, otherwise to both sides' parent folders. To compare two different rows of a folder comparison, such as a file renamed between the sides, Ctrl+click both and choose *Compare these*. *Swap* exchanges left and right, in folder and file comparisons.
 
 Keyboard: arrow keys, Enter (open or expand), ←/→ (collapse/expand), F5 (refresh), F7/F8 (previous/next difference), Ctrl+F (find), F3/Shift+F3 (next/previous match), Ctrl+T (new tab), Ctrl+W (close tab).
 
