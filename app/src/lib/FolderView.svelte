@@ -18,11 +18,15 @@
     differingFolders,
     filesBelow,
     findNode,
+    flatFiles,
     flatten,
+    movedPairs,
     pairRows,
     refreshTarget,
     replaceNode,
     type Filter,
+    type FlatRow,
+    type PairStatus,
     type RowSide,
   } from "./tree";
 
@@ -73,10 +77,82 @@
   let scrollTop = $state(0);
   let viewHeight = $state(600);
 
+  /** Files of all folders in one list, files of the same name matched across folders. */
+  let flat = $state(false);
+  /** Comparisons of matched files, by `left\nright` path. */
+  let pairStatus = new Map<string, PairStatus>();
+  const moved = $derived.by(() => {
+    void version;
+    return flat && result ? movedPairs(result.root) : [];
+  });
   const rows = $derived.by(() => {
     void version;
-    return result ? flatten(result.root, expanded, filter) : [];
+    if (!result) return [];
+    return flat ? flatFiles(result.root, filter, moved, pairStatus) : flatten(result.root, expanded, filter);
   });
+  const rowByPath = $derived(new Map(rows.map((r) => [r.path, r])));
+
+  // Matched files are compared once they are shown.
+  let comparing = false;
+  $effect(() => {
+    const todo = moved.filter(([l, r]) => !pairStatus.has(`${l}\n${r}`));
+    if (!todo.length || comparing) return;
+    comparing = true;
+    const id = session.id;
+    api
+      .comparePairs(id, todo, $state.snapshot(options))
+      .then((statuses) => {
+        todo.forEach(([l, r], i) => pairStatus.set(`${l}\n${r}`, statuses[i]));
+      })
+      .catch((e) => (error = String(e)))
+      .finally(() => {
+        comparing = false;
+        version++;
+      });
+  });
+
+  /** Switches the flat view; identical folders not walked yet are loaded first, so their files show. */
+  async function setFlat(on: boolean) {
+    if (on && result) {
+      const pending: string[] = [];
+      const walk = (node: Node, dir: string) => {
+        for (const c of node.children ?? []) {
+          const p = dir ? `${dir}/${c.name}` : c.name;
+          if (c.unexpanded) pending.push(p);
+          else walk(c, p);
+        }
+      };
+      walk(result.root, "");
+      for (const p of pending) {
+        busy = `Loading ${p}…`;
+        try {
+          const node = findNode(result.root, p);
+          const fresh = await api.expand(session.id, p, $state.snapshot(options));
+          if (node) {
+            node.children = fresh.children;
+            node.unexpanded = false;
+          }
+        } catch (e) {
+          error = String(e);
+        }
+      }
+      busy = "";
+    }
+    flat = on;
+    version++;
+  }
+
+  /** The path of a row's entry on one side: a matched row has its own on the right. */
+  function sidePath(path: string, left: boolean): string {
+    return left ? path : (rowByPath.get(path)?.rightPath ?? path);
+  }
+
+  /** Forgets comparisons of matched files at or below `paths`. */
+  function forgetPairs(paths: string[]) {
+    for (const key of [...pairStatus.keys()]) {
+      if (key.split("\n").some((p) => paths.some((q) => p === q || p.startsWith(q + "/") || q === ""))) pairStatus.delete(key);
+    }
+  }
   const counts = $derived.by(() => {
     void version;
     return result ? countFiles(result.root) : null;
@@ -131,6 +207,7 @@
       const r = await api.runCompare(session.id, $state.snapshot(options), invalidate);
       // Open folders with differences, but keep huge trees collapsed.
       expanded = new Set(differingFolders(r.root, countNodes(r.root) > 20000 ? 0 : 400));
+      pairStatus = new Map();
       result = r;
       version++;
     } catch (e) {
@@ -204,7 +281,9 @@
 
   function activate(path: string, container: boolean) {
     selectOnly(path);
+    const right = rowByPath.get(path)?.rightPath;
     if (container) toggle(path);
+    else if (right && onCompareRows) onCompareRows({ path, left: true }, { path: right, left: false });
     else onOpenFile(path);
   }
 
@@ -327,13 +406,14 @@
   function present(left: boolean): string[] {
     if (!result) return [];
     return targets.filter((p) => {
-      const node = findNode(result!.root, p);
+      const node = flat ? rowByPath.get(p)?.node : findNode(result!.root, p);
       return !!(left ? node?.left : node?.right);
     });
   }
 
   function applyResult(paths: string[], r: OpResult) {
     if (!result) return;
+    forgetPairs(paths);
     paths.forEach((p, i) => replaceNode(result!.root, p, r.nodes[i]));
     version++;
     if (r.error && r.error !== "cancelled") error = r.error;
@@ -364,7 +444,28 @@
 
   async function copy(toRight: boolean) {
     if (!result) return;
-    const paths = present(!toRight);
+    const all = present(!toRight);
+    // Files matched across folders are copied over their match.
+    const pairs = all.map((p) => rowByPath.get(p)).filter((r): r is FlatRow & { rightPath: string } => !!r?.rightPath && !!r.node.left && !!r.node.right);
+    const paths = all.filter((p) => !pairs.some((r) => r.path === p));
+    if (pairs.length) {
+      const side = toRight ? "right" : "left";
+      const changed = pairs.filter((r) => r.node.status !== "same");
+      if (changed.length) {
+        const names = changed.map((r) => (toRight ? `${r.path} → ${r.rightPath}` : `${r.rightPath} → ${r.path}`));
+        const ok = await ask(`Copying replaces ${changed.length} matched file${changed.length > 1 ? "s" : ""} on the ${side} side:\n${list(names)}`, {
+          title: "Replace files",
+          kind: "warning",
+          okLabel: "Replace",
+          cancelLabel: "Cancel",
+        });
+        if (!ok) return;
+      }
+      for (const r of pairs) {
+        const [from, to] = toRight ? [r.path, r.rightPath] : [r.rightPath, r.path];
+        await runOp(`Copying ${from}`, [to], () => api.copyFileAs(session.id, from, to, toRight, $state.snapshot(options)));
+      }
+    }
     if (!paths.length) return;
     // Files on the target side that the copy replaces, and those newer than their source.
     const replaced: string[] = [];
@@ -403,7 +504,7 @@
   }
 
   async function remove(left: boolean) {
-    const paths = present(left);
+    const paths = present(left).map((p) => sidePath(p, left));
     if (!paths.length) return;
     const side = left ? "left" : "right";
     const what = paths.length === 1 ? `"${paths[0]}"` : `${paths.length} items`;
@@ -447,6 +548,7 @@
     }
     // Only the outermost of nested targets.
     const outer = targets.filter((p) => !targets.some((q) => p.startsWith(q + "/")));
+    forgetPairs(outer);
     try {
       const nodes = await api.refreshPaths(session.id, outer, $state.snapshot(options));
       if (result?.root !== root) return;
@@ -517,9 +619,9 @@
       if (!side) continue;
       items.push(
         "separator",
-        { label: `Open ${name} in default app`, run: () => onSide(path, left, "open") },
-        { label: `Show ${name} in file manager`, run: () => onSide(path, left, "reveal") },
-        { label: `Copy ${name} path`, run: () => onSide(path, left, "copy") },
+        { label: `Open ${name} in default app`, run: () => onSide(sidePath(path, left), left, "open") },
+        { label: `Show ${name} in file manager`, run: () => onSide(sidePath(path, left), left, "reveal") },
+        { label: `Copy ${name} path`, run: () => onSide(sidePath(path, left), left, "copy") },
       );
     }
     menu = { x, y, items };
@@ -548,6 +650,7 @@
       })),
       { group, title: "Expand all folders", run: () => setAll(true) },
       { group, title: "Collapse all folders", run: () => setAll(false) },
+      { group, title: flat ? "Show folders" : "Flat list: all files without folders", run: () => setFlat(!flat) },
       { group, title: "Copy selection to the right", enabled: canCopy[1] && !op, run: () => copy(true) },
       { group, title: "Copy selection to the left", enabled: canCopy[0] && !op, run: () => copy(false) },
       { group, title: "Delete selection on the left", enabled: canDelete[0] && !op, run: () => remove(true) },
@@ -623,8 +726,9 @@
       <button class:on={filter === id} onclick={() => { filter = id; version++; }}>{label}</button>
     {/each}
     <span class="sep"></span>
-    <button onclick={() => setAll(true)} title="Expand all folders">Expand</button>
-    <button onclick={() => setAll(false)} title="Collapse all folders">Collapse</button>
+    <button onclick={() => setAll(true)} disabled={flat} title="Expand all folders">Expand</button>
+    <button onclick={() => setAll(false)} disabled={flat} title="Collapse all folders">Collapse</button>
+    <button class:on={flat} onclick={() => setFlat(!flat)} title="All files in one list, without folders; files of the same name are matched across folders">Flat</button>
     <span class="sep"></span>
     <button disabled={!canCopy[1] || !!op} onclick={() => copy(true)} title="Copy the selection to the right side">Copy →</button>
     <button disabled={!canCopy[0] || !!op} onclick={() => copy(false)} title="Copy the selection to the left side">← Copy</button>
@@ -708,7 +812,7 @@
           >
             {#each [row.node.left, row.node.right] as side, i (i)}
               {#if i === 1}
-                <div class="mid">{glyph[row.node.status]}</div>
+                <div class="mid">{row.pending ? "…" : glyph[row.node.status]}{row.rightPath ? "↷" : ""}</div>
               {/if}
               {#if side}
                 <div class="side">
@@ -719,7 +823,7 @@
                     {:else}
                       <span class="chev"></span>
                     {/if}
-                    <span class="icon">{icon(side)}</span>{row.node.name}
+                    <span class="icon">{icon(side)}</span>{#if row.folders?.[i]}<span class="dir">{row.folders[i]}/</span>{/if}{i === 1 && row.rightPath ? row.rightPath.split("/").pop() : row.node.name}
                   </span>
                   <span class="num">{side.kind === "dir" ? "" : formatSize(side.size)}</span>
                   <span class="num">{formatTime(side.mtime)}</span>
@@ -864,6 +968,9 @@
   .name {
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .dir {
+    color: var(--dim);
   }
   .chev {
     display: inline-block;

@@ -9,6 +9,12 @@ export interface FlatRow {
   depth: number;
   container: boolean;
   expanded: boolean;
+  /** Flat view: the folder of each side's file, shown before the name. */
+  folders?: [string, string];
+  /** Flat view: the right file's path, for a file matched with one in another folder. */
+  rightPath?: string;
+  /** Flat view: a matched pair whose files are still being compared. */
+  pending?: boolean;
 }
 
 export function isContainer(node: Node): boolean {
@@ -234,4 +240,110 @@ export function pairRows(a: FlatRow, b: FlatRow): [RowSide, RowSide] | null {
   const pair = (al && br ? [al, br] : bl && ar ? [bl, ar] : [al ?? ar, bl ?? br]) as [RowSide | null, RowSide | null];
   if (!pair[0] || !pair[1] || a.container !== b.container) return null;
   return pair as [RowSide, RowSide];
+}
+
+/** The status of a file compared with one in another folder. */
+export interface PairStatus {
+  status: Node["status"];
+  message: string | null;
+}
+
+function parent(path: string): string {
+  const i = path.lastIndexOf("/");
+  return i < 0 ? "" : path.slice(0, i);
+}
+
+/** Every file below `root` with its path; archives and folders with loaded children are walked into. */
+function files(root: Node): { node: Node; path: string }[] {
+  const out: { node: Node; path: string }[] = [];
+  const walk = (node: Node, dir: string) => {
+    for (const child of node.children ?? []) {
+      const path = joinPath(dir, child.name);
+      if (isContainer(child) && (child.children?.length || child.unexpanded)) walk(child, path);
+      else if (!isContainer(child)) out.push({ node: child, path });
+    }
+  };
+  walk(root, "");
+  return out;
+}
+
+/** How alike two folder paths are: shared trailing segments count most, then shared leading ones. */
+function likeness(a: string, b: string): number {
+  const x = a ? a.split("/") : [];
+  const y = b ? b.split("/") : [];
+  let tail = 0;
+  while (tail < Math.min(x.length, y.length) && x[x.length - 1 - tail] === y[y.length - 1 - tail]) tail++;
+  let head = 0;
+  while (head < Math.min(x.length, y.length) - tail && x[head] === y[head]) head++;
+  return tail * 1000 + head * 10 - Math.abs(x.length - y.length);
+}
+
+/**
+ * Files only on the left matched with files of the same name only on the right,
+ * as `[left path, right path]`: files at the same path are matched already, so
+ * these are files that moved to another folder. Of several candidates, the one
+ * whose folder is most alike wins.
+ */
+export function movedPairs(root: Node): [string, string][] {
+  const byName = new Map<string, { left: string[]; right: string[] }>();
+  for (const f of files(root)) {
+    const side = f.node.status === "leftOnly" ? "left" : f.node.status === "rightOnly" ? "right" : null;
+    if (!side) continue;
+    let entry = byName.get(f.node.name);
+    if (!entry) byName.set(f.node.name, (entry = { left: [], right: [] }));
+    entry[side].push(f.path);
+  }
+  const pairs: [string, string][] = [];
+  for (const { left, right } of byName.values()) {
+    if (!left.length || !right.length) continue;
+    const candidates = left.flatMap((l) => right.map((r) => ({ l, r, score: likeness(parent(l), parent(r)) })));
+    candidates.sort((a, b) => b.score - a.score || a.l.localeCompare(b.l) || a.r.localeCompare(b.r));
+    const used = new Set<string>();
+    for (const c of candidates) {
+      if (used.has(c.l) || used.has(`>${c.r}`)) continue;
+      used.add(c.l).add(`>${c.r}`);
+      pairs.push([c.l, c.r]);
+    }
+  }
+  return pairs;
+}
+
+/**
+ * The rows of the flat view: every file, sorted by name and then folder, as if
+ * all were in one folder. Files of `moved` share a row; until their comparison
+ * is in `statuses` they show as pending.
+ */
+export function flatFiles(
+  root: Node,
+  filter: Filter,
+  moved: [string, string][],
+  statuses: Map<string, PairStatus>,
+): FlatRow[] {
+  const all = files(root);
+  const rightOf = new Map(moved.map(([l, r]) => [l, r]));
+  const taken = new Set(moved.map(([, r]) => r));
+  const byPath = new Map(all.map((f) => [f.path, f.node]));
+  const out: FlatRow[] = [];
+  for (const { node, path } of all) {
+    if (taken.has(path)) continue;
+    const right = rightOf.get(path);
+    const dir = parent(path);
+    if (right === undefined) {
+      if (selfMatches(node, filter)) out.push({ node, path, depth: 0, container: false, expanded: false, folders: [dir, dir] });
+      continue;
+    }
+    const other = byPath.get(right);
+    const known = statuses.get(`${path}\n${right}`);
+    const pair: Node = {
+      ...node,
+      right: other?.right ?? null,
+      status: known?.status ?? "different",
+      message: known?.message ?? `Matched with ${right}`,
+    };
+    if (known && !selfMatches(pair, filter)) continue;
+    out.push({ node: pair, path, depth: 0, container: false, expanded: false, folders: [dir, parent(right)], rightPath: right, pending: !known });
+  }
+  const key = (r: FlatRow) => r.node.name.toLowerCase();
+  out.sort((a, b) => key(a).localeCompare(key(b)) || a.path.localeCompare(b.path));
+  return out;
 }

@@ -526,6 +526,55 @@ pub async fn copy_entries(
     .await
 }
 
+/// The status of a file on the left compared with a file at another path on the right.
+#[derive(Serialize)]
+pub struct PairStatus {
+    status: compare::Status,
+    message: Option<String>,
+}
+
+/// Compares files across folders, as `[left path, right path]` pairs: files of the
+/// same name that are only on one side each, matched in the flat view.
+#[tauri::command]
+pub async fn compare_pairs(
+    state: State<'_, AppState>,
+    id: u64,
+    pairs: Vec<(String, String)>,
+    options: CompareOptions,
+) -> CmdResult<Vec<PairStatus>> {
+    let session = state.session(id)?;
+    blocking(move || {
+        Ok(pairs
+            .iter()
+            .map(|(l, r)| match compare::compare_pair(&session.left, &session.right, l, r, &options) {
+                Ok((status, reason)) => PairStatus { status, message: reason.map(str::to_string) },
+                Err(e) => PairStatus { status: compare::Status::Error, message: Some(err(e)) },
+            })
+            .collect())
+    })
+    .await
+}
+
+/// Copies the file at `from` over the file at `to` on the other side, for a file
+/// matched with one in another folder.
+#[tauri::command]
+pub async fn copy_file_as(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: u64,
+    from: String,
+    to: String,
+    to_right: bool,
+    options: CompareOptions,
+) -> CmdResult<OpResult> {
+    let session = state.session(id)?;
+    run_op(app, id, session, vec![to.clone()], options, move |s, _, progress| {
+        let (src, dst) = if to_right { (&s.left, &s.right) } else { (&s.right, &s.left) };
+        parallax_core::ops::copy_file_as(src, dst, &from, &to, progress).map(|_| Vec::new())
+    })
+    .await
+}
+
 /// Deletes `paths` on one side: into the trash, or for good with `permanent`.
 #[tauri::command]
 pub async fn delete_entries(

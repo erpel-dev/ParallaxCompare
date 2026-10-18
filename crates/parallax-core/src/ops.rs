@@ -54,6 +54,32 @@ pub fn copy(from: &Source, to: &Source, paths: &[String], progress: &Progress) -
     Ok(copied)
 }
 
+/// Copies the file at `src` in `from` over the file at `dst` in `to`, e.g. to
+/// a file that moved to another folder on the other side.
+pub fn copy_file_as(from: &Source, to: &Source, src: &str, dst: &str, progress: &Progress) -> Result<u64> {
+    let entry = from.stat(src)?;
+    if entry.kind == EntryKind::Dir {
+        return Err(Error::Unsupported("only files are copied onto another path".into()));
+    }
+    progress.expect(1);
+    let Some(target) = to.vfs.local_path(&to.path(dst)) else {
+        if !to.vfs.writable() {
+            return Err(Error::Unsupported(format!("{} is read-only", to.info.display)));
+        }
+        let data = from.vfs.read(&from.path(src))?;
+        let kind = if entry.kind == EntryKind::Symlink { EntryKind::Symlink } else { EntryKind::File };
+        to.vfs.apply(vec![Change::Put { path: to.path(dst), kind, data, mtime: entry.mtime }], progress)?;
+        progress.advance(1)?;
+        return Ok(1);
+    };
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|e| Error::io(parent.display().to_string(), e))?;
+    }
+    let result = copy_entry(from, &entry, src, &target, progress);
+    to.vfs.changed(&to.path(dst));
+    result
+}
+
 /// The writes that copy `rel` with everything below it; file contents are read in parallel.
 fn collect_changes(from: &Source, to: &Source, rel: &str, entry: Entry, progress: &Progress) -> Result<Vec<Change>> {
     let mut found = vec![(rel.to_string(), entry)];

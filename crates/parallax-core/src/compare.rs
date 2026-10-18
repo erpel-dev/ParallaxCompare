@@ -225,6 +225,25 @@ pub fn compare_path(
     Ok(CompareResult { root, summary })
 }
 
+/// Compares the file at `lrel` on the left with the one at `rrel` on the right,
+/// e.g. a file that moved to another folder. Returns its status and, when it is
+/// similar, why.
+pub fn compare_pair(
+    left: &Source,
+    right: &Source,
+    lrel: &str,
+    rrel: &str,
+    opts: &CompareOptions,
+) -> Result<(Status, Option<&'static str>)> {
+    let control = Control::default();
+    let engine = Engine::new(left, right, opts, &control)?;
+    let (l, r) = (left.stat(lrel)?, right.stat(rrel)?);
+    if l.kind == EntryKind::Dir || r.kind == EntryKind::Dir {
+        return Err(Error::Unsupported("only files are compared across folders".into()));
+    }
+    engine.compare_files(lrel, rrel, &l, &r)
+}
+
 /// A root that is an archive file is compared as a folder.
 fn as_container(mut e: Entry) -> Entry {
     if e.kind == EntryKind::File && crate::vfs::archive::detect_format(&e.name).is_some() {
@@ -282,7 +301,7 @@ impl<'a> Engine<'a> {
             node.status = folder_status(&node.children);
         } else if !lc && !rc {
             self.control.files_done.fetch_add(1, Ordering::Relaxed);
-            let (status, reason) = self.compare_files(rel, l, r)?;
+            let (status, reason) = self.compare_files(rel, rel, l, r)?;
             node.status = status;
             node.message = reason.map(str::to_string);
             let counter = match status {
@@ -350,7 +369,7 @@ impl<'a> Engine<'a> {
 
     /// `Same`, `Different`, or `Similar` with the reason when the bytes differ but
     /// the active rules consider the content equal.
-    fn compare_files(&self, rel: &str, l: &Entry, r: &Entry) -> Result<(Status, Option<&'static str>)> {
+    fn compare_files(&self, lrel: &str, rrel: &str, l: &Entry, r: &Entry) -> Result<(Status, Option<&'static str>)> {
         const SAME: Result<(Status, Option<&'static str>)> = Ok((Status::Same, None));
         const DIFFERENT: Result<(Status, Option<&'static str>)> = Ok((Status::Different, None));
         if self.opts.mode == CompareMode::Quick
@@ -375,8 +394,8 @@ impl<'a> Engine<'a> {
         if l.size != r.size && !must_read {
             return DIFFERENT;
         }
-        let read_left = || self.left.vfs.read(&self.left.path(rel));
-        let read_right = || self.right.vfs.read(&self.right.path(rel));
+        let read_left = || self.left.vfs.read(&self.left.path(lrel));
+        let read_right = || self.right.vfs.read(&self.right.path(rrel));
         // A Git object or archive entry on one side, a plain file on the other: hash the
         // plain file the way the id was made instead of inflating the stored data.
         let (left_data, right_data) = match (&l.quick_id, &r.quick_id) {

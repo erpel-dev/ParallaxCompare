@@ -281,6 +281,37 @@ fn copy_between_sides() {
     assert!(!b.path().join("dir").exists());
 }
 
+/// Files that moved to another folder: compared and copied across paths, also into a zip.
+#[test]
+fn compare_and_copy_across_folders() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    write(a.path(), &[("cfg/config.json", "{\"a\": 1}"), ("src/util/s.rs", "x\r\n")]);
+    write(b.path(), &[("lib/config.json", "{\"a\": 2}"), ("src/common/s.rs", "x\n")]);
+    fs::write(b.path().join("pack.zip"), zip_bytes(&[("in/config.json", "old")])).unwrap();
+    let spec = |p: &Path| SourceSpec::parse(&p.display().to_string());
+    let (l, r) = open_pair(&spec(a.path()), &spec(b.path()), SourceOptions::default(), false).unwrap();
+    let opts = CompareOptions { ignore_line_endings: false, compare_contents: false, ..CompareOptions::default() };
+    let pair = |x: &str, y: &str, o: &CompareOptions| compare::compare_pair(&l, &r, x, y, o).unwrap().0;
+    assert_eq!(pair("cfg/config.json", "lib/config.json", &opts), Status::Different);
+    assert_eq!(pair("src/util/s.rs", "src/common/s.rs", &opts), Status::Different);
+    let eol = CompareOptions { ignore_line_endings: true, ..opts.clone() };
+    assert_eq!(pair("src/util/s.rs", "src/common/s.rs", &eol), Status::Similar);
+    assert!(compare::compare_pair(&l, &r, "cfg", "lib", &opts).is_err(), "folders are not paired");
+
+    ops::copy_file_as(&l, &r, "cfg/config.json", "lib/config.json", &Progress::default()).unwrap();
+    assert_eq!(fs::read_to_string(b.path().join("lib/config.json")).unwrap(), "{\"a\": 1}");
+    assert!(!b.path().join("cfg").exists(), "nothing is created at the source's path");
+    assert_eq!(pair("cfg/config.json", "lib/config.json", &opts), Status::Same);
+    assert!(ops::copy_file_as(&l, &r, "cfg", "lib", &Progress::default()).is_err());
+
+    // Into an archive on the other side.
+    let (l, z) =
+        open_pair(&spec(a.path()), &spec(&b.path().join("pack.zip")), SourceOptions::default(), false).unwrap();
+    ops::copy_file_as(&l, &z, "cfg/config.json", "in/config.json", &Progress::default()).unwrap();
+    assert_eq!(compare::compare_pair(&l, &z, "cfg/config.json", "in/config.json", &opts).unwrap().0, Status::Same);
+}
+
 #[test]
 fn copy_out_of_solid_and_non_solid_7z() {
     let dir = tempfile::tempdir().unwrap();

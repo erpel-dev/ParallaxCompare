@@ -364,6 +364,10 @@ export const api = {
     invoke<string>("rows_text", { id, side, start, end }),
   replaceRows: (id: number, side: SideName, start: number, end: number, text: string, replace: boolean) =>
     invoke<EditInfo>("replace_rows", { id, side, start, end, text, replace }),
+  comparePairs: (id: number, pairs: [string, string][], options: CompareOptions) =>
+    invoke<{ status: Node["status"]; message: string | null }[]>("compare_pairs", { id, pairs, options }),
+  copyFileAs: (id: number, from: string, to: string, toRight: boolean, options: CompareOptions) =>
+    invoke<OpResult>("copy_file_as", { id, from, to, toRight, options }),
   undo: (id: number) => invoke<EditInfo>("undo", { id }),
   redo: (id: number) => invoke<EditInfo>("redo", { id }),
   updateDiff: (id: number, options: DiffOptions, syntax: string | null) =>
