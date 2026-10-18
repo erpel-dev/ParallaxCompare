@@ -155,6 +155,24 @@ fn entry_from_path(path: &Path, name: String) -> Option<Entry> {
     Some(Entry { name, kind, size, mtime: to_unix(meta.modified()), quick_id: None })
 }
 
+fn special_kind(kind: fs::FileType) -> &'static str {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        if kind.is_fifo() {
+            return "named pipe";
+        }
+        if kind.is_socket() {
+            return "socket";
+        }
+        if kind.is_block_device() || kind.is_char_device() {
+            return "device";
+        }
+    }
+    let _ = kind;
+    "special file"
+}
+
 /// A symlink's target as Git stores it: the raw path text, with `/` separators.
 fn link_target(path: &Path) -> std::io::Result<Vec<u8>> {
     let target = fs::read_link(path)?.to_string_lossy().into_owned();
@@ -197,8 +215,13 @@ impl Vfs for LocalFs {
     fn read(&self, path: &str) -> Result<Data> {
         let abs = self.abs(path);
         let err = |e| Error::io(abs.display().to_string(), e);
-        if fs::symlink_metadata(&abs).map_err(err)?.file_type().is_symlink() {
+        let kind = fs::symlink_metadata(&abs).map_err(err)?.file_type();
+        if kind.is_symlink() {
             return link_target(&abs).map(Data::from_vec).map_err(err);
+        }
+        // Opening a named pipe waits for a writer, and devices never end: only files are read.
+        if !kind.is_file() && !kind.is_dir() {
+            return Err(Error::Unsupported(format!("{}: not a regular file ({})", abs.display(), special_kind(kind))));
         }
         let file = fs::File::open(&abs).map_err(err)?;
         let len = file.metadata().map_err(err)?.len();
@@ -237,7 +260,7 @@ impl Vfs for LocalFs {
                     }
                     make_symlink(&String::from_utf8_lossy(&data), &abs).map_err(io_err)
                 }
-                Change::Put { data, mtime, .. } => replace_file(&abs, &data, mtime).map_err(io_err),
+                Change::Put { data, mtime, .. } => replace_file(&abs, &data, mtime, None).map_err(io_err),
                 Change::Remove { .. } => match fs::symlink_metadata(&abs) {
                     Ok(meta) if meta.is_dir() => fs::remove_dir_all(&abs).map_err(io_err),
                     Ok(_) => fs::remove_file(&abs).map_err(io_err),
@@ -296,31 +319,67 @@ impl Vfs for LocalFs {
 }
 
 /// Writes a file through a temporary file in the same folder and renames it over
-/// the old one, so a failed write leaves the old file intact.
-fn replace_file(path: &Path, data: &[u8], mtime: Option<i64>) -> std::io::Result<()> {
+/// the old one, so a failed write leaves the old file intact, and a symlink at
+/// `path` is replaced rather than written through. The file gets `permissions`,
+/// or else those of the file it replaces.
+pub(crate) fn replace_file(
+    path: &Path,
+    data: &[u8],
+    mtime: Option<i64>,
+    permissions: Option<fs::Permissions>,
+) -> std::io::Result<()> {
     use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let temp = path.with_file_name(format!(".{name}.{}.parallax-tmp", std::process::id()));
+    // A name of its own for every write, created exclusively: two writers never share it.
+    let (temp, mut file) = loop {
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let temp = path.with_file_name(format!(".{name}.{}-{n}.parallax-tmp", std::process::id()));
+        match fs::OpenOptions::new().write(true).create_new(true).open(&temp) {
+            Ok(file) => break (temp, file),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    };
     let result = (|| {
-        let mut file = fs::File::create(&temp)?;
         file.write_all(data)?;
         if let Some(mtime) = mtime.filter(|t| *t >= 0) {
             file.set_modified(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(mtime as u64))?;
         }
         file.sync_all()?;
-        drop(file);
-        if let Ok(meta) = fs::metadata(path) {
-            fs::set_permissions(&temp, meta.permissions())?;
+        if let Some(permissions) = permissions.or_else(|| fs::metadata(path).ok().map(|m| m.permissions())) {
+            file.set_permissions(permissions)?;
         }
+        drop(file);
         fs::rename(&temp, path)
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temp);
     }
     result
+}
+
+/// Whether `a` and `b` are the same file on disk, also through hard links,
+/// symlinked folders or other spellings of the path. A symlink at `b` itself
+/// counts as its own entry.
+pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
+    let (Ok(meta_a), Ok(meta_b)) = (fs::metadata(a), fs::symlink_metadata(b)) else { return false };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let _ = (a, b);
+        meta_a.dev() == meta_b.dev() && meta_a.ino() == meta_b.ino()
+    }
+    // Without stable file ids: the same path once links are resolved (hard links are not seen).
+    #[cfg(not(unix))]
+    {
+        let _ = meta_a;
+        !meta_b.is_symlink() && fs::canonicalize(a).ok().is_some_and(|p| fs::canonicalize(b).ok() == Some(p))
+    }
 }
 
 #[cfg(unix)]
@@ -337,5 +396,50 @@ pub(crate) fn make_symlink(link_to: &str, at: &Path) -> std::io::Result<()> {
         std::os::windows::fs::symlink_dir(target, at)
     } else {
         std::os::windows::fs::symlink_file(target, at)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two writers at once each get their own temporary file: both succeed, and the
+    /// file ends up as one of them wrote it, whole.
+    #[test]
+    fn concurrent_replacements_stay_atomic() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.txt");
+        let (a, b) = (vec![b'A'; 1 << 20], vec![b'B'; 1 << 21]);
+        for _ in 0..10 {
+            let barrier = std::sync::Barrier::new(2);
+            let (ra, rb) = std::thread::scope(|s| {
+                let wa = s.spawn(|| {
+                    barrier.wait();
+                    replace_file(&target, &a, None, None)
+                });
+                let wb = s.spawn(|| {
+                    barrier.wait();
+                    replace_file(&target, &b, None, None)
+                });
+                (wa.join().unwrap(), wb.join().unwrap())
+            });
+            ra.unwrap();
+            rb.unwrap();
+            let got = fs::read(&target).unwrap();
+            assert!(got == a || got == b, "mixed content of {} bytes", got.len());
+        }
+        let left: Vec<_> = fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(left, ["target.txt"], "temporary files left behind");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn named_pipes_are_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new("mkfifo").arg(dir.path().join("pipe")).status().unwrap();
+        assert!(status.success());
+        let fs = LocalFs::new(dir.path().to_path_buf());
+        let Err(err) = fs.read("pipe") else { panic!("a pipe is not read") };
+        assert!(err.to_string().contains("named pipe"), "{err}");
     }
 }

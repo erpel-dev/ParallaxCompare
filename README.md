@@ -102,7 +102,7 @@ On Linux, where each folder needs its own watch, only the folders the compare sh
 All of the work happens in a multi-threaded Rust core; the UI only renders the rows that are visible.
 
 - **Git vs. Git:** tree ids are compared before anything is read. An unchanged folder costs a single id comparison, however large it is. Changed files are decided by their blob ids, without inflating the objects.
-- **Archives:** zip and 7z entries are compared with the CRC32 stored in the archive headers, so nothing is decompressed for listing.
+- **Archives:** zip and 7z entries are listed from the archive headers, so nothing is decompressed for listing. Their stored CRC32 tells differing entries apart without reading them; entries with equal CRC32 and size are decompressed and compared byte for byte, since different data can share a CRC32 (the quick compare by size and date does not read them).
 - **Git vs. local file:** the local file's Git blob id is computed and compared, instead of reading the Git object.
 - **Local files:** parallel walking (rayon), files are memory-mapped, and size mismatches short-circuit.
 - **Text views:** rows, intra-line marks and syntax colours are produced only for the visible window. Highlighter state is checkpointed every 128 lines, so jumping to line 900 000 does not re-parse the file from the top.

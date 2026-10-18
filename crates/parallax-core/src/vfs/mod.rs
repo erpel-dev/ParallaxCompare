@@ -55,6 +55,12 @@ impl QuickId {
         }
     }
 
+    /// Whether equal ids prove equal content. A Git id does; a 32-bit CRC only
+    /// proves inequality, since different data can share it.
+    pub fn proves_equality(&self) -> bool {
+        matches!(self, QuickId::GitOid(_))
+    }
+
     /// Whether `data` hashes to this id.
     pub fn matches_data(&self, data: &[u8]) -> bool {
         match self {

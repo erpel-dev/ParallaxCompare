@@ -4,15 +4,13 @@
 //! operation are collected first, since every write rewrites the archive.
 
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
 
 use rayon::prelude::*;
 
 use crate::progress::Progress;
 use crate::source::Source;
-use crate::vfs::local::make_symlink;
+use crate::vfs::local::{make_symlink, replace_file, same_file};
 use crate::vfs::{Change, Data, Entry, EntryKind, join};
 use crate::{Error, Result};
 
@@ -123,6 +121,13 @@ fn copy_entry(from: &Source, entry: &Entry, rel: &str, target: &Path, progress: 
             .map(|child| copy_entry(from, child, &join(rel, &child.name), &target.join(&child.name), progress))
             .try_reduce(|| 0, |a, b| Ok(a + b));
     }
+    let source_path = from.vfs.local_path(&from.path(rel));
+    // The same file on both sides (one folder opened twice, a hard link): nothing to copy.
+    // Writing it would truncate the file being read.
+    if entry.kind != EntryKind::Symlink && source_path.as_deref().is_some_and(|p| same_file(p, target)) {
+        progress.advance(1)?;
+        return Ok(0);
+    }
     let data = from.vfs.read(&from.path(rel))?;
     if entry.kind == EntryKind::Symlink {
         // The data of a symlink is its target path.
@@ -132,11 +137,11 @@ fn copy_entry(from: &Source, entry: &Entry, rel: &str, target: &Path, progress: 
         let link_to = String::from_utf8_lossy(&data).into_owned();
         make_symlink(&link_to, target).map_err(io_err)?;
     } else {
-        let mut file = fs::File::create(target).map_err(io_err)?;
-        file.write_all(&data).map_err(io_err)?;
-        if let Some(mtime) = entry.mtime.filter(|t| *t >= 0) {
-            let _ = file.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(mtime as u64));
-        }
+        // Written next to the target and renamed over it: a symlink there is replaced, not
+        // followed, and the target is only replaced once the copy is complete. The file
+        // keeps the source's permissions (the executable bit), when the source is on disk.
+        let permissions = source_path.and_then(|p| fs::metadata(p).ok()).map(|m| m.permissions());
+        replace_file(target, &data, entry.mtime, permissions).map_err(io_err)?;
     }
     progress.advance(1)?;
     Ok(1)

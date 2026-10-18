@@ -8,9 +8,9 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Weak};
+use std::time::{Duration, Instant, SystemTime};
 
 use notify::{RecursiveMode, Watcher as _};
 use parking_lot::Mutex;
@@ -24,7 +24,8 @@ const QUIET: Duration = Duration::from_millis(200);
 const MAX_DELAY: Duration = Duration::from_secs(1);
 /// More distinct paths than this are merged into their folders.
 const MAX_PATHS: usize = 200;
-/// How long after the app's own write its events are ignored.
+/// How long after the app's own write its events are ignored, as long as the
+/// written files are still as the write left them.
 const OWN_WRITE_GRACE: Duration = Duration::from_secs(2);
 
 /// Changed compare paths, or `full` when everything should be compared again.
@@ -39,39 +40,89 @@ type Ignore = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 pub struct Watcher {
     _inner: Arc<Mutex<notify::RecommendedWatcher>>,
     own: Arc<Mutex<OwnWrites>>,
+    roots: Arc<Vec<WatchRoot>>,
+}
+
+/// Size and modification time of a file, to tell whether it changed since.
+type Stamp = Option<(u64, SystemTime)>;
+
+fn stamp(path: &Path) -> Stamp {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.len(), meta.modified().ok()?))
+}
+
+/// A write of the app: its compare paths (`""` for a watched file root), and once
+/// it is done, when it stops counting and the files as it left them.
+struct OwnWrite {
+    id: u64,
+    paths: Vec<String>,
+    done: Option<(Instant, Vec<(PathBuf, Stamp)>)>,
 }
 
 /// Paths the app is writing, or wrote until a moment ago.
 #[derive(Default)]
 struct OwnWrites {
     next_id: u64,
-    /// Per write: its id, its paths, and when it stops counting (`None` while running).
-    writes: Vec<(u64, Vec<String>, Option<Instant>)>,
+    writes: Vec<OwnWrite>,
 }
 
 impl OwnWrites {
-    /// The paths of writes still counting; `""` for writes to a watched file root.
-    fn active(&mut self) -> Vec<String> {
+    /// Whether the event for `path` comes from one of the app's writes: one still
+    /// running, or one that ended a moment ago and left the file as it is now. A
+    /// change by someone else right after a save is still reported. `rel` is the
+    /// compare path in a watched tree; `None` for a watched archive or file, which
+    /// any write changes as a whole.
+    fn covers(&mut self, rel: Option<&str>, path: &Path) -> bool {
         let now = Instant::now();
-        self.writes.retain(|(_, _, until)| until.is_none_or(|t| t > now));
-        self.writes.iter().flat_map(|(_, paths, _)| paths.iter().cloned()).collect()
+        self.writes.retain(|w| w.done.as_ref().is_none_or(|(until, _)| *until > now));
+        self.writes.iter().any(|w| {
+            rel.is_none_or(|rel| w.paths.iter().any(|p| overlaps(p, rel)))
+                && match &w.done {
+                    None => true,
+                    Some((_, files)) => match files.iter().find(|(p, _)| p == path) {
+                        Some((_, then)) => *then == stamp(path),
+                        // Inside a written folder, or a temporary file next to the target.
+                        None => true,
+                    },
+                }
+        })
     }
 }
 
 /// Keeps the app's own write from being reported; ends a moment after it is dropped.
 pub struct WriteGuard {
     own: Arc<Mutex<OwnWrites>>,
+    roots: Arc<Vec<WatchRoot>>,
     id: u64,
 }
 
 impl Drop for WriteGuard {
     fn drop(&mut self) {
         let until = Instant::now() + OWN_WRITE_GRACE;
-        for (id, _, end) in &mut self.own.lock().writes {
-            if *id == self.id {
-                *end = Some(until);
-            }
-        }
+        let mut own = self.own.lock();
+        let Some(write) = own.writes.iter_mut().find(|w| w.id == self.id) else { return };
+        // The written files as the write left them; folders are not stamped.
+        let files = write
+            .paths
+            .iter()
+            .flat_map(|rel| self.roots.iter().filter_map(move |root| root_path(root, rel)))
+            .filter(|p| p.is_file())
+            .map(|p| {
+                let s = stamp(&p);
+                (p, s)
+            })
+            .collect();
+        write.done = Some((until, files));
+    }
+}
+
+/// The file system path of compare path `rel` under `root`: for a watched archive
+/// or file, that file.
+fn root_path(root: &WatchRoot, rel: &str) -> Option<PathBuf> {
+    match root {
+        WatchRoot::Tree { dir, .. } => Some(if rel.is_empty() { dir.clone() } else { dir.join(rel) }),
+        // Written into as a whole, whatever the path inside.
+        WatchRoot::File(file) => Some(file.clone()),
     }
 }
 
@@ -98,9 +149,13 @@ impl Watcher {
                 }
             }
         }
-        let watching = inner.clone();
+        // Weak: the thread ends when the sender inside the watcher is dropped, which a
+        // strong reference here would prevent, leaking the thread and its inotify instance.
+        let watching = Arc::downgrade(&inner);
         let own_writes: Arc<Mutex<OwnWrites>> = Arc::default();
         let own = own_writes.clone();
+        let roots = Arc::new(roots);
+        let thread_roots = roots.clone();
         std::thread::Builder::new()
             .name("watch".into())
             .spawn(move || {
@@ -119,17 +174,17 @@ impl Watcher {
                         }
                     }
                     let changes: Vec<notify::Event> = events.into_iter().flatten().filter(|e| !is_noise(e)).collect();
-                    if PER_FOLDER {
-                        watch_new_folders(&watching, &roots, &changes, &ignore);
+                    if PER_FOLDER && let Some(watching) = Weak::upgrade(&watching) {
+                        watch_new_folders(&watching, &thread_roots, &changes, &ignore);
                     }
                     let paths = changes.into_iter().flat_map(|e| e.paths);
-                    if let Some(batch) = to_batch(&roots, paths, &*ignore, &own) {
+                    if let Some(batch) = to_batch(&thread_roots, paths, &*ignore, &own) {
                         on_change(batch);
                     }
                 }
             })
             .map_err(|e| Error::io("watch thread", e))?;
-        Ok(Watcher { _inner: inner, own: own_writes })
+        Ok(Watcher { _inner: inner, own: own_writes, roots })
     }
 
     /// The app writes these compare paths until the guard is dropped (and their
@@ -138,8 +193,8 @@ impl Watcher {
         let mut own = self.own.lock();
         own.next_id += 1;
         let id = own.next_id;
-        own.writes.push((id, paths.to_vec(), None));
-        WriteGuard { own: self.own.clone(), id }
+        own.writes.push(OwnWrite { id, paths: paths.to_vec(), done: None });
+        WriteGuard { own: self.own.clone(), roots: self.roots.clone(), id }
     }
 }
 
@@ -244,13 +299,13 @@ fn to_batch(
     ignore: &dyn Fn(&str) -> bool,
     own: &Mutex<OwnWrites>,
 ) -> Option<Batch> {
-    let own = own.lock().active();
+    let mut own = own.lock();
     let mut found = BTreeSet::new();
     for path in paths {
         for root in roots {
             match root {
-                // A watched archive or file changes as a whole: any write of ours is it.
-                WatchRoot::File(file) if path == *file && own.is_empty() => {
+                // A watched archive or file changes as a whole.
+                WatchRoot::File(file) if path == *file && !own.covers(None, &path) => {
                     return Some(Batch { paths: vec![String::new()], full: true });
                 }
                 WatchRoot::File(_) => {}
@@ -262,7 +317,7 @@ fn to_batch(
                         || rel.ends_with(".parallax-tmp")
                         || rel.split('/').any(|p| p == ".git")
                         || ignore(&rel)
-                        || own.iter().any(|p| overlaps(p, &rel))
+                        || own.covers(Some(&rel), &path)
                     {
                         continue;
                     }
@@ -331,7 +386,10 @@ mod tests {
         let root = PathBuf::from("/data/tree");
         let roots =
             [WatchRoot::Tree { dir: root.clone(), gitignore: false }, WatchRoot::File(PathBuf::from("/data/pack.zip"))];
-        let own = Mutex::new(OwnWrites { next_id: 1, writes: vec![(1, vec!["written/file.txt".to_string()], None)] });
+        let own = Mutex::new(OwnWrites {
+            next_id: 1,
+            writes: vec![OwnWrite { id: 1, paths: vec!["written/file.txt".to_string()], done: None }],
+        });
         let ignore = |rel: &str| rel.starts_with("build");
         let paths =
             ["a.txt", ".git/index", "build/out.o", "written/file.txt", "written", ".x.123.parallax-tmp", "src/b.rs"]
@@ -365,6 +423,50 @@ mod tests {
         std::fs::write(dir.path().join("made/deeper/x.txt"), "x").unwrap();
         let batch = rx.recv_timeout(Duration::from_secs(10)).expect("an event");
         assert_eq!(batch.paths, vec!["made/deeper/x.txt".to_string()], "{batch:?}");
+    }
+
+    /// Someone else writing a file right after the app saved it is reported, even
+    /// within the grace time for the app's own events.
+    #[test]
+    fn a_change_right_after_our_write_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("saved.txt");
+        std::fs::write(&file, "old").unwrap();
+        let (tx, rx) = mpsc::channel();
+        let roots = [Some(WatchRoot::Tree { dir: dir.path().to_path_buf(), gitignore: false })];
+        let watcher = Watcher::new(&roots, Arc::new(|_: &str| false), move |b| tx.send(b).unwrap()).unwrap();
+        let guard = watcher.writing(&["saved.txt".to_string()]);
+        std::fs::write(&file, "ours").unwrap();
+        drop(guard);
+        // Our own write is not reported.
+        assert!(rx.recv_timeout(Duration::from_millis(800)).is_err(), "own write reported");
+        std::fs::write(&file, "EXTERNAL NEW CONTENT").unwrap();
+        let batch = rx.recv_timeout(Duration::from_secs(10)).expect("the external change");
+        assert_eq!(batch.paths, vec!["saved.txt".to_string()]);
+    }
+
+    /// Dropping a watcher ends its thread and closes its inotify instance.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dropped_watchers_release_their_threads() {
+        let count = |dir: &str| std::fs::read_dir(dir).unwrap().count();
+        let dir = tempfile::tempdir().unwrap();
+        let roots = [Some(WatchRoot::Tree { dir: dir.path().to_path_buf(), gitignore: false })];
+        // Warm up anything created once per process.
+        drop(Watcher::new(&roots, Arc::new(|_: &str| false), |_| {}).unwrap());
+        std::thread::sleep(Duration::from_millis(300));
+        let (threads, fds) = (count("/proc/self/task"), count("/proc/self/fd"));
+        for _ in 0..20 {
+            drop(Watcher::new(&roots, Arc::new(|_: &str| false), |_| {}).unwrap());
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && (count("/proc/self/task") > threads + 2 || count("/proc/self/fd") > fds + 2)
+        {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        // Other tests run in parallel threads: allow a little slack, not 20 of each.
+        assert!(count("/proc/self/task") <= threads + 4, "threads {} -> {}", threads, count("/proc/self/task"));
+        assert!(count("/proc/self/fd") <= fds + 4, "fds {} -> {}", fds, count("/proc/self/fd"));
     }
 
     #[cfg(target_os = "linux")]

@@ -40,3 +40,19 @@ fn hunk_headers_follow_unified_diff() {
     let (_, out) = parallax(&[b.to_str().unwrap(), a.to_str().unwrap(), "-U", "0"]);
     assert!(out.contains("@@ -4,1 +3,0 @@\n-4\n"), "{out}");
 }
+
+/// Entries that could not be read make the exit status 2, also with --json, after
+/// the result is printed.
+#[test]
+fn unreadable_entries_exit_with_2() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    fs::write(a.path().join("broken.zip"), "not a zip").unwrap();
+    fs::write(b.path().join("broken.zip"), "not a zip either").unwrap();
+    let (code, out) = parallax(&[a.path().to_str().unwrap(), b.path().to_str().unwrap()]);
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("1 errors"), "{out}");
+    let (code, out) = parallax(&[a.path().to_str().unwrap(), b.path().to_str().unwrap(), "--json"]);
+    assert_eq!(code, 2);
+    assert!(out.contains("\"errors\":1"), "{out}");
+}

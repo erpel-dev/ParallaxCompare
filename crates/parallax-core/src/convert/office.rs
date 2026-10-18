@@ -227,7 +227,8 @@ fn xlsx(zip: &mut Zip) -> Result<String> {
             Ev::End("c") => {
                 let mut shown = match cell_type.as_str() {
                     "s" => value.trim().parse::<usize>().ok().and_then(|i| shared.get(i).cloned()).unwrap_or_default(),
-                    "" => (if value.trim() == "1" { "TRUE" } else { "FALSE" }).to_string(),
+                    // Numbers have no type or "n"; booleans are "b".
+                    "b" => (if value.trim() == "1" { "TRUE" } else { "FALSE" }).to_string(),
                     _ => value.clone(),
                 };
                 if !formula.is_empty() {
@@ -421,6 +422,47 @@ impl Drop for Cleanup {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn workbook(cells: &str) -> Vec<u8> {
+        use std::io::Write;
+        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let opts = zip::write::SimpleFileOptions::default();
+        let parts = [
+            (
+                "xl/workbook.xml",
+                r#"<workbook><sheets><sheet name="S" sheetId="1" r:id="rId1"/></sheets></workbook>"#.to_string(),
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                r#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>"#
+                    .to_string(),
+            ),
+            (
+                "xl/worksheets/sheet1.xml",
+                format!("<worksheet><sheetData><row r=\"1\">{cells}</row></sheetData></worksheet>"),
+            ),
+        ];
+        for (name, text) in parts {
+            w.start_file(name, opts).unwrap();
+            w.write_all(text.as_bytes()).unwrap();
+        }
+        w.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn cell_types() {
+        let text = |cells: &str| ooxml_text("xlsx", &workbook(cells)).unwrap();
+        // Numbers may leave out the type.
+        assert_eq!(text(r#"<c r="A1"><v>2</v></c>"#), "=== Sheet: S ===\n2\n");
+        assert_ne!(text(r#"<c r="A1"><v>2</v></c>"#), text(r#"<c r="A1"><v>3</v></c>"#));
+        assert_eq!(
+            text(
+                r#"<c r="A1" t="n"><v>-1.5</v></c><c r="B1" t="b"><v>1</v></c><c r="C1" t="b"><v>0</v></c><c r="D1"/>"#
+            ),
+            "=== Sheet: S ===\n-1.5\tTRUE\tFALSE\n"
+        );
+        assert_eq!(text(r#"<c r="A1"><f>B1+1</f><v>4</v></c>"#), "=== Sheet: S ===\n4 {=B1+1}\n");
+    }
 
     #[test]
     fn columns() {

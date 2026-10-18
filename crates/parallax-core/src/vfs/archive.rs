@@ -56,6 +56,9 @@ pub fn detect_format(name: &str) -> Option<ArchiveFormat> {
 struct Index {
     dirs: HashMap<String, Vec<Entry>>,
     known_dirs: HashSet<String>,
+    /// Where each file sits in its folder's list, to replace a repeated entry
+    /// without searching the folder (which made large flat archives quadratic).
+    file_at: HashMap<String, usize>,
 }
 
 impl Index {
@@ -87,9 +90,20 @@ impl Index {
         let (parent, name) = split_parent(path);
         self.ensure_dir(parent, None);
         let list = self.dirs.get_mut(parent).expect("parent dir exists");
+        let entry = Entry { name: name.to_string(), kind, size, mtime, quick_id };
         // Later entries win, like extraction would behave.
-        list.retain(|e| e.name != name);
-        list.push(Entry { name: name.to_string(), kind, size, mtime, quick_id });
+        if let Some(&at) = self.file_at.get(path) {
+            list[at] = entry;
+        } else if let Some(at) =
+            self.known_dirs.contains(path).then(|| list.iter().position(|e| e.name == name)).flatten()
+        {
+            // A folder and a file of the same name: the file takes the folder's place.
+            list[at] = entry;
+            self.file_at.insert(path.to_string(), at);
+        } else {
+            self.file_at.insert(path.to_string(), list.len());
+            list.push(entry);
+        }
     }
 }
 
@@ -189,7 +203,7 @@ fn open_7z(data: Data, index: &mut Index) -> Result<Backend> {
             index.ensure_dir(&path, mtime);
         } else {
             let quick_id = file.has_crc.then_some(QuickId::Crc32(file.crc as u32));
-            index.add_file(&path, EntryKind::File, file.size, mtime, quick_id);
+            index.add_file(&path, sevenz_kind(file), file.size, mtime, quick_id);
             index_of.insert(path, i);
         }
     }
@@ -199,6 +213,14 @@ fn open_7z(data: Data, index: &mut Index) -> Result<Backend> {
     }
     let solid = files_per_block.iter().map(|&n| (n > 1).then(|| Mutex::new(None))).collect();
     Ok(Backend::SevenZ { data, archive: Box::new(archive), index_of, solid })
+}
+
+/// A symlink, when the entry has a Unix mode, which 7-Zip stores in the high 16
+/// bits of the attributes, flagged by 0x8000; otherwise a file.
+fn sevenz_kind(file: &sevenz_rust2::ArchiveEntry) -> EntryKind {
+    let attributes = file.windows_attributes;
+    let is_link = file.has_windows_attributes && attributes & 0x8000 != 0 && (attributes >> 16) & 0o170000 == 0o120000;
+    if is_link { EntryKind::Symlink } else { EntryKind::File }
 }
 
 /// The decompressed tar stream of a tar archive.
@@ -360,6 +382,23 @@ mod tests {
     fn civil_dates() {
         assert_eq!(civil_to_unix(1970, 1, 1), 0);
         assert_eq!(civil_to_unix(2000, 3, 1), 951_868_800);
+    }
+
+    #[test]
+    fn large_flat_archives_index_in_linear_time() {
+        let mut index = Index::new();
+        let n = 200_000;
+        let start = std::time::Instant::now();
+        for i in 0..n {
+            index.add_file(&format!("f{i}"), EntryKind::File, 1, None, None);
+        }
+        // A repeated entry replaces the earlier one.
+        index.add_file("f7", EntryKind::File, 2, None, None);
+        let root = &index.dirs[""];
+        assert_eq!(root.len(), n);
+        assert_eq!(root[7].size, 2);
+        // Quadratic insertion took minutes for this many entries.
+        assert!(start.elapsed() < std::time::Duration::from_secs(10), "{:?}", start.elapsed());
     }
 
     #[test]

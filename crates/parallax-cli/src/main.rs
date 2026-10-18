@@ -155,11 +155,19 @@ fn compare_folders(cli: &Cli, left: &Source, right: &Source, paint: &Paint) -> R
     let result = compare::compare(left, right, &opts, &Control::default())?;
     // Like `diff`, only differences that count under the active rules make the exit status 1.
     let identical = matches!(result.root.status, Status::Same | Status::Similar);
+    // Entries that could not be read make the comparison incomplete: exit status 2,
+    // after the result is printed.
+    let complete = |errors: u64| match errors {
+        0 => Ok(identical),
+        1 => anyhow::bail!("1 entry could not be compared"),
+        n => anyhow::bail!("{n} entries could not be compared"),
+    };
     let mut out = std::io::stdout().lock();
     if cli.json {
         serde_json::to_writer(&mut out, &result)?;
         writeln!(out)?;
-        return Ok(identical);
+        drop(out);
+        return complete(result.summary.errors);
     }
     print_tree(&mut out, &result.root, "", cli.all, paint)?;
     let s = &result.summary;
@@ -180,7 +188,8 @@ fn compare_folders(cli: &Cli, left: &Source, right: &Source, paint: &Paint) -> R
             String::new()
         },
     )?;
-    Ok(identical)
+    drop(out);
+    complete(s.errors)
 }
 
 fn print_tree(out: &mut impl Write, node: &Node, prefix: &str, all: bool, paint: &Paint) -> Result<()> {

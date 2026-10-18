@@ -372,6 +372,10 @@ impl<'a> Engine<'a> {
     fn compare_files(&self, lrel: &str, rrel: &str, l: &Entry, r: &Entry) -> Result<(Status, Option<&'static str>)> {
         const SAME: Result<(Status, Option<&'static str>)> = Ok((Status::Same, None));
         const DIFFERENT: Result<(Status, Option<&'static str>)> = Ok((Status::Different, None));
+        // A symlink whose target text equals a file's bytes is still not that file.
+        if l.kind != r.kind {
+            return Ok((Status::Different, Some(kind_change(l.kind, r.kind))));
+        }
         if self.opts.mode == CompareMode::Quick
             && let (Some(a), Some(b)) = (l.mtime, r.mtime)
         {
@@ -384,7 +388,7 @@ impl<'a> Engine<'a> {
         if let (Some(a), Some(b)) = (&l.quick_id, &r.quick_id)
             && let Some(equal) = a.matches(b)
         {
-            if equal && l.size == r.size {
+            if equal && l.size == r.size && a.proves_equality() {
                 return SAME;
             }
             if !equal && !must_read {
@@ -402,9 +406,11 @@ impl<'a> Engine<'a> {
             (Some(id), None) => {
                 let data = read_right()?;
                 if l.size == r.size && id.matches_data(&data) {
-                    return SAME;
-                }
-                if !must_read {
+                    // A CRC match still needs the bytes compared below.
+                    if id.proves_equality() {
+                        return SAME;
+                    }
+                } else if !must_read {
                     return DIFFERENT;
                 }
                 (read_left()?, data)
@@ -412,9 +418,11 @@ impl<'a> Engine<'a> {
             (None, Some(id)) => {
                 let data = read_left()?;
                 if l.size == r.size && id.matches_data(&data) {
-                    return SAME;
-                }
-                if !must_read {
+                    // A CRC match still needs the bytes compared below.
+                    if id.proves_equality() {
+                        return SAME;
+                    }
+                } else if !must_read {
                     return DIFFERENT;
                 }
                 (data, read_right()?)
@@ -431,6 +439,14 @@ impl<'a> Engine<'a> {
             return Ok((Status::Similar, Some(reason)));
         }
         DIFFERENT
+    }
+}
+
+fn kind_change(l: EntryKind, r: EntryKind) -> &'static str {
+    match (l, r) {
+        (EntryKind::Symlink, EntryKind::File) => "a symlink on the left, a file on the right",
+        (EntryKind::File, EntryKind::Symlink) => "a file on the left, a symlink on the right",
+        _ => "a different kind of entry on each side",
     }
 }
 

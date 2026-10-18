@@ -835,3 +835,138 @@ fn file_history_and_git_location() {
     let done = parallax_core::source::complete(&format!("{}@fe", repo.display()), 10);
     assert_eq!(done, [format!("{}@feature", repo.display())]);
 }
+
+fn pair(left: &Path, right: &Path) -> (Source, Source) {
+    open_pair(
+        &SourceSpec::parse(&left.display().to_string()),
+        &SourceSpec::parse(&right.display().to_string()),
+        SourceOptions::default(),
+        false,
+    )
+    .unwrap()
+}
+
+/// The same file on both sides: one folder opened twice, or a hard link. Copying
+/// it must not truncate it (large files are read through a memory map).
+#[test]
+fn copying_a_file_onto_itself_keeps_it() {
+    let a = tempfile::tempdir().unwrap();
+    let big = vec![b'A'; 512 * 1024];
+    fs::write(a.path().join("big.bin"), &big).unwrap();
+    fs::write(a.path().join("small.txt"), "small").unwrap();
+    let (l, r) = pair(a.path(), a.path());
+    copy(&l, &r, "big.bin").unwrap();
+    copy(&l, &r, "small.txt").unwrap();
+    assert_eq!(fs::read(a.path().join("big.bin")).unwrap(), big);
+    assert_eq!(fs::read_to_string(a.path().join("small.txt")).unwrap(), "small");
+
+    #[cfg(unix)]
+    {
+        let b = tempfile::tempdir().unwrap();
+        fs::hard_link(a.path().join("big.bin"), b.path().join("big.bin")).unwrap();
+        let (l, r) = pair(a.path(), b.path());
+        copy(&l, &r, "big.bin").unwrap();
+        assert_eq!(fs::read(a.path().join("big.bin")).unwrap(), big);
+    }
+}
+
+/// A symlink on the destination side is replaced by the copied file; the file it
+/// points to stays as it is.
+#[cfg(unix)]
+#[test]
+fn copying_over_a_symlink_replaces_the_link() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(a.path().join("link"), "new content").unwrap();
+    fs::write(outside.path().join("outside.txt"), "DO NOT OVERWRITE").unwrap();
+    std::os::unix::fs::symlink(outside.path().join("outside.txt"), b.path().join("link")).unwrap();
+    let (l, r) = pair(a.path(), b.path());
+    assert_eq!(copy(&l, &r, "link").unwrap(), 1);
+    assert_eq!(fs::read_to_string(outside.path().join("outside.txt")).unwrap(), "DO NOT OVERWRITE");
+    assert!(!fs::symlink_metadata(b.path().join("link")).unwrap().is_symlink());
+    assert_eq!(fs::read_to_string(b.path().join("link")).unwrap(), "new content");
+}
+
+#[cfg(unix)]
+#[test]
+fn copying_keeps_the_executable_bit() {
+    use std::os::unix::fs::PermissionsExt;
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    write(a.path(), &[("tools/script.sh", "#!/bin/sh\n"), ("tools/notes.txt", "x")]);
+    fs::set_permissions(a.path().join("tools/script.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(a.path().join("tools/notes.txt"), fs::Permissions::from_mode(0o640)).unwrap();
+    let (l, r) = pair(a.path(), b.path());
+    copy(&l, &r, "tools").unwrap();
+    let mode = |p: &str| fs::metadata(b.path().join(p)).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode("tools/script.sh"), 0o755);
+    assert_eq!(mode("tools/notes.txt"), 0o640);
+    // Over an existing file too.
+    fs::write(a.path().join("tools/script.sh"), "#!/bin/sh\necho\n").unwrap();
+    copy(&l, &r, "tools/script.sh").unwrap();
+    assert_eq!(mode("tools/script.sh"), 0o755);
+}
+
+/// Two different payloads with the same CRC32 and size: an equal CRC is not taken
+/// as equal content, inside zips and against a plain file.
+#[test]
+fn equal_crc32_is_not_equal_content() {
+    let a: &[u8] = &[0x13, 0x51, 0x7a, 0x08, 0xbf, 0xc8, 0xc2, 0x63];
+    let b: &[u8] = &[0x5d, 0xfc, 0xf5, 0x23, 0x46, 0x54, 0x0e, 0xd9];
+    assert_eq!(crc32fast::hash(a), crc32fast::hash(b));
+    let dir = tempfile::tempdir().unwrap();
+    let (left, right) = (dir.path().join("l.zip"), dir.path().join("r.zip"));
+    fs::write(&left, zip_raw(&[("payload.bin", a)])).unwrap();
+    fs::write(&right, zip_raw(&[("payload.bin", b)])).unwrap();
+    let list = statuses(&left.display().to_string(), &right.display().to_string(), &CompareOptions::default());
+    assert_eq!(status_of(&list, "payload.bin"), Status::Different);
+    let folder = dir.path().join("folder");
+    fs::create_dir(&folder).unwrap();
+    fs::write(folder.join("payload.bin"), b).unwrap();
+    let list = statuses(&left.display().to_string(), &folder.display().to_string(), &CompareOptions::default());
+    assert_eq!(status_of(&list, "payload.bin"), Status::Different);
+    // Equal data with an equal CRC is still the same.
+    fs::write(folder.join("payload.bin"), a).unwrap();
+    let list = statuses(&left.display().to_string(), &folder.display().to_string(), &CompareOptions::default());
+    assert_eq!(status_of(&list, "payload.bin"), Status::Same);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_is_not_a_file_with_its_target_as_content() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink("real.txt", a.path().join("link")).unwrap();
+    fs::write(b.path().join("link"), "real.txt").unwrap();
+    let list = statuses(&a.path().display().to_string(), &b.path().display().to_string(), &CompareOptions::default());
+    assert_eq!(status_of(&list, "link"), Status::Different);
+}
+
+/// A symlink copied into a 7z archive is read back as a symlink and copied out as one.
+#[cfg(unix)]
+#[test]
+fn symlinks_survive_a_round_trip_through_7z() {
+    for kind in ["7z", "7z-non-solid"] {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("pack.7z");
+        fs::write(&archive, archive_bytes(kind, &[("keep.txt", "k")])).unwrap();
+        let src = dir.path().join("src");
+        write(&src, &[("real.txt", "real")]);
+        std::os::unix::fs::symlink("real.txt", src.join("link")).unwrap();
+        std::os::unix::fs::symlink("missing", src.join("dangling")).unwrap();
+        let (s, z) = pair(&src, &archive);
+        copy(&s, &z, "link").unwrap();
+        copy(&s, &z, "dangling").unwrap();
+        let (_, z) = pair(&src, &archive);
+        assert_eq!(z.stat("link").unwrap().kind, EntryKind::Symlink, "{kind}");
+        assert_eq!(z.stat("keep.txt").unwrap().kind, EntryKind::File, "{kind}");
+        let out = dir.path().join("out");
+        fs::create_dir(&out).unwrap();
+        let (z, o) = pair(&archive, &out);
+        copy(&z, &o, "link").unwrap();
+        copy(&z, &o, "dangling").unwrap();
+        assert_eq!(fs::read_link(out.join("link")).unwrap(), Path::new("real.txt"), "{kind}");
+        assert_eq!(fs::read_link(out.join("dangling")).unwrap(), Path::new("missing"), "{kind}");
+    }
+}
