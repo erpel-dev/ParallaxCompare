@@ -22,6 +22,7 @@ mod ftl;
 pub mod gguf;
 mod image_diff;
 mod image_meta;
+mod js;
 mod linkmap;
 mod lockfile;
 mod mdf;
@@ -35,6 +36,7 @@ mod perl;
 mod pretty;
 mod python;
 mod rst;
+mod rust;
 mod safetensors;
 mod sqlite;
 mod table;
@@ -148,6 +150,10 @@ pub enum View {
     PythonOutline,
     /// Perl: per package the modules used, variables and subs with a checksum of each body.
     PerlOutline,
+    /// Rust: items per module with fields, members and a checksum of each function body.
+    RustOutline,
+    /// JavaScript and TypeScript: imports, declarations and a checksum of each function body.
+    JsOutline,
 }
 
 impl View {
@@ -200,7 +206,7 @@ impl View {
             View::TemplateOutline => "Template outline",
             View::ConanGraph => "Conan graph",
             View::NormalizedConan => "Normalized",
-            View::PythonOutline | View::PerlOutline => "Code outline",
+            View::PythonOutline | View::PerlOutline | View::RustOutline | View::JsOutline => "Code outline",
         }
     }
 }
@@ -263,6 +269,8 @@ enum Kind {
     ConanManifest,
     Python,
     Perl,
+    Rust,
+    Js(js::Dialect),
 }
 
 fn extension(name: &str) -> String {
@@ -471,6 +479,8 @@ pub fn views_for(name: &str, data: &[u8]) -> Vec<View> {
         Kind::ConanGraph => vec![View::ConanGraph, View::PrettyJson, View::Text],
         Kind::Python => vec![View::Text, View::PythonOutline],
         Kind::Perl => vec![View::Text, View::PerlOutline],
+        Kind::Rust => vec![View::Text, View::RustOutline],
+        Kind::Js(_) => vec![View::Text, View::JsOutline],
         Kind::ConanIni => vec![View::Text, View::NormalizedConan],
         Kind::ConanManifest => vec![View::Text],
     };
@@ -484,9 +494,14 @@ fn script_kind(ext: &str, data: &[u8]) -> Option<Kind> {
     let shebang = |lang: &[u8]| first.starts_with(b"#!") && first.windows(lang.len()).any(|w| w == lang);
     match ext {
         "py" | "pyi" | "pyw" => Some(Kind::Python),
+        "rs" => Some(Kind::Rust),
+        "js" | "mjs" | "cjs" | "jsx" | "ts" | "mts" | "cts" | "tsx" => {
+            js::Dialect::of(&format!("x.{ext}")).map(Kind::Js)
+        }
         "pl" | "pm" | "psgi" => Some(Kind::Perl),
         "t" if shebang(b"perl") || data.windows(4).take(4096).any(|w| w == b"use ") => Some(Kind::Perl),
         "" if shebang(b"python") => Some(Kind::Python),
+        "" if shebang(b"node") => Some(Kind::Js(js::Dialect { ts: false, jsx: false })),
         "" if shebang(b"perl") => Some(Kind::Perl),
         _ => None,
     }
@@ -567,9 +582,18 @@ pub fn render(view: View, name: &str, data: &[u8]) -> Result<String> {
         View::ConanGraph => conan::graph(data),
         View::PythonOutline => Ok(python::outline(&text::decode(data).text)),
         View::PerlOutline => Ok(perl::outline(&text::decode(data).text)),
+        View::RustOutline => Ok(rust::outline(&text::decode(data).text)),
+        View::JsOutline => match kind_of(name, data) {
+            Kind::Js(d) => Ok(js::outline(&text::decode(data).text, d)),
+            _ => Ok(js::outline(&text::decode(data).text, js::Dialect { ts: false, jsx: true })),
+        },
         View::NormalizedConan => Ok(conan::normalized(&text::decode(data).text)),
     }
 }
+
+/// Source files larger than this are compared by bytes only (a minified
+/// bundle of 4 MB takes about a second).
+const MAX_SOURCE_COMPARE: usize = 16 * 1024 * 1024;
 
 /// Whether [`content_equal`] can apply to a file, judged by its name alone.
 pub fn has_content_rule(name: &str) -> bool {
@@ -583,6 +607,15 @@ pub fn has_content_rule(name: &str) -> bool {
         || matches!(
             extension(name).as_str(),
             "a2l"
+                | "rs"
+                | "js"
+                | "mjs"
+                | "cjs"
+                | "jsx"
+                | "ts"
+                | "mts"
+                | "cts"
+                | "tsx"
                 | "py"
                 | "pyi"
                 | "pyw"
@@ -730,6 +763,14 @@ pub fn content_equal(name: &str, left: &[u8], right: &[u8]) -> Option<&'static s
         Kind::Python => {
             let (l, r) = (text::decode(left).text, text::decode(right).text);
             return python::same_code(&l, &r).then_some("same code, only comments or formatting differ");
+        }
+        Kind::Rust if left.len().max(right.len()) <= MAX_SOURCE_COMPARE => {
+            let (l, r) = (text::decode(left).text, text::decode(right).text);
+            return rust::same_code(&l, &r).then_some("same code, only comments or formatting differ");
+        }
+        Kind::Js(d) if left.len().max(right.len()) <= MAX_SOURCE_COMPARE => {
+            let (l, r) = (text::decode(left).text, text::decode(right).text);
+            return js::same_code(&l, &r, d).then_some("same code, only comments or formatting differ");
         }
         Kind::Perl => {
             let (l, r) = (text::decode(left).text, text::decode(right).text);
@@ -1096,5 +1137,51 @@ mod tests {
         assert_eq!(views_for("bin/tool", b"#!/usr/bin/perl -w\nprint 1;\n")[1], View::PerlOutline);
         assert_eq!(views_for("t/basic.t", b"use Test::More;\nok(1);\n")[1], View::PerlOutline);
         assert!(has_content_rule("x.py") && has_content_rule("Cart.pm") && has_content_rule("run.pl"));
+    }
+
+    #[test]
+    fn rust_javascript_and_typescript_source() {
+        let fixture =
+            |f: &str| std::fs::read(format!("{}/tests/fixtures/source/{f}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let same = Some("same code, only comments or formatting differ");
+        // Rust and rustfmt.
+        let (rs, fmt, rs2) = (fixture("geometry-v1.rs"), fixture("geometry-v1-fmt.rs"), fixture("geometry-v2.rs"));
+        assert_eq!(views_for("src/geometry.rs", &rs), vec![View::Text, View::RustOutline, View::Hex]);
+        assert_eq!(content_equal("geometry.rs", &rs, &fmt), same);
+        assert_eq!(content_equal("geometry.rs", &rs, &rs2), None);
+        let o = render(View::RustOutline, "geometry.rs", &rs).unwrap();
+        assert_eq!(o, render(View::RustOutline, "geometry.rs", &fmt).unwrap());
+        assert!(o.contains("\npub struct Point {\n    pub x: f64,\n    pub y: f64,\n}\n"), "{o}");
+        assert!(o.contains("\nimpl Point {\n    pub fn distance(&self, other: &Point) -> f64  // code "), "{o}");
+        let o2 = render(View::RustOutline, "geometry.rs", &rs2).unwrap();
+        assert!(
+            o2.contains("\n    Square { corner: Point, side: f64 },\n")
+                && o2.contains("\npub fn largest(shapes: &[Shape]) -> Option<&Shape>  // code "),
+            "{o2}"
+        );
+
+        // TypeScript and Prettier.
+        let (ts, pretty, ts2) = (fixture("cart-v1.ts"), fixture("cart-v1-prettier.ts"), fixture("cart-v2.ts"));
+        assert_eq!(views_for("src/cart.ts", &ts), vec![View::Text, View::JsOutline, View::Hex]);
+        assert_eq!(content_equal("cart.ts", &ts, &pretty), same);
+        assert_eq!(content_equal("cart.ts", &ts, &ts2), None);
+        let o = render(View::JsOutline, "cart.ts", &ts).unwrap();
+        assert_eq!(o, render(View::JsOutline, "cart.ts", &pretty).unwrap());
+        assert!(o.contains("\nexport interface CartLine {\n    item: Item\n    quantity: number\n}\n"), "{o}");
+        assert!(o.contains("\n    add(item: Item, quantity = 1): this  // code "), "{o}");
+        assert!(render(View::JsOutline, "cart.ts", &ts2).unwrap().contains("\n    remove(id: string): this  // code "));
+        // TSX: JSX whitespace and parentheses as Prettier writes them.
+        let (tsx, tsx_pretty) = (fixture("Badge-v1.tsx"), fixture("Badge-v1-prettier.tsx"));
+        assert_eq!(content_equal("Badge.tsx", &tsx, &tsx_pretty), same);
+        assert_eq!(
+            content_equal(
+                "Badge.tsx",
+                &tsx,
+                &String::from_utf8(tsx.clone()).unwrap().replace("{' '}", "").into_bytes()
+            ),
+            None
+        );
+        assert!(has_content_rule("a.rs") && has_content_rule("b.tsx") && has_content_rule("c.mjs"));
+        assert_eq!(views_for("bin/cli", b"#!/usr/bin/env node\nconsole.log(1)\n")[1], View::JsOutline);
     }
 }

@@ -199,6 +199,8 @@ export type View =
   | "normalizedConan"
   | "pythonOutline"
   | "perlOutline"
+  | "rustOutline"
+  | "jsOutline"
   | "table"
   | "certificate"
   | "email";

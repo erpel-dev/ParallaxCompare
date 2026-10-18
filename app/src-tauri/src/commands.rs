@@ -840,6 +840,10 @@ pub async fn open_file_diff(
             View::NormalizedConan => Some("Conan".into()),
             View::PythonOutline => Some("Python".into()),
             View::PerlOutline => Some("Perl".into()),
+            View::RustOutline => Some("Rust".into()),
+            View::JsOutline => {
+                highlight::detect_syntax(&name, "").map(|s| s.name.clone()).or_else(|| Some("JavaScript".into()))
+            }
             View::ChatTemplate => syntax.or_else(|| Some("Jinja2".into())),
             View::Image => None,
             _ => Some(highlight::view_syntax().name.clone()),
