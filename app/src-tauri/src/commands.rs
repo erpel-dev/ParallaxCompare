@@ -1213,6 +1213,32 @@ pub async fn copy_rows(state: State<'_, AppState>, id: u64, start: u32, end: u32
     .await
 }
 
+/// The text of the lines of `side` in `rows` (end exclusive), for the clipboard.
+#[tauri::command]
+pub async fn rows_text(state: State<'_, AppState>, id: u64, side: Side, start: u32, end: u32) -> CmdResult<String> {
+    let diff = state.diff(id)?;
+    blocking(move || Ok(diff.lock().edit.rows_text(side, start..end))).await
+}
+
+/// Replaces the lines of `side` in `rows` with `text` (empty deletes them), or
+/// with `replace` false inserts `text` before the line at `start`.
+#[tauri::command]
+pub async fn replace_rows(
+    state: State<'_, AppState>,
+    id: u64,
+    side: Side,
+    start: u32,
+    end: u32,
+    text: String,
+    replace: bool,
+) -> CmdResult<EditInfo> {
+    with_diff(state, id, move |fd| {
+        check_editable(fd, side)?;
+        Ok((fd.edit.replace_rows(side, start..end, &text, replace), None))
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn undo(state: State<'_, AppState>, id: u64) -> CmdResult<EditInfo> {
     with_diff(state, id, |fd| Ok((fd.edit.undo(), None))).await

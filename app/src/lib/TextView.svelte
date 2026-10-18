@@ -78,6 +78,8 @@
   let viewHeight = $state(600);
   let hscroll = $state(0);
   let selected = $state<number | null>(null);
+  /** Where a line selection started (Shift+click, Shift+↑/↓); null for the current row alone. */
+  let anchor = $state<number | null>(null);
   let section = $state(-1);
 
   // Editing state.
@@ -150,6 +152,12 @@
     return selected === null ? undefined : cache.get(selected);
   });
   const editable = $derived<[boolean, boolean]>([!!info?.left.editable, !!info?.right.editable]);
+  /** Rows of the line selection on the active side, end exclusive. */
+  const lineRange = $derived.by<[number, number] | null>(() => {
+    if (selected === null) return null;
+    const a = anchor ?? selected;
+    return [Math.min(a, selected), Math.max(a, selected) + 1];
+  });
   const anyDirty = $derived(dirty[0] || dirty[1]);
   /** Section index by its first row, for the copy arrows. */
   /**
@@ -200,6 +208,7 @@
       dirty = [false, false];
       canUndo = canRedo = false;
       editing = null;
+      anchor = null;
       resetRows();
       section = -1;
       if (previous !== undefined) api.closeFileDiff(previous);
@@ -365,6 +374,7 @@
       left: { ...info.left, lines: e.lines[0], exists: e.exists[0] },
       right: { ...info.right, lines: e.lines[1], exists: e.exists[1] },
     };
+    anchor = null;
     dirty = e.dirty;
     canUndo = e.canUndo;
     canRedo = e.canRedo;
@@ -543,6 +553,48 @@
     const id = info.id;
     editing = null;
     enqueue(() => api.copyRows(id, s.start, s.end, SIDE_NAMES[to])).then(applyEdit);
+  }
+
+  /** Whether text is selected with the mouse in the view; Ctrl+C copies that then. */
+  function textSelected(): boolean {
+    const sel = window.getSelection();
+    return !!sel && !sel.isCollapsed && !!viewport?.contains(sel.anchorNode);
+  }
+
+  /** Copies the selected lines of the active side, and with `cut` deletes them. */
+  async function copyLines(cut: boolean) {
+    const r = lineRange;
+    if (!info || !r) return;
+    const id = info.id;
+    try {
+      const text = await api.rowsText(id, SIDE_NAMES[activeSide], r[0], r[1]);
+      if (!text) return;
+      await navigator.clipboard.writeText(text);
+      if (cut) replaceLines("", true);
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  /** Replaces the selected lines of the active side, or inserts before the current one. */
+  function replaceLines(text: string, replace: boolean) {
+    const r = lineRange;
+    if (!info || !r || !editable[activeSide]) return;
+    const id = info.id;
+    const side = SIDE_NAMES[activeSide];
+    anchor = null;
+    selected = r[0];
+    editing = null;
+    enqueue(() => api.replaceRows(id, side, r[0], r[1], text, replace)).then(applyEdit);
+  }
+
+  /** Ctrl+V outside the line editor: lines go above the current one, or replace the selected ones. */
+  function onViewPaste(e: ClipboardEvent) {
+    if (editing || selected === null || !editable[activeSide]) return;
+    const text = e.clipboardData?.getData("text/plain") ?? "";
+    if (!text) return;
+    e.preventDefault();
+    replaceLines(text, anchor !== null);
   }
 
   function undo() {
@@ -831,11 +883,20 @@
     else if (mod && e.key === "z" && !e.shiftKey) undo();
     else if (mod && (e.key === "y" || (e.key === "Z" && e.shiftKey) || (e.key === "z" && e.shiftKey))) redo();
     else if (mod && e.key === "s") save();
+    else if (mod && e.key.toLowerCase() === "a" && total) {
+      anchor = 0;
+      selected = total - 1;
+    } else if (mod && e.key === "c" && selected !== null && !textSelected()) copyLines(false);
+    else if (mod && e.key === "x" && selected !== null && editable[activeSide]) copyLines(true);
+    else if ((e.key === "Delete" || e.key === "Backspace") && !mod && selected !== null && editable[activeSide])
+      replaceLines("", true);
     else if ((e.key === "Enter" || e.key === "F2") && selected !== null) openEditor(activeSide, selected);
     else if (e.key === "ArrowDown" && selected !== null) {
+      anchor = e.shiftKey ? (anchor ?? selected) : null;
       selected = Math.min(total - 1, selected + 1);
       reveal(selected);
     } else if (e.key === "ArrowUp" && selected !== null) {
+      anchor = e.shiftKey ? (anchor ?? selected) : null;
       selected = Math.max(0, selected - 1);
       reveal(selected);
     } else if (e.key === "PageDown" || e.key === "PageUp") {
@@ -1075,6 +1136,7 @@
       onscroll={(e) => (scrollTop = e.currentTarget.scrollTop)}
       onwheel={onWheel}
       onkeydown={onKey}
+      onpaste={onViewPaste}
       tabindex="0"
       role="grid"
     >
@@ -1082,7 +1144,7 @@
         <div class="window" style:transform="translateY({windowOffset(scrollTop, scale, first, ROW)}px)">
           {#each visible as { index, row } (index)}
             <!-- svelte-ignore a11y_click_events_have_key_events -->
-            <div class="row {row?.k ?? 'equal'}" class:loading={!row} class:cur={index === selected} role="row" tabindex="-1" onclick={() => { selected = index; keepFocus(); }}>
+            <div class="row {row?.k ?? 'equal'}" class:loading={!row} class:cur={index === selected} role="row" tabindex="-1" onmousedown={(e) => e.shiftKey && e.preventDefault()} onclick={(e) => { anchor = e.shiftKey && selected !== null ? (anchor ?? selected) : null; selected = index; keepFocus(); }}>
               {#each [row?.l, row?.r] as line, side (side)}
                 {@const s = side as 0 | 1}
                 {#if side === 1}
@@ -1112,11 +1174,11 @@
                 {:else if line}
                   <div class="ln">{line.n + 1}</div>
                   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                  <div class="code" class:editable={editable[s]} onclick={() => (activeSide = s)} ondblclick={(e) => startEdit(e, s, index)}><span class="text" style:transform="translateX({-hscroll}px)">{#each segments(line, hitsAt.get(index * 2 + s)) as seg, si (si)}<span class:mk={seg.mark} class:hit={seg.hit} class:now={seg.now} style:color={seg.now ? null : seg.color}>{seg.text}</span>{/each}</span>{#if line.nn}<span class="cut" title="The other file ends with a line break">no line break at end</span>{/if}{#if line.x}<span class="cut" title="The line is cut for display">… {line.x.toLocaleString()} more characters</span>{/if}</div>
+                  <div class="code" class:editable={editable[s]} class:sel={anchor !== null && s === activeSide && lineRange && index >= lineRange[0] && index < lineRange[1]} onclick={() => (activeSide = s)} ondblclick={(e) => startEdit(e, s, index)}><span class="text" style:transform="translateX({-hscroll}px)">{#each segments(line, hitsAt.get(index * 2 + s)) as seg, si (si)}<span class:mk={seg.mark} class:hit={seg.hit} class:now={seg.now} style:color={seg.now ? null : seg.color}>{seg.text}</span>{/each}</span>{#if line.nn}<span class="cut" title="The other file ends with a line break">no line break at end</span>{/if}{#if line.x}<span class="cut" title="The line is cut for display">… {line.x.toLocaleString()} more characters</span>{/if}</div>
                 {:else if row}
                   <div class="ln fill"></div>
                   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                  <div class="code fill" onclick={() => (activeSide = s)} ondblclick={(e) => startEdit(e, s, index)}></div>
+                  <div class="code fill" class:sel={anchor !== null && s === activeSide && lineRange && index >= lineRange[0] && index < lineRange[1]} onclick={() => (activeSide = s)} ondblclick={(e) => startEdit(e, s, index)}></div>
                 {:else}
                   <div class="ln"></div>
                   <div class="code"></div>
@@ -1153,7 +1215,7 @@
       {#if selected !== null}<span>Row {selected + 1} of {total}</span>{/if}
       <span>{info.view === "text" ? (info.syntax ?? "Plain text") : info.views.find((v) => v.id === info?.view)?.label}</span>
       {#if busy}<span>{busy}</span>{/if}
-      <span class="hint">{editable[0] || editable[1] ? "Double-click to edit · Alt+←/→: copy difference · " : ""}F7 / F8: previous / next difference · Ctrl+F: find</span>
+      <span class="hint">{editable[0] || editable[1] ? "Double-click to edit · Shift+click/↑↓ select lines · Ctrl+C/X/V, Delete · Alt+←/→: copy difference · " : ""}F7 / F8: previous / next difference · Ctrl+F: find</span>
     {/if}
   </div>
 </div>
@@ -1289,6 +1351,9 @@
   .code {
     overflow: hidden;
     padding-left: 6px;
+  }
+  .code.sel {
+    background: var(--select, #3478f633);
   }
   .code.editable {
     cursor: text;

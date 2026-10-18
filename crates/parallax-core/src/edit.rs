@@ -208,6 +208,70 @@ impl EditSession {
         Some(self.apply(to, range, text))
     }
 
+    /// The text of the lines of `side` shown in `rows`, each with a `\n`.
+    pub fn rows_text(&self, side: Side, rows: Range<u32>) -> String {
+        let n = self.diff.rows.len();
+        let Some(lines) = self.lines_in(side, (rows.start as usize).min(n)..(rows.end as usize).min(n)) else {
+            return String::new();
+        };
+        let doc = self.doc(side);
+        lines.map(|l| format!("{}\n", doc.line(l))).collect()
+    }
+
+    /// Replaces the lines of `side` shown in `rows` with `text`, or with `replace`
+    /// false inserts it before the line at the first row. Empty text deletes the
+    /// lines. Whether the file ends with a line break stays as it was.
+    pub fn replace_rows(&mut self, side: Side, rows: Range<u32>, text: &str, replace: bool) -> Option<Edited> {
+        let n = self.diff.rows.len();
+        let rows = (rows.start as usize).min(n)..(rows.end as usize).min(n);
+        let target = if replace { self.lines_in(side, rows.clone()) } else { None };
+        let doc = self.doc(side);
+        let nl = doc.newline;
+        let mut text = with_newlines(text, nl);
+        let terminate = |text: &mut String| {
+            if !text.is_empty() && !text.ends_with(nl) {
+                text.push_str(nl);
+            }
+        };
+        let range = match target {
+            // The last lines go from a file without a final line break: the line
+            // before them becomes the last, also without one.
+            Some(t) if t.end >= doc.len() && text.is_empty() && t.start > 0 && !doc.ends_with_newline() => {
+                doc.lines[t.start - 1].end..doc.text.len()
+            }
+            Some(t) if t.end >= doc.len() => {
+                if doc.ends_with_newline() {
+                    terminate(&mut text);
+                } else if let Some(t) = text.strip_suffix(nl) {
+                    text = t.to_string();
+                }
+                doc.line_start(t.start)..doc.text.len()
+            }
+            Some(t) => {
+                terminate(&mut text);
+                doc.line_start(t.start)..doc.line_start(t.end)
+            }
+            None if text.is_empty() => return None,
+            None => {
+                let line = self.line_at_row(side, rows.start as u32);
+                if line < doc.len() || doc.ends_with_newline() {
+                    terminate(&mut text);
+                } else if !doc.is_empty() {
+                    text.insert_str(0, nl);
+                    if let Some(t) = text.strip_suffix(nl) {
+                        text = t.to_string();
+                    }
+                }
+                let at = doc.line_start(line);
+                at..at
+            }
+        };
+        if range.is_empty() && text.is_empty() {
+            return None;
+        }
+        Some(self.apply(side, range, text))
+    }
+
     fn apply(&mut self, side: Side, range: Range<usize>, inserted: String) -> Edited {
         let at = range.start;
         let removed = self.docs[side.index()].splice(range, &inserted);
@@ -373,5 +437,75 @@ mod tests {
         assert_eq!(s.row_of_line(Side::Left, 2), 2);
         assert_eq!(s.row_of_line(Side::Right, 1), 2);
         assert_eq!(s.row_of_line(Side::Right, 9), 2);
+    }
+
+    /// Deleting, replacing and inserting lines, against a model of the file as
+    /// a list of lines and whether it ends with a line break.
+    #[test]
+    fn replacing_rows_of_random_files() {
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n.max(1)
+        };
+        let render = |lines: &[String], final_nl: bool| {
+            let mut t = lines.join("\n");
+            if final_nl && !lines.is_empty() {
+                t.push('\n');
+            }
+            t
+        };
+        for _ in 0..2000 {
+            let mut lines: Vec<String> = (0..next(6)).map(|i| format!("l{i}")).collect();
+            let final_nl = next(2) == 0;
+            let start = render(&lines, final_nl);
+            // The same text on both sides: row i shows line i.
+            let mut s = session(&start, &start);
+            let n = lines.len() as u64;
+            let a = next(n + 1) as usize;
+            let b = (a + next(3) as usize).min(lines.len());
+            let paste: Vec<String> = (0..next(3)).map(|i| format!("p{i}")).collect();
+            let clip = paste.iter().map(|l| format!("{l}\n")).collect::<String>();
+            let clip = if next(2) == 0 { clip.trim_end_matches('\n').to_string() } else { clip };
+            let replace = next(2) == 0;
+            let edited = s.replace_rows(Side::Left, a as u32..b as u32, &clip, replace);
+            // The model: replace lines a..b (or insert before a).
+            let mut want_final = final_nl;
+            if replace && a < b {
+                lines.splice(a..b, paste.clone());
+            } else {
+                for (k, l) in paste.iter().enumerate() {
+                    lines.insert(a + k, l.clone());
+                }
+            }
+            if lines.is_empty() {
+                want_final = false;
+            } else if start.is_empty() {
+                want_final = clip.ends_with('\n') || paste.len() > 1;
+            }
+            let want = render(&lines, want_final);
+            if edited.is_none() {
+                assert_eq!(text(&s, Side::Left), start);
+                assert!(paste.is_empty() && (!replace || a == b), "{start:?} {a}..{b} {clip:?} {replace}");
+                continue;
+            }
+            if start.is_empty() {
+                // An empty file takes the pasted text as it is.
+                assert_eq!(text(&s, Side::Left).trim_end_matches('\n'), want.trim_end_matches('\n'));
+            } else {
+                assert_eq!(text(&s, Side::Left), want, "{start:?} rows {a}..{b} {clip:?} replace {replace}");
+            }
+            s.undo();
+            assert_eq!(text(&s, Side::Left), start);
+        }
+    }
+
+    #[test]
+    fn copying_rows_as_text() {
+        let s = session("a\nb\nc", "a\nb\nc");
+        assert_eq!(s.rows_text(Side::Left, 1..3), "b\nc\n");
+        assert_eq!(s.rows_text(Side::Right, 3..9), "");
     }
 }

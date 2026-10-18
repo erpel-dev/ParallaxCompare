@@ -360,6 +360,10 @@ export const api = {
     invoke<EditInfo>("insert_line", { id, side, row, text }),
   copyRows: (id: number, start: number, end: number, to: SideName) =>
     invoke<EditInfo>("copy_rows", { id, start, end, to }),
+  rowsText: (id: number, side: SideName, start: number, end: number) =>
+    invoke<string>("rows_text", { id, side, start, end }),
+  replaceRows: (id: number, side: SideName, start: number, end: number, text: string, replace: boolean) =>
+    invoke<EditInfo>("replace_rows", { id, side, start, end, text, replace }),
   undo: (id: number) => invoke<EditInfo>("undo", { id }),
   redo: (id: number) => invoke<EditInfo>("redo", { id }),
   updateDiff: (id: number, options: DiffOptions, syntax: string | null) =>

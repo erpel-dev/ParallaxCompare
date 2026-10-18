@@ -36,6 +36,8 @@ fn main() {
             commands::edit_text,
             commands::insert_line,
             commands::copy_rows,
+            commands::rows_text,
+            commands::replace_rows,
             commands::undo,
             commands::redo,
             commands::update_diff,
