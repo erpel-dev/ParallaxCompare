@@ -348,12 +348,22 @@ fn start_watching(app: AppHandle, id: u64, session: &Arc<Session>) {
     });
 }
 
+/// Commands without `async` run on the main thread, where any delay freezes the
+/// window; closing frees a lot (watches on a big tree, the opened sources), so
+/// it happens on a worker thread.
 #[tauri::command]
-pub fn close_session(state: State<'_, AppState>, id: u64) {
-    if let Some(session) = state.sessions.lock().remove(&id) {
+pub async fn close_session(state: State<'_, AppState>, id: u64) -> CmdResult<()> {
+    let session = state.sessions.lock().remove(&id);
+    if let Some(session) = session {
         session.control.lock().cancel.store(true, Ordering::Relaxed);
-        session.watcher.lock().take();
+        blocking(move || {
+            session.watcher.lock().take();
+            drop(session);
+            Ok(())
+        })
+        .await?;
     }
+    Ok(())
 }
 
 #[derive(Clone, Serialize)]
@@ -1014,14 +1024,22 @@ pub async fn search_diff(
     .await
 }
 
+/// Frees both texts and the diff on a worker thread: for files of millions of
+/// lines that takes long enough to stall the window.
 #[tauri::command]
-pub fn close_file_diff(state: State<'_, AppState>, id: u64) {
-    state.diffs.lock().remove(&id);
+pub async fn close_file_diff(state: State<'_, AppState>, id: u64) -> CmdResult<()> {
+    let diff = state.diffs.lock().remove(&id);
+    blocking(move || {
+        drop(diff);
+        Ok(())
+    })
+    .await
 }
 
+/// The first call loads the syntax definitions, so it runs on a worker thread.
 #[tauri::command]
-pub fn syntax_names() -> Vec<String> {
-    highlight::syntax_names()
+pub async fn syntax_names() -> CmdResult<Vec<String>> {
+    blocking(|| Ok(highlight::syntax_names())).await
 }
 
 /// The state of a file comparison after an edit, undo or save.

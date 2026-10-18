@@ -57,7 +57,9 @@
   let syntaxOverride = $state<string>("");
   let view = $state<View | null>(null);
   let syntaxNames = $state<string[]>([]);
-  let info = $state<FileDiffInfo | null>(null);
+  // Raw: a diff can have hundreds of thousands of sections, and deep reactivity
+  // would wrap every one of them. `info` is only ever replaced as a whole.
+  let info = $state.raw<FileDiffInfo | null>(null);
   let error = $state("");
   let loading = $state(true);
   let busy = $state("");
@@ -150,6 +152,29 @@
   const editable = $derived<[boolean, boolean]>([!!info?.left.editable, !!info?.right.editable]);
   const anyDirty = $derived(dirty[0] || dirty[1]);
   /** Section index by its first row, for the copy arrows. */
+  /**
+   * The overview's marks: sections merged per thousandth of the file, so a file
+   * with 100 000 differences draws at most 1 000 marks.
+   */
+  const sectionMarks = $derived.by(() => {
+    const marks: { top: number; height: number }[] = [];
+    if (!info || !total) return marks;
+    const B = 1000;
+    let from = -1;
+    let to = -1;
+    for (const s of info.sections) {
+      const a = Math.floor((s.start / total) * B);
+      const b = Math.max(a + 1, Math.ceil((s.end / total) * B));
+      if (a <= to) to = Math.max(to, b);
+      else {
+        if (from >= 0) marks.push({ top: from / B, height: (to - from) / B });
+        from = a;
+        to = b;
+      }
+    }
+    if (from >= 0) marks.push({ top: from / B, height: (to - from) / B });
+    return marks;
+  });
   const sectionStarts = $derived(new Map((info?.sections ?? []).map((s, i) => [s.start, i])));
   /** The section the toolbar's copy buttons act on. */
   const currentSection = $derived.by(() => {
@@ -998,8 +1023,8 @@
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <div class="overview" onclick={overviewClick} title="Overview: click to jump">
       {#if info && total}
-        {#each info.sections as s, i (i)}
-          <i style:top="{(s.start / total) * 100}%" style:height="max(2px, {((s.end - s.start) / total) * 100}%)"></i>
+        {#each sectionMarks as m, i (i)}
+          <i style:top="{m.top * 100}%" style:height="max(2px, {m.height * 100}%)"></i>
         {/each}
         {#each hitMarks as m (m)}
           <em style:top="{m * 100}%"></em>
