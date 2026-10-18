@@ -333,8 +333,28 @@
     return run;
   }
 
-  function applyEdit(e: EditInfo | undefined) {
+  /** Edits whose rows are still being fetched; only the latest is shown. */
+  let swapToken = 0;
+
+  /**
+   * Shows the result of an edit. The rows on screen are fetched first and swapped
+   * in together with the new layout, so the view never shows empty rows meanwhile.
+   */
+  async function applyEdit(e: EditInfo | undefined) {
     if (!e || !info) return;
+    const id = info.id;
+    const token = ++swapToken;
+    const top = Math.max(0, Math.floor(vTop / ROW) - 20);
+    const end = Math.min(e.rows, top + Math.ceil(viewHeight / ROW) + 40);
+    const chunks: number[] = [];
+    for (let c = Math.floor(top / CHUNK); c * CHUNK < end; c++) chunks.push(c);
+    let fetched: RowView[][] | null = null;
+    try {
+      fetched = await Promise.all(chunks.map((c) => api.fileRows(id, c * CHUNK, CHUNK, theme())));
+    } catch {
+      // Shown as the rows load the usual way.
+    }
+    if (token !== swapToken || info?.id !== id) return;
     info = {
       ...info,
       rows: e.rows,
@@ -359,7 +379,18 @@
       editing = null;
       reveal(e.caret.row);
     }
-    resetRows();
+    if (fetched) {
+      cache = new Map();
+      fetched.forEach((rows, k) => rows.forEach((row, i) => cache.set(chunks[k] * CHUNK + i, row)));
+      loaded = new Set(chunks);
+      pending = new Set(chunks);
+      generation++;
+      cacheVersion++;
+      ensureLoaded();
+      placeCaret();
+    } else {
+      resetRows();
+    }
     if (findOpen && findQuery) runSearch(true);
   }
 
@@ -432,8 +463,8 @@
       ed.line === null
         ? api.insertLine(id, side, ed.row, text)
         : api.editText(id, side, { line: ed.line, col: 0 }, { line: ed.line, col: END }, text, caret),
-    ).then((e) => {
-      applyEdit(e);
+    ).then(async (e) => {
+      await applyEdit(e);
       then?.(e);
     });
   }
