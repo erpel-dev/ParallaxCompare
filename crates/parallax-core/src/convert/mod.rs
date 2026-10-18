@@ -12,6 +12,7 @@ mod cdfx;
 mod cert;
 mod chat;
 mod class;
+mod conan;
 mod data;
 mod dbc;
 mod dotnet;
@@ -137,6 +138,10 @@ pub enum View {
     Needs,
     /// FreeMarker template: directives, macro calls and interpolations, indented by nesting.
     TemplateOutline,
+    /// Conan graph JSON: every package with its binary, settings, options and requirements.
+    ConanGraph,
+    /// conanfile.txt, profiles, conaninfo.txt: sections sorted, comments and spacing dropped.
+    NormalizedConan,
 }
 
 impl View {
@@ -187,6 +192,8 @@ impl View {
             View::ReflowedText => "Text, reflowed",
             View::Needs => "Needs",
             View::TemplateOutline => "Template outline",
+            View::ConanGraph => "Conan graph",
+            View::NormalizedConan => "Normalized",
         }
     }
 }
@@ -242,6 +249,11 @@ enum Kind {
     NeedsJson,
     /// FreeMarker template.
     Ftl,
+    /// Conan graph JSON (`conan graph info --format=json`).
+    ConanGraph,
+    /// conanfile.txt, a profile, conaninfo.txt or conanbuildinfo.txt.
+    ConanIni,
+    ConanManifest,
 }
 
 fn extension(name: &str) -> String {
@@ -355,6 +367,15 @@ fn kind_of(name: &str, data: &[u8]) -> Kind {
     if lockfile::format_of(name).is_some() {
         return Kind::Lockfile;
     }
+    if conan::is_graph_json(name, data) {
+        return Kind::ConanGraph;
+    }
+    if conan::is_manifest(name) {
+        return Kind::ConanManifest;
+    }
+    if conan::is_ini(name, data) {
+        return Kind::ConanIni;
+    }
     if matches!(ext.as_str(), "ftl" | "ftlh" | "ftlx") && ftl::is_template(data) {
         return Kind::Ftl;
     }
@@ -435,6 +456,9 @@ pub fn views_for(name: &str, data: &[u8]) -> Vec<View> {
         Kind::Rst => vec![View::Text, View::ReflowedText],
         Kind::NeedsJson => vec![View::Needs, View::PrettyJson, View::Text],
         Kind::Ftl => vec![View::Text, View::TemplateOutline],
+        Kind::ConanGraph => vec![View::ConanGraph, View::PrettyJson, View::Text],
+        Kind::ConanIni => vec![View::Text, View::NormalizedConan],
+        Kind::ConanManifest => vec![View::Text],
     };
     views.push(View::Hex);
     views
@@ -512,13 +536,20 @@ pub fn render(view: View, name: &str, data: &[u8]) -> Result<String> {
         View::Needs if needs::is_needs_json(name, data) => needs::render_json(data),
         View::Needs => Ok(needs::render_rst(&text::decode(data).text)),
         View::TemplateOutline => Ok(ftl::outline(&text::decode(data).text)),
+        View::ConanGraph => conan::graph(data),
+        View::NormalizedConan => Ok(conan::normalized(&text::decode(data).text)),
     }
 }
 
 /// Whether [`content_equal`] can apply to a file, judged by its name alone.
 pub fn has_content_rule(name: &str) -> bool {
     lockfile::format_of(name).is_some()
-        || name.rsplit(['/', '\\']).next().is_some_and(|f| f.eq_ignore_ascii_case("needs.json"))
+        || name.rsplit(['/', '\\']).next().is_some_and(|f| {
+            ["needs.json", "conanfile.txt", "conaninfo.txt", "conanbuildinfo.txt", "conanmanifest.txt"]
+                .iter()
+                .any(|n| f.eq_ignore_ascii_case(n))
+        })
+        || conan::is_graph_name(name)
         || matches!(
             extension(name).as_str(),
             "a2l"
@@ -658,6 +689,19 @@ pub fn content_equal(name: &str, left: &[u8], right: &[u8]) -> Option<&'static s
             }
             return needs::same_rst_needs(&l, &r)
                 .then_some("same needs, only their order or the text around them differ");
+        }
+        Kind::ConanGraph => {
+            return conan::same_graph(left, right)?
+                .then_some("same packages and binaries, only paths, metadata, binary status or remotes differ");
+        }
+        Kind::ConanIni => {
+            let (l, r) = (text::decode(left).text, text::decode(right).text);
+            return (conan::normalized(&l) == conan::normalized(&r))
+                .then_some("same entries, only comments, spacing or section order differ");
+        }
+        Kind::ConanManifest => {
+            let (l, r) = (text::decode(left).text, text::decode(right).text);
+            return conan::same_manifest(&l, &r).then_some("same files and checksums, only the time differs");
         }
         Kind::Ftl => {
             let (l, r) = (text::decode(left).text, text::decode(right).text);
@@ -887,5 +931,81 @@ mod tests {
         assert_eq!(content_equal("mail.ftl", page, no_comment), Some("same template, only comments differ"));
         let changed = b"<#if user??>\n  <p>Hi ${user.name}!</p>\n</#if>\n";
         assert_eq!(content_equal("mail.ftl", page, changed), None);
+    }
+
+    #[test]
+    fn conan_files() {
+        let fixture = |f: &str| std::fs::read(format!("{}/tests/fixtures/{f}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        // Lockfiles of Conan 2 and Conan 1.
+        let lock = render(View::Dependencies, "conan.lock", &fixture("lockfile/conan2/conan.lock")).unwrap();
+        assert!(lock.starts_with("Lockfile:          conan.lock v0.5 (Conan 2)\nPackages:          4\nRequirements:      build 1, host 3\n"), "{lock}");
+        assert!(lock.contains("\nbuildgen 0.9#17967da9981477673f62ac43eddc1928  (build)\n"), "{lock}");
+        assert!(lock.contains("\ngreet 1.0#6758f5880448684b35a3ce0af5b6b56d\n"), "{lock}");
+        let old = render(View::Dependencies, "conan.lock", &fixture("lockfile/conan1/conan.lock")).unwrap();
+        assert!(old.contains("conan.lock v0.4 (Conan 1)"), "{old}");
+        assert!(
+            old.contains(
+                "\nmylib 2.0@demo/stable#d98606ba7df8f7a0bfc6c04ca48ae6bb:854a137aa0ee845d119b149356a52d39a51a7726\n"
+            ),
+            "{old}"
+        );
+        assert!(
+            old.contains(
+                "\ncmake 3.27.0#cb43cd731c36ea7686308c8306ee5781:4db1be536558d833e52e862fd84d64d75c2b3656  (build)\n"
+            ),
+            "{old}"
+        );
+        let (a, b) = (fixture("lockfile/conan2/conan.lock"), fixture("lockfile/conan2-updated/conan.lock"));
+        assert_eq!(content_equal("conan.lock", &a, &b), None);
+        let a_stamped = String::from_utf8(a.clone()).unwrap().replace("%1792328293.769473", "%1800000000.1");
+        assert!(content_equal("conan.lock", &a, a_stamped.as_bytes()).is_some());
+
+        // Graph JSON: the graph of `conan graph info` and of `conan install` agree.
+        let (graph, install) = (fixture("conan/graph-v1.json"), fixture("conan/install-v1.json"));
+        assert_eq!(views_for("graph.json", &graph)[0], View::ConanGraph);
+        assert_eq!(views_for("whatever.json", &graph)[0], View::ConanGraph);
+        let g = render(View::ConanGraph, "graph.json", &graph).unwrap();
+        assert!(
+            g.starts_with(
+                "Packages:          4 (build 1, host 3)\nBinaries:          Cache 4\n\n=== Consumer conanfile ===\n"
+            ),
+            "{g}"
+        );
+        assert!(g.contains("\n=== buildgen/0.9#17967da9981477673f62ac43eddc1928 (build context) ===\n"), "{g}");
+        assert!(g.contains("Requires:\n  greet/1.0#6758f5880448684b35a3ce0af5b6b56d\n  jsonhdr/3.1#fa511254dd41001e01b45a7b62f9a9df\nTool requires:\n  buildgen/0.9#17967da9981477673f62ac43eddc1928\n"), "{g}");
+        assert!(g.contains("Options:\n  fPIC=True\n  shared=False\n"), "{g}");
+        assert!(!g.contains("/home/dev"), "no paths: {g}");
+        assert_eq!(
+            content_equal("graph.json", &graph, &install),
+            Some("same packages and binaries, only paths, metadata, binary status or remotes differ")
+        );
+        let downloaded =
+            String::from_utf8(graph.clone()).unwrap().replace("\"binary\": \"Cache\"", "\"binary\": \"Download\"");
+        assert!(content_equal("graph.json", &graph, downloaded.as_bytes()).is_some());
+        assert_eq!(content_equal("graph.json", &graph, &fixture("conan/graph-v2.json")), None);
+        assert!(
+            has_content_rule("out/graph.json")
+                && has_content_rule("conan-create.json")
+                && !has_content_rule("package.json")
+        );
+
+        // conanfile.txt and profiles.
+        let (c1, c2) = (fixture("conan/conanfile-v1.txt"), fixture("conan/conanfile-v2.txt"));
+        assert_eq!(views_for("conanfile.txt", &c1), vec![View::Text, View::NormalizedConan, View::Hex]);
+        assert_eq!(
+            views_for("profiles/linux-gcc", &fixture("conan/linux-gcc-v1")),
+            vec![View::Text, View::NormalizedConan, View::Hex]
+        );
+        let moved = "[generators]\nCMakeToolchain\nCMakeDeps\n\n# deps\n[requires]\ngreet/1.0\njsonhdr/3.1\n[layout]\ncmake_layout\n[options]\ngreet/*:shared = False\n[tool_requires]\nbuildgen/0.9\n";
+        assert_eq!(
+            content_equal("conanfile.txt", &c1, moved.as_bytes()),
+            Some("same entries, only comments, spacing or section order differ")
+        );
+        assert_eq!(content_equal("conanfile.txt", &c1, &c2), None);
+        assert!(has_content_rule("conanfile.txt") && has_content_rule("p/conanmanifest.txt"));
+        assert_eq!(
+            content_equal("conanmanifest.txt", b"1\na: 1\n", b"2\na: 1\n"),
+            Some("same files and checksums, only the time differs")
+        );
     }
 }

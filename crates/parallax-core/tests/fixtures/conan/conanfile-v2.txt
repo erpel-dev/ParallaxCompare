@@ -1,0 +1,17 @@
+# Application dependencies
+[requires]
+greet/1.1
+jsonhdr/3.1
+
+[generators]
+CMakeToolchain
+CMakeDeps
+
+[tool_requires]
+buildgen/0.9
+
+[options]
+greet/*:shared = True
+
+[layout]
+cmake_layout

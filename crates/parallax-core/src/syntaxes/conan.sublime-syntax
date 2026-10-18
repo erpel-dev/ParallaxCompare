@@ -1,0 +1,89 @@
+%YAML 1.2
+---
+# Conan's INI-like files: conanfile.txt, profiles, conaninfo.txt,
+# conanbuildinfo.txt and global.conf. Profiles have no extension and are
+# recognised by their first line. Jinja in profiles is marked as embedded.
+name: Conan
+file_extensions: [conanfile.txt, conaninfo.txt, conanbuildinfo.txt, global.conf, .conanrc]
+first_line_match: ^\s*(include\(|\[(settings|options|conf|buildenv|runenv|tool_requires|build_requires|test_requires|requires|python_requires|platform_requires|platform_tool_requires|replace_requires|replace_tool_requires|system_tools|generators|layout|imports|env|full_settings|full_options|full_requires|recipe_hash)\]\s*$)
+scope: source.conan
+contexts:
+  main:
+    - match: ^\s*#.*$
+      scope: comment.line.number-sign.conan
+    - match: ^\s*(\[)([^\]]+)(\])
+      captures:
+        0: meta.section.conan
+        1: punctuation.definition.section.begin.conan
+        2: entity.name.section.conan
+        3: punctuation.definition.section.end.conan
+    - match: ^\s*(include)(\()([^)]*)(\))
+      captures:
+        1: keyword.control.import.conan
+        2: punctuation.section.parens.begin.conan
+        3: string.unquoted.conan
+        4: punctuation.section.parens.end.conan
+    - include: jinja
+    # key=value, also with a package pattern (`zlib/*:shared=True`) and the conf
+    # operators += =+ =! ?=.
+    - match: ^\s*([^=\s#\[][^=]*?)\s*([+?]?=[+!]?)
+      captures:
+        1: variable.other.key.conan
+        2: keyword.operator.assignment.conan
+      push: value
+    # A reference: name/version@user/channel#revision:package_id
+    - match: ^\s*([\w.+-]+)(/)([^\s@#:]+)(@[^\s#:]+)?(#\w+)?(%[\d.]+)?(:\w+)?
+      captures:
+        1: entity.name.package.conan
+        2: punctuation.separator.conan
+        3: constant.numeric.version.conan
+        4: storage.modifier.user-channel.conan
+        5: constant.other.revision.conan
+        6: comment.timestamp.conan
+        7: constant.other.package-id.conan
+
+  value:
+    - match: $
+      pop: true
+    - include: jinja
+    - match: '"'
+      scope: punctuation.definition.string.begin.conan
+      push: string
+    - match: \b(True|False|None|true|false)\b
+      scope: constant.language.conan
+    - match: (?<![\w.])-?\d+(?:\.\d+)*(?![\w.])
+      scope: constant.numeric.conan
+    - match: \$\w+|\$\{\w+\}
+      scope: variable.other.conan
+
+  string:
+    - meta_scope: string.quoted.double.conan
+    - match: '"'
+      scope: punctuation.definition.string.end.conan
+      pop: true
+    - match: $
+      pop: true
+
+  jinja:
+    - match: \{#
+      scope: punctuation.definition.comment.begin.jinja
+      push:
+        - meta_scope: comment.block.jinja
+        - match: '#\}'
+          pop: true
+    - match: \{[{%]-?
+      scope: punctuation.section.embedded.begin.jinja
+      push:
+        - meta_scope: meta.embedded.jinja
+        - meta_content_scope: source.jinja
+        - match: -?[}%]\}
+          scope: punctuation.section.embedded.end.jinja
+          pop: true
+        - match: '"[^"]*"|''[^'']*'''
+          scope: string.quoted.jinja
+        - match: \b(if|else|elif|endif|for|in|endfor|set|not|and|or|is)\b
+          scope: keyword.control.jinja
+        - match: \b[A-Za-z_]\w*(?=\()
+          scope: variable.function.jinja
+        - match: \b\d+\b
+          scope: constant.numeric.jinja

@@ -12,7 +12,10 @@
 //! Files are recognised by their name: `package-lock.json`, `npm-shrinkwrap.json`
 //! (v1 nested `dependencies`, v2/v3 `packages`), `yarn.lock` (v1 and Berry),
 //! `pnpm-lock.yaml` (v5 to v9), `Cargo.lock`, `poetry.lock`, `uv.lock`,
-//! `Pipfile.lock`, `composer.lock`, `Gemfile.lock`/`gems.locked` and `go.sum`.
+//! `Pipfile.lock`, `composer.lock`, `Gemfile.lock`/`gems.locked`, `go.sum` and
+//! Conan's `conan.lock` (Conan 2, and Conan 1's `graph_lock`). Conan packages keep
+//! their recipe revision (`zlib 1.3#b3b7…`) and, for Conan 1, the package id;
+//! tool, Python and config requirements are marked as such.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -35,6 +38,7 @@ pub enum Format {
     Composer,
     Bundler,
     GoSum,
+    Conan,
 }
 
 pub fn format_of(name: &str) -> Option<Format> {
@@ -50,6 +54,7 @@ pub fn format_of(name: &str) -> Option<Format> {
         "composer.lock" => Format::Composer,
         "gemfile.lock" | "gems.locked" => Format::Bundler,
         "go.sum" => Format::GoSum,
+        "conan.lock" => Format::Conan,
         _ => return None,
     })
 }
@@ -78,10 +83,14 @@ pub fn dependencies(name: &str, data: &[u8]) -> Result<String> {
     line(&mut out, "Packages", &packages.len());
     let mut sources: BTreeMap<&str, usize> = BTreeMap::new();
     for p in &packages {
-        let kind = p.source.as_deref().map_or("registry", |s| s.split([':', ' ', '+']).next().unwrap_or(s));
+        let default = if format == Format::Conan { "host" } else { "registry" };
+        let kind = p.source.as_deref().map_or(default, |s| s.split([':', ' ', '+']).next().unwrap_or(s));
         *sources.entry(kind).or_default() += 1;
     }
-    if sources.len() > 1 || !sources.contains_key("registry") {
+    if format == Format::Conan {
+        let list: Vec<String> = sources.iter().map(|(k, n)| format!("{k} {n}")).collect();
+        line(&mut out, "Requirements", &list.join(", "));
+    } else if sources.len() > 1 || !sources.contains_key("registry") {
         let list: Vec<String> = sources.iter().map(|(k, n)| format!("{k} {n}")).collect();
         line(&mut out, "Sources", &list.join(", "));
     }
@@ -121,6 +130,7 @@ fn parse(format: Format, data: &[u8]) -> Result<(String, Vec<Package>)> {
         Format::Composer => ("composer.lock".into(), composer(data)?),
         Format::Bundler => ("Gemfile.lock".into(), bundler(text()?)),
         Format::GoSum => ("go.sum".into(), go_sum(text()?)),
+        Format::Conan => conan(data)?,
     };
     packages.sort_unstable();
     packages.dedup();
@@ -521,6 +531,60 @@ fn go_sum(text: &str) -> Vec<Package> {
     modules.into_iter().map(|((m, v), code)| pkg(m, v, (!code).then(|| "go.mod only".to_string()))).collect()
 }
 
+// ---- Conan ----
+
+/// A Conan reference `name/version@user/channel#revision%timestamp` as name and
+/// the rest without the timestamp, with `:package_id` when given.
+fn conan_ref(reference: &str, package_id: Option<&str>, kind: Option<&str>) -> Option<Package> {
+    let reference = reference.split('%').next().unwrap_or(reference);
+    let (name, version) = reference.split_once('/')?;
+    let version = match package_id {
+        Some(id) => format!("{version}:{id}"),
+        None => version.to_string(),
+    };
+    Some(pkg(name, version, kind.map(str::to_string)))
+}
+
+fn conan(data: &[u8]) -> Result<(String, Vec<Package>)> {
+    let root: serde_json::Value = serde_json::from_slice(data).map_err(bad)?;
+    let version = root.get("version").and_then(|v| v.as_str()).unwrap_or("?");
+    let strings = |v: Option<&serde_json::Value>| -> Vec<String> {
+        v.and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect())
+            .unwrap_or_default()
+    };
+    let mut packages = Vec::new();
+    let Some(lock) = root.get("graph_lock") else {
+        // Conan 2: lists of references by kind.
+        if root.get("requires").is_none() {
+            return Err(bad("no requires"));
+        }
+        for (key, kind) in [
+            ("requires", None),
+            ("build_requires", Some("build")),
+            ("python_requires", Some("python")),
+            ("config_requires", Some("config")),
+        ] {
+            packages.extend(strings(root.get(key)).iter().filter_map(|r| conan_ref(r, None, kind)));
+        }
+        return Ok((format!("conan.lock v{version} (Conan 2)"), packages));
+    };
+    // Conan 1: a graph of nodes; the consumer has a path instead of a recipe.
+    let nodes = lock.get("nodes").and_then(|n| n.as_object()).ok_or_else(|| bad("no nodes"))?;
+    let tools: Vec<String> = nodes.values().flat_map(|n| strings(n.get("build_requires"))).collect();
+    for (id, node) in nodes {
+        if node.get("path").is_some() {
+            continue;
+        }
+        let Some(reference) = node.get("ref").and_then(|r| r.as_str()) else { continue };
+        let build = node.get("context").and_then(|c| c.as_str()) == Some("build") || tools.contains(id);
+        let package_id = node.get("package_id").and_then(|p| p.as_str());
+        packages.extend(conan_ref(reference, package_id, build.then_some("build")));
+        packages.extend(strings(node.get("python_requires")).iter().filter_map(|r| conan_ref(r, None, Some("python"))));
+    }
+    Ok((format!("conan.lock v{version} (Conan 1)"), packages))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -611,6 +675,8 @@ mod tests {
             ("pnpm-lock.yaml", fixture!("pnpm-v9/pnpm-lock.yaml")),
             ("yarn.lock", fixture!("yarn-berry/yarn.lock")),
             ("composer.lock", fixture!("composer/composer.lock")),
+            ("conan.lock", fixture!("conan2/conan.lock")),
+            ("conan.lock", fixture!("conan1/conan.lock")),
         ] {
             for n in [0, 1, 7, data.len() / 3, data.len() - 1] {
                 let _ = dependencies(name, &data[..n]);

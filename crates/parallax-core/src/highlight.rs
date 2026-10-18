@@ -8,7 +8,7 @@
 //! which is exact for almost all code and keeps the first paint fast.
 //!
 //! Extra grammars for automotive and embedded formats (A2L, DBC, Intel HEX,
-//! S-record), for FreeMarker templates and for the generated content views live
+//! S-record), for FreeMarker templates, Conan files and for the generated content views live
 //! in `src/syntaxes`.
 
 use std::sync::LazyLock;
@@ -38,6 +38,7 @@ const CUSTOM_SYNTAXES: &[&str] = &[
     include_str!("syntaxes/freemarker.sublime-syntax"),
     include_str!("syntaxes/html-freemarker.sublime-syntax"),
     include_str!("syntaxes/xml-freemarker.sublime-syntax"),
+    include_str!("syntaxes/conan.sublime-syntax"),
     include_str!("syntaxes/parallax-views.sublime-syntax"),
 ];
 
@@ -82,6 +83,9 @@ pub fn detect_syntax(path: &str, first_line: &str) -> Option<&'static SyntaxRefe
     let name = path.rsplit('/').next().unwrap_or(path);
     let ss = &*SYNTAXES;
     let ext = name.rsplit_once('.').map(|(_, ext)| ext.to_ascii_lowercase());
+    if name.eq_ignore_ascii_case("conan.lock") {
+        return ss.find_syntax_by_name("JSON");
+    }
     ss.find_syntax_by_extension(name)
         .or_else(|| ext.as_deref().and_then(|ext| ss.find_syntax_by_extension(ext)))
         .or_else(|| ext.as_deref().filter(|e| XML_EXTENSIONS.contains(e)).and_then(|_| ss.find_syntax_by_name("XML")))
@@ -218,6 +222,11 @@ mod tests {
         assert_eq!(name("mail.ftl", "").as_deref(), Some("HTML (FreeMarker)"));
         assert_eq!(name("page.ftlh", "").as_deref(), Some("HTML (FreeMarker)"));
         assert_eq!(name("feed.ftlx", "").as_deref(), Some("XML (FreeMarker)"));
+        assert_eq!(name("app/conanfile.txt", "[requires]").as_deref(), Some("Conan"));
+        assert_eq!(name("profiles/linux-gcc", "include(default)").as_deref(), Some("Conan"));
+        assert_eq!(name("default", "[settings]").as_deref(), Some("Conan"));
+        assert_eq!(name("conan.lock", "{").as_deref(), Some("JSON"));
+        assert_eq!(name("conanfile.py", "").as_deref(), Some("Python"));
     }
 
     #[test]

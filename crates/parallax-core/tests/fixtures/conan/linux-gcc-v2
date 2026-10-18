@@ -1,0 +1,14 @@
+include(default)
+
+[settings]
+build_type=Release
+compiler.cppstd=20
+
+[conf]
+tools.cmake.cmaketoolchain:generator=Ninja
+tools.build:jobs={{ os.cpu_count() }}
+tools.build:cxxflags=["-O2", "-fno-omit-frame-pointer"]
+
+[buildenv]
+CC=gcc
+CXX=g++

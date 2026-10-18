@@ -1,0 +1,52 @@
+{
+ "graph_lock": {
+  "nodes": {
+   "0": {
+    "options": "",
+    "requires": [
+     "1",
+     "3",
+     "2"
+    ],
+    "build_requires": [
+     "4"
+    ],
+    "path": "conanfile.txt",
+    "context": "host"
+   },
+   "1": {
+    "ref": "boost/1.83.0#f0854085831ad7e2ac2baca3ec73d7b5",
+    "options": "",
+    "package_id": "854a137aa0ee845d119b149356a52d39a51a7726",
+    "requires": [
+     "2"
+    ],
+    "context": "host"
+   },
+   "2": {
+    "ref": "zlib/1.2.13#8798106335450fc2e153e53f4f918170",
+    "options": "",
+    "package_id": "4db1be536558d833e52e862fd84d64d75c2b3656",
+    "context": "host"
+   },
+   "3": {
+    "ref": "mylib/2.0@demo/stable#d98606ba7df8f7a0bfc6c04ca48ae6bb",
+    "options": "",
+    "package_id": "854a137aa0ee845d119b149356a52d39a51a7726",
+    "requires": [
+     "2"
+    ],
+    "context": "host"
+   },
+   "4": {
+    "ref": "cmake/3.27.0#cb43cd731c36ea7686308c8306ee5781",
+    "options": "",
+    "package_id": "4db1be536558d833e52e862fd84d64d75c2b3656",
+    "context": "host"
+   }
+  },
+  "revisions_enabled": true
+ },
+ "version": "0.4",
+ "profile_host": "[settings]\narch=x86_64\narch_build=x86_64\nbuild_type=Release\ncompiler=gcc\ncompiler.libcxx=libstdc++\ncompiler.version=13\nos=Linux\nos_build=Linux\n[options]\n[build_requires]\n[env]\n"
+}

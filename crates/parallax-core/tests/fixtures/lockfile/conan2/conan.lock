@@ -1,0 +1,13 @@
+{
+    "version": "0.5",
+    "requires": [
+        "ziplite/1.2#4ac3f190d6cf692a5bcc10d4df5d82dd%1792328293.769473",
+        "jsonhdr/3.1#fa511254dd41001e01b45a7b62f9a9df%1792328299.8981786",
+        "greet/1.0#6758f5880448684b35a3ce0af5b6b56d%1792328306.5126572"
+    ],
+    "build_requires": [
+        "buildgen/0.9#17967da9981477673f62ac43eddc1928%1792328301.0462263"
+    ],
+    "python_requires": [],
+    "config_requires": []
+}

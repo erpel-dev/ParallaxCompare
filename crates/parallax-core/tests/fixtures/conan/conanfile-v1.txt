@@ -1,0 +1,16 @@
+[requires]
+greet/1.0
+jsonhdr/3.1
+
+[tool_requires]
+buildgen/0.9
+
+[generators]
+CMakeDeps
+CMakeToolchain
+
+[options]
+greet/*:shared=False
+
+[layout]
+cmake_layout

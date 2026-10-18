@@ -195,6 +195,8 @@ export type View =
   | "reflowedText"
   | "needs"
   | "templateOutline"
+  | "conanGraph"
+  | "normalizedConan"
   | "table"
   | "certificate"
   | "email";

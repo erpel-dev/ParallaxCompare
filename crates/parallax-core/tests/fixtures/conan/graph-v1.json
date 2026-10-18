@@ -1,0 +1,699 @@
+{
+    "graph": {
+        "nodes": {
+            "0": {
+                "ref": "conanfile",
+                "id": "0",
+                "recipe": "Consumer",
+                "package_id": null,
+                "prev": null,
+                "rrev": null,
+                "rrev_timestamp": null,
+                "prev_timestamp": null,
+                "remote": null,
+                "binary_remote": null,
+                "build_id": null,
+                "binary": null,
+                "invalid_build": false,
+                "info_invalid": null,
+                "name": null,
+                "user": null,
+                "channel": null,
+                "url": null,
+                "license": null,
+                "author": null,
+                "description": null,
+                "homepage": null,
+                "build_policy": null,
+                "upload_policy": null,
+                "revision_mode": "hash",
+                "provides": null,
+                "deprecated": null,
+                "win_bash": null,
+                "win_bash_run": null,
+                "default_options": null,
+                "options_description": null,
+                "version": null,
+                "topics": null,
+                "package_type": "unknown",
+                "languages": [],
+                "settings": {
+                    "os": "Linux",
+                    "arch": "x86_64",
+                    "compiler": "gcc",
+                    "compiler.cppstd": "17",
+                    "compiler.libcxx": "libstdc++11",
+                    "compiler.version": "13",
+                    "build_type": "Release"
+                },
+                "options": {},
+                "options_definitions": {},
+                "generators": [
+                    "CMakeDeps",
+                    "CMakeToolchain"
+                ],
+                "python_requires": null,
+                "system_requires": {},
+                "recipe_folder": null,
+                "source_folder": null,
+                "build_folder": null,
+                "generators_folder": null,
+                "package_folder": null,
+                "immutable_package_folder": null,
+                "cpp_info": {
+                    "root": {
+                        "includedirs": [
+                            "include"
+                        ],
+                        "srcdirs": null,
+                        "libdirs": [
+                            "lib"
+                        ],
+                        "resdirs": null,
+                        "bindirs": [
+                            "bin"
+                        ],
+                        "builddirs": null,
+                        "frameworkdirs": null,
+                        "system_libs": null,
+                        "frameworks": null,
+                        "libs": null,
+                        "defines": null,
+                        "cflags": null,
+                        "cxxflags": null,
+                        "sharedlinkflags": null,
+                        "exelinkflags": null,
+                        "objects": null,
+                        "sources": null,
+                        "sysroot": null,
+                        "requires": null,
+                        "properties": null,
+                        "exe": null,
+                        "type": null,
+                        "location": null,
+                        "link_location": null,
+                        "languages": null
+                    }
+                },
+                "conf_info": {},
+                "label": "conanfile.txt",
+                "vendor": false,
+                "dependencies": {
+                    "1": {
+                        "ref": "greet/1.0",
+                        "require": "greet/1.0",
+                        "run": false,
+                        "libs": true,
+                        "skip": false,
+                        "test": false,
+                        "force": false,
+                        "direct": true,
+                        "build": false,
+                        "transitive_headers": null,
+                        "transitive_libs": null,
+                        "headers": true,
+                        "package_id_mode": null,
+                        "visible": true
+                    },
+                    "2": {
+                        "ref": "ziplite/1.2",
+                        "require": "ziplite/1.2",
+                        "run": false,
+                        "libs": true,
+                        "skip": false,
+                        "test": false,
+                        "force": false,
+                        "direct": false,
+                        "build": false,
+                        "transitive_headers": null,
+                        "transitive_libs": null,
+                        "headers": false,
+                        "package_id_mode": null,
+                        "visible": true
+                    },
+                    "3": {
+                        "ref": "jsonhdr/3.1",
+                        "require": "jsonhdr/3.1",
+                        "run": false,
+                        "libs": false,
+                        "skip": false,
+                        "test": false,
+                        "force": false,
+                        "direct": true,
+                        "build": false,
+                        "transitive_headers": null,
+                        "transitive_libs": null,
+                        "headers": true,
+                        "package_id_mode": null,
+                        "visible": true
+                    },
+                    "4": {
+                        "ref": "buildgen/0.9",
+                        "require": "buildgen/0.9",
+                        "run": true,
+                        "libs": false,
+                        "skip": false,
+                        "test": false,
+                        "force": false,
+                        "direct": true,
+                        "build": true,
+                        "transitive_headers": null,
+                        "transitive_libs": null,
+                        "headers": false,
+                        "package_id_mode": null,
+                        "visible": false
+                    }
+                },
+                "context": "host",
+                "test": false
+            },
+            "1": {
+                "ref": "greet/1.0#6758f5880448684b35a3ce0af5b6b56d",
+                "id": "1",
+                "recipe": "Cache",
+                "package_id": "87a73eaa9491cdc08b55f6dba2c79dfe944e39fc",
+                "prev": "01e3b8b2b5ed1c3b0a803a1253c7e71e",
+                "rrev": "6758f5880448684b35a3ce0af5b6b56d",
+                "rrev_timestamp": 1792328306.5126572,
+                "prev_timestamp": 1792328303.3095565,
+                "remote": null,
+                "binary_remote": null,
+                "build_id": null,
+                "binary": "Cache",
+                "invalid_build": false,
+                "info_invalid": null,
+                "name": "greet",
+                "user": null,
+                "channel": null,
+                "url": "<Package recipe repository url here, for issues about the package>",
+                "license": "<Put the package license here>",
+                "author": "<Put your name here> <And your email here>",
+                "description": "<Description of greet package here>",
+                "homepage": null,
+                "build_policy": null,
+                "upload_policy": null,
+                "revision_mode": "hash",
+                "provides": null,
+                "deprecated": null,
+                "win_bash": null,
+                "win_bash_run": null,
+                "default_options": {
+                    "shared": false,
+                    "fPIC": true
+                },
+                "options_description": null,
+                "version": "1.0",
+                "topics": [
+                    "<Put some tag here>",
+                    "<here>",
+                    "<and here>"
+                ],
+                "package_type": "static-library",
+                "languages": [],
+                "settings": {
+                    "os": "Linux",
+                    "arch": "x86_64",
+                    "compiler": "gcc",
+                    "compiler.cppstd": "gnu17",
+                    "compiler.libcxx": "libstdc++11",
+                    "compiler.version": "13",
+                    "build_type": "Release"
+                },
+                "options": {
+                    "fPIC": "True",
+                    "shared": "False"
+                },
+                "options_definitions": {
+                    "shared": [
+                        "True",
+                        "False",
+                        "ANY"
+                    ],
+                    "fPIC": [
+                        "True",
+                        "False",
+                        "ANY"
+                    ]
+                },
+                "generators": [],
+                "python_requires": null,
+                "system_requires": {},
+                "recipe_folder": "/home/dev/.conan2/p/greet51ad59f01803d/e",
+                "source_folder": null,
+                "build_folder": null,
+                "generators_folder": null,
+                "package_folder": null,
+                "immutable_package_folder": null,
+                "cpp_info": {
+                    "root": {
+                        "includedirs": [
+                            "include"
+                        ],
+                        "srcdirs": null,
+                        "libdirs": [
+                            "lib"
+                        ],
+                        "resdirs": null,
+                        "bindirs": [
+                            "bin"
+                        ],
+                        "builddirs": null,
+                        "frameworkdirs": null,
+                        "system_libs": null,
+                        "frameworks": null,
+                        "libs": null,
+                        "defines": null,
+                        "cflags": null,
+                        "cxxflags": null,
+                        "sharedlinkflags": null,
+                        "exelinkflags": null,
+                        "objects": null,
+                        "sources": null,
+                        "sysroot": null,
+                        "requires": null,
+                        "properties": null,
+                        "exe": null,
+                        "type": null,
+                        "location": null,
+                        "link_location": null,
+                        "languages": null
+                    }
+                },
+                "conf_info": {},
+                "label": "greet/1.0",
+                "info": {
+                    "settings": {
+                        "os": "Linux",
+                        "arch": "x86_64",
+                        "compiler": "gcc",
+                        "compiler.cppstd": "gnu17",
+                        "compiler.libcxx": "libstdc++11",
+                        "compiler.version": "13",
+                        "build_type": "Release"
+                    },
+                    "options": {
+                        "fPIC": "True",
+                        "shared": "False"
+                    },
+                    "requires": [
+                        "ziplite/1.2.Z"
+                    ],
+                    "compatibility_delta": {
+                        "settings": [
+                            [
+                                "compiler.cppstd",
+                                "gnu17"
+                            ]
+                        ]
+                    }
+                },
+                "vendor": false,
+                "dependencies": {
+                    "2": {
+                        "ref": "ziplite/1.2",
+                        "require": "ziplite/1.2",
+                        "run": false,
+                        "libs": true,
+                        "skip": false,
+                        "test": false,
+                        "force": false,
+                        "direct": true,
+                        "build": false,
+                        "transitive_headers": null,
+                        "transitive_libs": null,
+                        "headers": true,
+                        "package_id_mode": "minor_mode",
+                        "visible": true
+                    }
+                },
+                "context": "host",
+                "test": false
+            },
+            "2": {
+                "ref": "ziplite/1.2#4ac3f190d6cf692a5bcc10d4df5d82dd",
+                "id": "2",
+                "recipe": "Cache",
+                "package_id": "838c313f1b7acdfd23b222f0156e7c264dcc2515",
+                "prev": "83361826629357f00ce4dfe436131d5d",
+                "rrev": "4ac3f190d6cf692a5bcc10d4df5d82dd",
+                "rrev_timestamp": 1792328293.769473,
+                "prev_timestamp": 1792328295.9351578,
+                "remote": null,
+                "binary_remote": null,
+                "build_id": null,
+                "binary": "Cache",
+                "invalid_build": false,
+                "info_invalid": null,
+                "name": "ziplite",
+                "user": null,
+                "channel": null,
+                "url": "<Package recipe repository url here, for issues about the package>",
+                "license": "<Put the package license here>",
+                "author": "<Put your name here> <And your email here>",
+                "description": "<Description of ziplite package here>",
+                "homepage": null,
+                "build_policy": null,
+                "upload_policy": null,
+                "revision_mode": "hash",
+                "provides": null,
+                "deprecated": null,
+                "win_bash": null,
+                "win_bash_run": null,
+                "default_options": {
+                    "shared": false,
+                    "fPIC": true
+                },
+                "options_description": null,
+                "version": "1.2",
+                "topics": [
+                    "<Put some tag here>",
+                    "<here>",
+                    "<and here>"
+                ],
+                "package_type": "static-library",
+                "languages": [],
+                "settings": {
+                    "os": "Linux",
+                    "arch": "x86_64",
+                    "compiler": "gcc",
+                    "compiler.cppstd": "gnu17",
+                    "compiler.libcxx": "libstdc++11",
+                    "compiler.version": "13",
+                    "build_type": "Release"
+                },
+                "options": {
+                    "fPIC": "True",
+                    "shared": "False"
+                },
+                "options_definitions": {
+                    "shared": [
+                        "True",
+                        "False",
+                        "ANY"
+                    ],
+                    "fPIC": [
+                        "True",
+                        "False",
+                        "ANY"
+                    ]
+                },
+                "generators": [],
+                "python_requires": null,
+                "system_requires": {},
+                "recipe_folder": "/home/dev/.conan2/p/ziplid6769d333f5eb/e",
+                "source_folder": null,
+                "build_folder": null,
+                "generators_folder": null,
+                "package_folder": null,
+                "immutable_package_folder": null,
+                "cpp_info": {
+                    "root": {
+                        "includedirs": [
+                            "include"
+                        ],
+                        "srcdirs": null,
+                        "libdirs": [
+                            "lib"
+                        ],
+                        "resdirs": null,
+                        "bindirs": [
+                            "bin"
+                        ],
+                        "builddirs": null,
+                        "frameworkdirs": null,
+                        "system_libs": null,
+                        "frameworks": null,
+                        "libs": null,
+                        "defines": null,
+                        "cflags": null,
+                        "cxxflags": null,
+                        "sharedlinkflags": null,
+                        "exelinkflags": null,
+                        "objects": null,
+                        "sources": null,
+                        "sysroot": null,
+                        "requires": null,
+                        "properties": null,
+                        "exe": null,
+                        "type": null,
+                        "location": null,
+                        "link_location": null,
+                        "languages": null
+                    }
+                },
+                "conf_info": {},
+                "label": "ziplite/1.2",
+                "info": {
+                    "settings": {
+                        "os": "Linux",
+                        "arch": "x86_64",
+                        "compiler": "gcc",
+                        "compiler.cppstd": "gnu17",
+                        "compiler.libcxx": "libstdc++11",
+                        "compiler.version": "13",
+                        "build_type": "Release"
+                    },
+                    "options": {
+                        "fPIC": "True",
+                        "shared": "False"
+                    },
+                    "compatibility_delta": {
+                        "settings": [
+                            [
+                                "compiler.cppstd",
+                                "gnu17"
+                            ]
+                        ]
+                    }
+                },
+                "vendor": false,
+                "dependencies": {},
+                "context": "host",
+                "test": false
+            },
+            "3": {
+                "ref": "jsonhdr/3.1#fa511254dd41001e01b45a7b62f9a9df",
+                "id": "3",
+                "recipe": "Cache",
+                "package_id": "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+                "prev": "95cafff3fc5de18bbda14a2b4d252f04",
+                "rrev": "fa511254dd41001e01b45a7b62f9a9df",
+                "rrev_timestamp": 1792328299.8981786,
+                "prev_timestamp": 1792328299.9091523,
+                "remote": null,
+                "binary_remote": null,
+                "build_id": null,
+                "binary": "Cache",
+                "invalid_build": false,
+                "info_invalid": null,
+                "name": "jsonhdr",
+                "user": null,
+                "channel": null,
+                "url": "<Package recipe repository url here, for issues about the package>",
+                "license": "<Put the package license here>",
+                "author": "<Put your name here> <And your email here>",
+                "description": "<Description of jsonhdr package here>",
+                "homepage": null,
+                "build_policy": null,
+                "upload_policy": null,
+                "revision_mode": "hash",
+                "provides": null,
+                "deprecated": null,
+                "win_bash": null,
+                "win_bash_run": null,
+                "default_options": null,
+                "options_description": null,
+                "version": "3.1",
+                "topics": [
+                    "<Put some tag here>",
+                    "<here>",
+                    "<and here>"
+                ],
+                "package_type": "header-library",
+                "languages": [],
+                "settings": {},
+                "options": {},
+                "options_definitions": {},
+                "generators": [],
+                "python_requires": null,
+                "system_requires": {},
+                "recipe_folder": "/home/dev/.conan2/p/jsonh412b794acf849/e",
+                "source_folder": null,
+                "build_folder": null,
+                "generators_folder": null,
+                "package_folder": null,
+                "immutable_package_folder": null,
+                "cpp_info": {
+                    "root": {
+                        "includedirs": [
+                            "include"
+                        ],
+                        "srcdirs": null,
+                        "libdirs": [
+                            "lib"
+                        ],
+                        "resdirs": null,
+                        "bindirs": [
+                            "bin"
+                        ],
+                        "builddirs": null,
+                        "frameworkdirs": null,
+                        "system_libs": null,
+                        "frameworks": null,
+                        "libs": null,
+                        "defines": null,
+                        "cflags": null,
+                        "cxxflags": null,
+                        "sharedlinkflags": null,
+                        "exelinkflags": null,
+                        "objects": null,
+                        "sources": null,
+                        "sysroot": null,
+                        "requires": null,
+                        "properties": null,
+                        "exe": null,
+                        "type": null,
+                        "location": null,
+                        "link_location": null,
+                        "languages": null
+                    }
+                },
+                "conf_info": {},
+                "label": "jsonhdr/3.1",
+                "info": {},
+                "vendor": false,
+                "dependencies": {},
+                "context": "host",
+                "test": false
+            },
+            "4": {
+                "ref": "buildgen/0.9#17967da9981477673f62ac43eddc1928",
+                "id": "4",
+                "recipe": "Cache",
+                "package_id": "9579ed92ff10290b68440279875f9eccd83f2d71",
+                "prev": "ce91235bd71e0f5965688c45289f312b",
+                "rrev": "17967da9981477673f62ac43eddc1928",
+                "rrev_timestamp": 1792328301.0462263,
+                "prev_timestamp": 1792328301.934563,
+                "remote": null,
+                "binary_remote": null,
+                "build_id": null,
+                "binary": "Cache",
+                "invalid_build": false,
+                "info_invalid": null,
+                "name": "buildgen",
+                "user": null,
+                "channel": null,
+                "url": "<Package recipe repository url here, for issues about the package>",
+                "license": "<Put the package license here>",
+                "author": "<Put your name here> <And your email here>",
+                "description": "<Description of buildgen package here>",
+                "homepage": null,
+                "build_policy": null,
+                "upload_policy": null,
+                "revision_mode": "hash",
+                "provides": null,
+                "deprecated": null,
+                "win_bash": null,
+                "win_bash_run": null,
+                "default_options": null,
+                "options_description": null,
+                "version": "0.9",
+                "topics": [
+                    "<Put some tag here>",
+                    "<here>",
+                    "<and here>"
+                ],
+                "package_type": "application",
+                "languages": [],
+                "settings": {
+                    "os": "Linux",
+                    "arch": "x86_64",
+                    "compiler": "gcc",
+                    "compiler.cppstd": "gnu17",
+                    "compiler.libcxx": "libstdc++11",
+                    "compiler.version": "13",
+                    "build_type": "Release"
+                },
+                "options": {},
+                "options_definitions": {},
+                "generators": [],
+                "python_requires": null,
+                "system_requires": {},
+                "recipe_folder": "/home/dev/.conan2/p/buildc1d2a73d24184/e",
+                "source_folder": null,
+                "build_folder": null,
+                "generators_folder": null,
+                "package_folder": null,
+                "immutable_package_folder": null,
+                "cpp_info": {
+                    "root": {
+                        "includedirs": [
+                            "include"
+                        ],
+                        "srcdirs": null,
+                        "libdirs": [
+                            "lib"
+                        ],
+                        "resdirs": null,
+                        "bindirs": [
+                            "bin"
+                        ],
+                        "builddirs": null,
+                        "frameworkdirs": null,
+                        "system_libs": null,
+                        "frameworks": null,
+                        "libs": null,
+                        "defines": null,
+                        "cflags": null,
+                        "cxxflags": null,
+                        "sharedlinkflags": null,
+                        "exelinkflags": null,
+                        "objects": null,
+                        "sources": null,
+                        "sysroot": null,
+                        "requires": null,
+                        "properties": null,
+                        "exe": null,
+                        "type": null,
+                        "location": null,
+                        "link_location": null,
+                        "languages": null
+                    }
+                },
+                "conf_info": {},
+                "label": "buildgen/0.9",
+                "info": {
+                    "settings": {
+                        "os": "Linux",
+                        "arch": "x86_64",
+                        "compiler": "gcc",
+                        "compiler.cppstd": "gnu17",
+                        "compiler.libcxx": "libstdc++11",
+                        "compiler.version": "13",
+                        "build_type": "Release"
+                    },
+                    "compatibility_delta": {
+                        "settings": [
+                            [
+                                "compiler.cppstd",
+                                "gnu17"
+                            ]
+                        ]
+                    }
+                },
+                "vendor": false,
+                "dependencies": {},
+                "context": "build",
+                "test": false
+            }
+        },
+        "root": {
+            "0": "None"
+        },
+        "overrides": {},
+        "resolved_ranges": {},
+        "replaced_requires": {},
+        "error": null
+    }
+}

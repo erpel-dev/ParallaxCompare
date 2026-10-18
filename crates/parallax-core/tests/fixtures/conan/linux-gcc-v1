@@ -1,0 +1,13 @@
+include(default)
+
+[settings]
+build_type=Release
+compiler.cppstd=17
+
+[conf]
+tools.cmake.cmaketoolchain:generator=Ninja
+tools.build:jobs=8
+
+[buildenv]
+CC=gcc
+CXX=g++
