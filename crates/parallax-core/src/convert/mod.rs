@@ -17,6 +17,7 @@ mod data;
 mod dbc;
 mod dotnet;
 mod dwarf;
+mod ecuc;
 mod email;
 mod ftl;
 pub mod gguf;
@@ -159,6 +160,8 @@ pub enum View {
     XpandOutline,
     /// Xtend extensions and Check constraints: imports, functions and checks with a checksum of each body.
     XtendOutline,
+    /// AUTOSAR EcucValues: modules, containers and parameter values as simplified JSON, editable.
+    EcucValues,
 }
 
 impl View {
@@ -209,6 +212,7 @@ impl View {
             View::ReflowedText => "Text, reflowed",
             View::Needs => "Needs",
             View::TemplateOutline | View::XpandOutline => "Template outline",
+            View::EcucValues => "ECUC values",
             View::ConanGraph => "Conan graph",
             View::NormalizedConan => "Normalized",
             View::PythonOutline | View::PerlOutline | View::RustOutline | View::JsOutline | View::XtendOutline => {
@@ -284,6 +288,8 @@ enum Kind {
     Xtend,
     /// Check constraints (.chk).
     Check,
+    /// ARXML with ECUC module configuration values.
+    Ecuc,
 }
 
 fn extension(name: &str) -> String {
@@ -433,6 +439,9 @@ fn kind_of(name: &str, data: &[u8]) -> Kind {
     if table::is_table(&ext) {
         return Kind::Table;
     }
+    if matches!(ext.as_str(), "arxml" | "xml") && ecuc::is_ecuc(data) {
+        return Kind::Ecuc;
+    }
     if crate::highlight::is_xml_name(name) || data.starts_with(b"<?xml") {
         return Kind::Xml;
     }
@@ -513,6 +522,7 @@ pub fn views_for(name: &str, data: &[u8]) -> Vec<View> {
         Kind::Js(_) => vec![View::Text, View::JsOutline],
         Kind::Xpand => vec![View::Text, View::XpandOutline],
         Kind::Xtend | Kind::Check => vec![View::Text, View::XtendOutline],
+        Kind::Ecuc => vec![View::EcucValues, View::Text, View::PrettyXml],
         Kind::ConanIni => vec![View::Text, View::NormalizedConan],
         Kind::ConanManifest => vec![View::Text],
     };
@@ -623,7 +633,33 @@ pub fn render(view: View, name: &str, data: &[u8]) -> Result<String> {
         View::XpandOutline => Ok(xpand::template_outline(&text::decode(data).text)),
         View::XtendOutline if extension(name) == "chk" => Ok(xpand::check_outline(&text::decode(data).text)),
         View::XtendOutline => Ok(xpand::extension_outline(&text::decode(data).text)),
+        View::EcucValues => ecuc::render(&text::decode(data).text).map_err(Error::Unsupported),
     }
+}
+
+/// Views whose edited text can be saved back into the file it was made from.
+pub fn can_write_back(view: View) -> bool {
+    view == View::EcucValues
+}
+
+/// The bytes of `original` with the edited text of `view` applied, in the
+/// file's encoding. `other` is the file on the other side, which tells how to
+/// write what `original` does not have yet.
+pub fn write_back(
+    view: View,
+    original: &[u8],
+    edited: &str,
+    other: Option<&[u8]>,
+) -> std::result::Result<Vec<u8>, String> {
+    if view != View::EcucValues {
+        return Err(format!("{} cannot be saved back", view.label()));
+    }
+    let mut doc = text::decode(original);
+    let donor = other.map(|o| text::decode(o).text);
+    let out = ecuc::write_back(&doc.text, edited, donor.as_deref())?;
+    let len = doc.text.len();
+    doc.splice(0..len, &out);
+    doc.encode()
 }
 
 /// Source files larger than this are compared by bytes only (a minified
@@ -658,6 +694,7 @@ pub fn has_content_rule(name: &str) -> bool {
                 | "pm"
                 | "t"
                 | "psgi"
+                | "arxml"
                 | "xpt"
                 | "ext"
                 | "chk"
@@ -840,6 +877,11 @@ pub fn content_equal(name: &str, left: &[u8], right: &[u8]) -> Option<&'static s
         Kind::Xtend | Kind::Check if left.len().max(right.len()) <= MAX_SOURCE_COMPARE => {
             let (l, r) = (text::decode(left).text, text::decode(right).text);
             return xpand::same_code(&l, &r).then_some("same code, only comments or formatting differ");
+        }
+        Kind::Ecuc => {
+            let (l, r) = (text::decode(left).text, text::decode(right).text);
+            return (ecuc::render(&l).ok()? == ecuc::render(&r).ok()?)
+                .then_some("same configuration, only order, UUIDs, admin data, number spelling or package differ");
         }
         Kind::NeedsJson => {
             return needs::same_needs_json(left, right)?
@@ -1184,6 +1226,35 @@ mod tests {
         assert_eq!(views_for("bin/tool", b"#!/usr/bin/perl -w\nprint 1;\n")[1], View::PerlOutline);
         assert_eq!(views_for("t/basic.t", b"use Test::More;\nok(1);\n")[1], View::PerlOutline);
         assert!(has_content_rule("x.py") && has_content_rule("Cart.pm") && has_content_rule("run.pl"));
+    }
+
+    #[test]
+    fn ecuc_values_view_and_write_back() {
+        let fixture =
+            |p: &str| std::fs::read(format!("{}/tests/fixtures/ecuc/{p}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let (v1, other, v2) = (fixture("Can-v1.arxml"), fixture("Can-v1-other-tool.arxml"), fixture("Can-v2.arxml"));
+        assert_eq!(
+            views_for("Can_EcucValues.arxml", &v1),
+            vec![View::EcucValues, View::Text, View::PrettyXml, View::Hex]
+        );
+        assert_eq!(views_for("System.arxml", b"<?xml version=\"1.0\"?>\n<AUTOSAR/>\n")[0], View::Text);
+        // Another package name, parameter order, number spelling and no UUIDs: the same configuration.
+        assert_eq!(
+            content_equal("Can_EcucValues.arxml", &v1, &other),
+            Some("same configuration, only order, UUIDs, admin data, number spelling or package differ")
+        );
+        assert_eq!(content_equal("Can_EcucValues.arxml", &v1, &v2), None);
+        assert!(has_content_rule("Can_EcucValues.arxml"));
+
+        // The view of v2 saved into v1 changes one value; everything else keeps its bytes.
+        assert!(can_write_back(View::EcucValues) && !can_write_back(View::PrettyXml));
+        let edited = render(View::EcucValues, "Can.arxml", &v2).unwrap();
+        let saved = write_back(View::EcucValues, &v1, &edited, Some(&v2)).unwrap();
+        assert_eq!(render(View::EcucValues, "Can.arxml", &saved).unwrap(), edited);
+        let (a, b) = (String::from_utf8(v1.clone()).unwrap(), String::from_utf8(saved).unwrap());
+        assert_eq!(a.replace(">INTERRUPT<", ">POLLING<"), b);
+        let err = write_back(View::EcucValues, &v1, &edited.replace("\"POLLING\"", "POLLING"), None).unwrap_err();
+        assert!(err.contains("POLLING is not a number"), "{err}");
     }
 
     #[test]

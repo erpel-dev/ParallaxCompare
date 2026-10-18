@@ -90,6 +90,10 @@ struct FileDiff {
     editable: [bool; 2],
     /// Per side: the file exists (a missing side is created on save).
     exists: [bool; 2],
+    /// The view shown; for a converted view that can be saved, the file's
+    /// bytes per side, which saving applies the edited text to.
+    view: View,
+    data: [Option<Data>; 2],
 }
 
 impl FileDiff {
@@ -803,15 +807,16 @@ pub async fn open_file_diff(
         let mut left = make_doc(&left_data, left_text, &mut left_info)?;
         let mut right = make_doc(&right_data, right_text, &mut right_info)?;
         // Plain text can be edited where the source can be written and saving
-        // would give back the same bytes for unedited text.
+        // would give back the same bytes for unedited text. Views that write
+        // back into their file (ECUC values) need the file to exist.
         let editable = |source: &Source, data: &Option<Data>, doc: &TextDoc, other: &Option<Data>| {
-            chosen == View::Text
-                && source.info.writable
-                && source.vfs.writable()
+            let text = chosen == View::Text
                 && match data {
                     Some(bytes) => !text::is_binary(bytes) && doc.encode().is_ok_and(|e| e[..] == bytes[..]),
                     None => other.as_ref().is_some_and(|o| !text::is_binary(o)),
-                }
+                };
+            let converted = convert::can_write_back(chosen) && data.is_some();
+            (text || converted) && source.info.writable && source.vfs.writable()
         };
         let editable = [
             editable(&session.left, &left_data, &left, &right_data),
@@ -841,6 +846,7 @@ pub async fn open_file_diff(
             View::PythonOutline => Some("Python".into()),
             View::PerlOutline => Some("Perl".into()),
             View::RustOutline => Some("Rust".into()),
+            View::EcucValues => Some("JSON".into()),
             View::XpandOutline => Some("Xpand".into()),
             View::XtendOutline if name.to_ascii_lowercase().ends_with(".chk") => Some("Check (oAW)".into()),
             View::XtendOutline => Some("Xtend (oAW)".into()),
@@ -887,6 +893,8 @@ pub async fn open_file_diff(
                 highlighters: None,
                 editable,
                 exists,
+                view: chosen,
+                data: if convert::can_write_back(chosen) { [left_data, right_data] } else { [None, None] },
             },
         ))
     })
@@ -1101,7 +1109,8 @@ fn edit_info(fd: &FileDiff, focus: Option<Edited>, caret: Option<(Side, usize)>)
         exists: fd.exists,
         can_undo: e.can_undo(),
         can_redo: e.can_redo(),
-        identical: e.doc(Side::Left).text == e.doc(Side::Right).text,
+        // Equal text of a converted view says nothing about the bytes.
+        identical: fd.view == View::Text && e.doc(Side::Left).text == e.doc(Side::Right).text,
         focus_row: focus.map(|f| e.row_of_line(f.side, f.line)),
         caret,
     }
@@ -1235,16 +1244,23 @@ pub async fn update_diff(
 pub async fn save_side(app: AppHandle, state: State<'_, AppState>, id: u64, side: Side) -> CmdResult<EditInfo> {
     let info = with_diff(state, id, move |fd| {
         check_editable(fd, side)?;
-        let bytes = fd.edit.doc(side).encode().map_err(|e| format!("Cannot save: {e}."))?;
+        let bytes = if fd.view == View::Text {
+            fd.edit.doc(side).encode().map_err(|e| format!("Cannot save: {e}."))?
+        } else {
+            let original = fd.data[side as usize].as_deref().ok_or("The file to save into is missing.")?;
+            let other = fd.data[side.other() as usize].as_deref();
+            convert::write_back(fd.view, original, &fd.edit.doc(side).text, other)
+                .map_err(|e| format!("Cannot save: {e}."))?
+        };
+        let written = Data::from_vec(bytes);
         let source = fd.source(side);
         let _guard = fd.session.writing(std::slice::from_ref(&fd.path));
-        let change = Change::Put {
-            path: source.path(&fd.path),
-            kind: EntryKind::File,
-            data: Data::from_vec(bytes),
-            mtime: None,
-        };
+        let change =
+            Change::Put { path: source.path(&fd.path), kind: EntryKind::File, data: written.clone(), mtime: None };
         source.vfs.apply(vec![change], &Progress::default()).map_err(err)?;
+        if fd.data[side as usize].is_some() {
+            fd.data[side as usize] = Some(written);
+        }
         fd.edit.mark_saved(side);
         fd.exists[side as usize] = true;
         Ok((None, None))

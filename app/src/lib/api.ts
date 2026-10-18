@@ -203,6 +203,7 @@ export type View =
   | "jsOutline"
   | "xpandOutline"
   | "xtendOutline"
+  | "ecucValues"
   | "table"
   | "certificate"
   | "email";
