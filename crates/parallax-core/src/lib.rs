@@ -12,6 +12,7 @@ pub mod error;
 pub mod highlight;
 pub mod ops;
 pub mod progress;
+pub mod search;
 pub mod source;
 pub mod text;
 pub mod textdiff;

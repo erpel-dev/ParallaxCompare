@@ -91,6 +91,25 @@ export interface LineView {
   nn?: boolean;
 }
 
+export interface SearchOptions {
+  matchCase: boolean;
+  wholeWord: boolean;
+  regex: boolean;
+}
+
+/** A match: its row, side (0 left, 1 right) and UTF-16 offsets in the line. */
+export interface Hit {
+  row: number;
+  side: 0 | 1;
+  start: number;
+  end: number;
+}
+
+export interface SearchResult {
+  hits: Hit[];
+  truncated: boolean;
+}
+
 export interface RowView {
   k: RowKind;
   l: LineView | null;
@@ -287,6 +306,8 @@ export const api = {
     invoke<FileDiffInfo>("open_file_diff", { id, path, options, syntax, view }),
   fileRows: (id: number, start: number, count: number, theme: "dark" | "light") =>
     invoke<RowView[]>("file_rows", { id, start, count, theme }),
+  searchDiff: (id: number, query: string, options: SearchOptions) =>
+    invoke<SearchResult>("search_diff", { id, query, options }),
   closeFileDiff: (id: number) => invoke<void>("close_file_diff", { id }),
   editText: (id: number, side: SideName, from: Pos, to: Pos, text: string, caret: number | null) =>
     invoke<EditInfo>("edit_text", { id, side, from, to, text, caret }),
