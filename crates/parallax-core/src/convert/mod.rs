@@ -15,6 +15,7 @@ mod class;
 mod conan;
 mod data;
 mod dbc;
+mod doc;
 mod dotnet;
 mod dwarf;
 mod ecuc;

@@ -133,6 +133,7 @@ fn docx(zip: &mut Zip) -> Result<String> {
                 paragraph_has_text = true;
             }
             Ev::Start("tab", _) => out.push('\t'),
+            Ev::Start("noBreakHyphen", _) => out.push('\u{2011}'),
             Ev::Start("br" | "cr", _) => out.push('\n'),
             Ev::Start("tc", _) => cell_depth += 1,
             Ev::End("tc") => {
@@ -367,8 +368,19 @@ pub fn soffice() -> Option<&'static PathBuf> {
         .as_ref()
 }
 
-/// Converts .doc/.xls/.ppt to their OOXML counterpart with LibreOffice, then extracts text.
+/// Reads .doc/.xls/.ppt natively where a reader exists; otherwise, or when it
+/// fails and LibreOffice is installed, converts them to their OOXML counterpart
+/// with LibreOffice and extracts the text of that.
 pub fn legacy_text(ext: &str, data: &[u8]) -> Result<String> {
+    let native = match ext {
+        "doc" | "dot" => Some(super::doc::text(data)),
+        _ => None,
+    };
+    match native {
+        Some(Ok(text)) => return Ok(text),
+        Some(Err(e)) if soffice().is_none() => return Err(e),
+        _ => {}
+    }
     let target = match ext.chars().next() {
         Some('d') => "docx",
         Some('x') => "xlsx",
