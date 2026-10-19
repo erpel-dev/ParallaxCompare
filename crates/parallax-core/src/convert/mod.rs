@@ -41,6 +41,7 @@ mod rust;
 mod safetensors;
 mod sqlite;
 mod table;
+mod visio;
 mod wasm;
 mod xpand;
 
@@ -56,8 +57,10 @@ use crate::{Error, Result};
 pub enum View {
     /// The file as text.
     Text,
-    /// Text extracted from Word, Excel, PowerPoint, OpenDocument and PDF files.
+    /// Text extracted from Word, Excel, PowerPoint, OpenDocument, Visio and PDF files.
     Document,
+    /// Visio drawings: pages, shapes with their text, position, data and connections.
+    Diagram,
     /// Sections, symbols and imports of ELF, PE and Mach-O files.
     Executable,
     /// Intel HEX and Motorola S-record files decoded into an address-aligned byte map.
@@ -169,6 +172,7 @@ impl View {
         match self {
             View::Text => "Text",
             View::Document => "Document text",
+            View::Diagram => "Diagram",
             View::Executable => "Executable summary",
             View::Firmware => "Firmware address map",
             View::PrettyXml => "Pretty-printed XML",
@@ -233,6 +237,8 @@ enum Kind {
     Ooxml,
     Odf,
     LegacyOffice,
+    Visio,
+    LegacyVisio,
     Executable,
     Raster,
     Svg,
@@ -337,12 +343,18 @@ fn kind_of(name: &str, data: &[u8]) -> Kind {
         if matches!(ext.as_str(), "odt" | "ods" | "odp" | "ott" | "ots" | "otp") {
             return Kind::Odf;
         }
+        if visio::XML_EXTENSIONS.contains(&ext.as_str()) {
+            return Kind::Visio;
+        }
     }
     if email::is_msg(&ext, data) {
         return Kind::Msg;
     }
     if starts(&[0xD0, 0xCF, 0x11, 0xE0]) && matches!(ext.as_str(), "doc" | "xls" | "ppt" | "dot" | "xlt" | "pot") {
         return Kind::LegacyOffice;
+    }
+    if starts(&[0xD0, 0xCF, 0x11, 0xE0]) && visio::BINARY_EXTENSIONS.contains(&ext.as_str()) {
+        return Kind::LegacyVisio;
     }
     if starts(b"MZ") && dotnet::is_managed(data) {
         return Kind::DotNet;
@@ -471,7 +483,9 @@ pub fn views_for(name: &str, data: &[u8]) -> Vec<View> {
     let mut views = match kind_of(name, data) {
         Kind::Pdf | Kind::Ooxml | Kind::Odf => vec![View::Document],
         Kind::LegacyOffice if office::soffice().is_some() => vec![View::Document],
-        Kind::LegacyOffice | Kind::Binary => vec![],
+        Kind::Visio => vec![View::Diagram, View::Document],
+        Kind::LegacyVisio if office::soffice().is_some() => vec![View::Diagram, View::Document],
+        Kind::LegacyOffice | Kind::LegacyVisio | Kind::Binary => vec![],
         Kind::Executable if dwarf::has_debug_info(data) => vec![View::Executable, View::DebugSymbols],
         Kind::Executable => vec![View::Executable],
         Kind::Raster => vec![View::Image, View::ImageMetadata],
@@ -568,7 +582,14 @@ pub fn render(view: View, name: &str, data: &[u8]) -> Result<String> {
             Kind::Ooxml => office::ooxml_text(&extension(name), data),
             Kind::Odf => office::odf_text(data),
             Kind::LegacyOffice => office::legacy_text(&extension(name), data),
+            Kind::Visio => visio::diagram_text(data),
+            Kind::LegacyVisio => visio::legacy_text(&extension(name), data),
             _ => Err(Error::Unsupported(format!("{name} is not a document"))),
+        },
+        View::Diagram => match kind_of(name, data) {
+            Kind::Visio => visio::diagram(data),
+            Kind::LegacyVisio => visio::legacy_diagram(&extension(name), data),
+            _ => Err(Error::Unsupported(format!("{name} is not a Visio drawing"))),
         },
         View::Executable => binary::executable_summary(data),
         View::Firmware => binary::firmware_map(data),
@@ -698,6 +719,8 @@ pub fn has_content_rule(name: &str) -> bool {
                 .any(|n| f.eq_ignore_ascii_case(n))
         })
         || conan::is_graph_name(name)
+        || visio::XML_EXTENSIONS.contains(&extension(name).as_str())
+        || visio::BINARY_EXTENSIONS.contains(&extension(name).as_str())
         || matches!(
             extension(name).as_str(),
             "a2l"
@@ -805,6 +828,10 @@ pub fn content_equal(name: &str, left: &[u8], right: &[u8]) -> Option<&'static s
     let equal = match kl {
         Kind::Pdf | Kind::Ooxml | Kind::Odf => {
             render(View::Document, name, left).ok()? == render(View::Document, name, right).ok()?
+        }
+        Kind::Visio | Kind::LegacyVisio => {
+            return (render(View::Diagram, name, left).ok()? == render(View::Diagram, name, right).ok()?)
+                .then_some("same pages, shapes, text, data and connections");
         }
         Kind::Raster => image_diff::pixels_equal(left, right)?,
         Kind::Media => return media::same_media(&extension(name), left, right),
@@ -1377,5 +1404,58 @@ mod tests {
         );
         assert!(has_content_rule("a.rs") && has_content_rule("b.tsx") && has_content_rule("c.mjs"));
         assert_eq!(views_for("bin/cli", b"#!/usr/bin/env node\nconsole.log(1)\n")[1], View::JsOutline);
+    }
+
+    fn vsdx(shape_a: &str, deflate: bool) -> Vec<u8> {
+        use std::io::Write;
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let method = if deflate { zip::CompressionMethod::Deflated } else { zip::CompressionMethod::Stored };
+        let opts = zip::write::SimpleFileOptions::default().compression_method(method);
+        let shape = |id: &str, text: &str, x: &str| {
+            format!(
+                r#"<Shape ID="{id}" Type="Shape"><Cell N="PinX" V="{x}"/><Cell N="PinY" V="1"/><Cell N="Width" V="1"/><Cell N="Height" V="0.5"/><Text>{text}</Text></Shape>"#
+            )
+        };
+        let parts = [
+            (
+                "visio/pages/pages.xml",
+                r#"<Pages><Page ID="0" NameU="Flow" Name="Flow"><PageSheet><Cell N="PageWidth" V="8.5" U="IN"/><Cell N="PageHeight" V="11" U="IN"/></PageSheet><Rel r:id="rId1"/></Page></Pages>"#.to_string(),
+            ),
+            (
+                "visio/pages/_rels/pages.xml.rels",
+                r#"<Relationships><Relationship Id="rId1" Target="page1.xml"/></Relationships>"#.to_string(),
+            ),
+            (
+                "visio/pages/page1.xml",
+                format!(
+                    r#"<PageContents><Shapes>{}{}<Shape ID="3" NameU="Dynamic connector" Name="Dynamic connector" Type="Shape"><Cell N="BeginX" V="1.5"/><Cell N="BeginY" V="1"/><Cell N="EndX" V="2.5"/><Cell N="EndY" V="1"/></Shape></Shapes><Connects><Connect FromSheet="3" FromCell="BeginX" ToSheet="1"/><Connect FromSheet="3" FromCell="EndX" ToSheet="2"/></Connects></PageContents>"#,
+                    shape("1", shape_a, "1"),
+                    shape("2", "End", "3")
+                ),
+            ),
+        ];
+        for (name, text) in parts {
+            w.start_file(name, opts).unwrap();
+            w.write_all(text.as_bytes()).unwrap();
+        }
+        w.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn visio_diagrams() {
+        let v1 = vsdx("Start", true);
+        assert_eq!(views_for("flow.vsdx", &v1), vec![View::Diagram, View::Document, View::Hex]);
+        let diagram = render(View::Diagram, "flow.vsdx", &v1).unwrap();
+        assert!(diagram.starts_with("=== Page: Flow (8.5 in × 11 in) ===\n"), "{diagram}");
+        assert!(diagram.contains("  text: Start\n  at 1, 1 · size 1 × 0.5\n"), "{diagram}");
+        assert!(diagram.contains("shape 1 “Start” → shape 2 “End”"), "{diagram}");
+        assert_eq!(render(View::Document, "flow.vsdx", &v1).unwrap(), "=== Page: Flow ===\nStart\nEnd\n");
+
+        // Saved again with other compression: same drawing.
+        let stored = vsdx("Start", false);
+        assert_ne!(v1, stored);
+        assert_eq!(content_equal("flow.vsdx", &v1, &stored), Some("same pages, shapes, text, data and connections"));
+        assert_eq!(content_equal("flow.vsdx", &v1, &vsdx("Begin", true)), None);
+        assert!(has_content_rule("flow.vsdx") && has_content_rule("old.VSD"));
     }
 }

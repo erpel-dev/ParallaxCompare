@@ -838,7 +838,7 @@
         </select>
       </div>
       <label><input type="checkbox" bind:checked={options.ignoreLineEndings} onchange={() => run()} /> Ignore CRLF/LF differences</label>
-      <label title="Documents (PDF, Word, Excel, PowerPoint, OpenDocument) with the same text and images with the same pixels are marked ≈ instead of ≠">
+      <label title="Documents (PDF, Word, Excel, PowerPoint, Visio, OpenDocument) with the same text and images with the same pixels are marked ≈ instead of ≠">
         <input type="checkbox" bind:checked={options.compareContents} onchange={() => run()} /> Equal content counts as similar (≈)
       </label>
       <label title="Zip and 7z entries with the same CRC32 and size are taken as equal without decompressing them. Different data shares a CRC32 only by a one-in-four-billion chance or when made to. Verifying decompresses every such entry, which takes seconds for large solid 7z archives.">

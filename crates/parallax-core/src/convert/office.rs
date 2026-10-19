@@ -55,18 +55,25 @@ pub(super) fn attr(e: &quick_xml::events::BytesStart<'_>, name: &str) -> Option<
     e.attributes().flatten().find(|a| a.key.local_name().as_ref() == name).map(|a| a.value.into_owned())
 }
 
-struct Zip(zip::ZipArchive<Cursor<Vec<u8>>>);
+pub(super) struct Zip(zip::ZipArchive<Cursor<Vec<u8>>>);
 
 impl Zip {
-    fn open(data: &[u8]) -> Result<Self> {
+    pub(super) fn open(data: &[u8]) -> Result<Self> {
         zip::ZipArchive::new(Cursor::new(data.to_vec())).map(Zip).map_err(Error::archive)
     }
 
-    fn read(&mut self, name: &str) -> Option<String> {
+    pub(super) fn read(&mut self, name: &str) -> Option<String> {
         let mut file = self.0.by_name(name).ok()?;
         let mut s = String::new();
         file.read_to_string(&mut s).ok()?;
         Some(s)
+    }
+
+    pub(super) fn read_bytes(&mut self, name: &str) -> Option<Vec<u8>> {
+        let mut file = self.0.by_name(name).ok()?;
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf).ok()?;
+        Some(buf)
     }
 
     fn names(&self) -> Vec<String> {
@@ -362,13 +369,17 @@ pub fn soffice() -> Option<&'static PathBuf> {
 
 /// Converts .doc/.xls/.ppt to their OOXML counterpart with LibreOffice, then extracts text.
 pub fn legacy_text(ext: &str, data: &[u8]) -> Result<String> {
-    let exe =
-        soffice().ok_or_else(|| Error::Unsupported("legacy Office files need LibreOffice to be installed".into()))?;
     let target = match ext.chars().next() {
         Some('d') => "docx",
         Some('x') => "xlsx",
         _ => "pptx",
     };
+    ooxml_text(target, &convert(ext, data, target)?)
+}
+
+/// Converts `data`, a file of type `ext`, to `target` (an extension) with LibreOffice.
+pub(super) fn convert(ext: &str, data: &[u8], target: &str) -> Result<Vec<u8>> {
+    let exe = soffice().ok_or_else(|| Error::Unsupported(format!(".{ext} files need LibreOffice to be installed")))?;
     let dir = std::env::temp_dir().join(format!("parallax-convert-{}-{}", std::process::id(), unique()));
     std::fs::create_dir_all(&dir).map_err(|e| Error::io(dir.display().to_string(), e))?;
     let cleanup = Cleanup(dir.clone());
@@ -402,7 +413,7 @@ pub fn legacy_text(ext: &str, data: &[u8]) -> Result<String> {
     let converted =
         std::fs::read(&output).map_err(|_| Error::Unsupported("LibreOffice could not convert the file".into()))?;
     drop(cleanup);
-    ooxml_text(target, &converted)
+    Ok(converted)
 }
 
 fn unique() -> u64 {
