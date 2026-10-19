@@ -1,5 +1,5 @@
 // Helpers for the folder compare result tree.
-import type { Node } from "./api";
+import type { Node, Side, Status } from "./api";
 
 export type Filter = "all" | "diffs" | "same" | "orphans";
 
@@ -17,12 +17,21 @@ export interface FlatRow {
   pending?: boolean;
 }
 
+const holds = (side: Side | null) => !!side && (side.kind === "dir" || side.kind === "archive");
+
+/** Whether the row has entries below it: a folder or archive on either side (a file on the other still has them). */
 export function isContainer(node: Node): boolean {
-  const side = node.left ?? node.right;
-  return !!side && (side.kind === "dir" || side.kind === "archive");
+  return holds(node.left) || holds(node.right);
+}
+
+/** An archive not opened yet: compared as a file, its entries are loaded when it is expanded. */
+export function closedArchive(node: Node): boolean {
+  return !!node.unexpanded && (node.left ?? node.right)?.kind === "archive";
 }
 
 function selfMatches(node: Node, filter: Filter): boolean {
+  // Not compared yet: shown whatever it turns out to be.
+  if (node.status === "pending") return true;
   switch (filter) {
     case "all":
       return true;
@@ -74,7 +83,8 @@ export function differingFolders(root: Node, limit: number): string[] {
   const walk = (node: Node, dir: string) => {
     for (const child of node.children ?? []) {
       if (out.length >= limit) return;
-      if (isContainer(child) && child.status === "different") {
+      // Archives not opened yet open when the user expands them.
+      if (isContainer(child) && child.status === "different" && !child.unexpanded) {
         const path = joinPath(dir, child.name);
         out.push(path);
         walk(child, path);
@@ -138,7 +148,7 @@ export function replaceNode(root: Node, path: string, replacement: Node | null):
   parent.children = children;
   for (let i = chain.length - 1; i >= 1; i--) {
     const node = chain[i];
-    if (node.left && node.right && isContainer(node)) {
+    if (holds(node.left) && holds(node.right)) {
       const children = node.children ?? [];
       node.status = children.every((c) => c.status === "same")
         ? "same"
@@ -208,7 +218,8 @@ export function countFiles(root: Node): Counts {
   const c: Counts = { files: 0, same: 0, similar: 0, different: 0, leftOnly: 0, rightOnly: 0, errors: 0 };
   const walk = (node: Node) => {
     for (const child of node.children ?? []) {
-      if (isContainer(child) && child.status !== "error") {
+      if (child.status === "pending") continue;
+      if (isContainer(child) && child.status !== "error" && !closedArchive(child)) {
         walk(child);
         continue;
       }
@@ -399,4 +410,35 @@ export function flatFiles(
   const key = (r: FlatRow) => r.node.name.toLowerCase();
   out.sort((a, b) => key(a).localeCompare(key(b)) || a.path.localeCompare(b.path));
   return out;
+}
+
+/** What a compare in progress knows so far (see `Partial` in the core). */
+export interface Partial {
+  listed: { dir: string; entries: { name: string; left: Side | null; right: Side | null }[] }[];
+  done: { path: string; status: Status; unexpanded?: boolean; message?: string }[];
+}
+
+/**
+ * Adds what a running compare found to the tree shown meanwhile: listed folders
+ * get their entries, not compared yet, and finished entries their status.
+ * `index` holds the nodes by path.
+ */
+export function mergePartial(root: Node, index: Map<string, Node>, partial: Partial): void {
+  for (const { dir, entries } of partial.listed) {
+    const parent = dir ? index.get(dir) : root;
+    if (!parent) continue;
+    parent.children = entries.map((e) => {
+      const path = joinPath(dir, e.name);
+      let node = index.get(path);
+      if (!node) index.set(path, (node = { name: e.name, left: e.left, right: e.right, status: "pending" }));
+      return node;
+    });
+  }
+  for (const d of partial.done) {
+    const node = index.get(d.path);
+    if (!node) continue;
+    node.status = d.status;
+    node.unexpanded = d.unexpanded;
+    node.message = d.message;
+  }
 }

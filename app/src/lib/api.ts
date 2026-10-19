@@ -54,7 +54,8 @@ export interface SessionInfo {
 }
 
 export type EntryKind = "file" | "dir" | "archive" | "symlink" | "submodule";
-export type Status = "same" | "similar" | "different" | "leftOnly" | "rightOnly" | "error";
+/** `pending` only while a compare runs: listed, not compared yet. */
+export type Status = "same" | "similar" | "different" | "leftOnly" | "rightOnly" | "error" | "pending";
 
 export interface Side {
   kind: EntryKind;
@@ -98,6 +99,8 @@ export interface CompareOptions {
   compareContents: boolean;
   /** Archive entries with equal CRC32 are decompressed and compared byte for byte. */
   verifyChecksums: boolean;
+  /** Archives are opened during the compare; off, they are compared as files and opened when expanded. */
+  openArchives: boolean;
 }
 
 export interface DiffOptions {
@@ -328,6 +331,7 @@ export const defaultCompareOptions = (): CompareOptions => ({
   includes: [],
   compareContents: true,
   verifyChecksums: false,
+  openArchives: false,
 });
 
 export const defaultDiffOptions = (): DiffOptions => ({ whitespace: "exact", ignoreCase: false, histogram: false });

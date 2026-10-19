@@ -56,6 +56,11 @@ pub struct CompareOptions {
     /// decompresses every equal entry (a large solid 7z takes seconds instead of a
     /// tenth of one).
     pub verify_checksums: bool,
+    /// Archives (also nested ones) are opened and compared entry by entry. Off,
+    /// an archive is compared as a file (by size, stored CRC32 or bytes) and left
+    /// unexpanded, to be compared with [`compare_path`] when it is opened. An
+    /// archive at the root, or next to a folder, is always opened.
+    pub open_archives: bool,
 }
 
 impl Default for CompareOptions {
@@ -67,6 +72,7 @@ impl Default for CompareOptions {
             includes: Vec::new(),
             compare_contents: true,
             verify_checksums: false,
+            open_archives: true,
         }
     }
 }
@@ -247,6 +253,66 @@ impl Filter {
 pub struct Control {
     pub cancel: AtomicBool,
     pub files_done: AtomicU64,
+    /// When set, the folders listed and the entries finished so far, in the top
+    /// [`PARTIAL_DEPTH`] levels, for showing the result while it is computed.
+    /// The caller takes them out as it shows them.
+    pub partial: Option<parking_lot::Mutex<Partial>>,
+}
+
+/// How deep [`Control::partial`] reports: the levels a user sees first.
+pub const PARTIAL_DEPTH: usize = 4;
+
+/// A compare in progress: what is known of the result so far.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Partial {
+    /// Folders whose entries were listed, with the entries (not compared yet).
+    pub listed: Vec<Listing>,
+    /// Entries compared, with their status.
+    pub done: Vec<Finished>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Listing {
+    pub dir: String,
+    pub entries: Vec<ListedEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListedEntry {
+    pub name: String,
+    pub left: Option<Side>,
+    pub right: Option<Side>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Finished {
+    pub path: String,
+    pub status: Status,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub unexpanded: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+impl Control {
+    /// A control that also collects [`Partial`] results.
+    pub fn with_partial() -> Self {
+        Control { partial: Some(parking_lot::Mutex::new(Partial::default())), ..Default::default() }
+    }
+
+    /// Takes the partial results collected since the last call.
+    pub fn take_partial(&self) -> Option<Partial> {
+        let partial = std::mem::take(&mut *self.partial.as_ref()?.lock());
+        (!partial.listed.is_empty() || !partial.done.is_empty()).then_some(partial)
+    }
+}
+
+fn depth(rel: &str) -> usize {
+    if rel.is_empty() { 0 } else { rel.matches('/').count() + 1 }
 }
 
 #[derive(Default)]
@@ -363,14 +429,25 @@ impl<'a> Engine<'a> {
         };
         let result = match (&l, &r) {
             (Some(l), Some(r)) => self.fill_both(&mut node, rel, l, r, is_root),
-            (Some(l), None) => self.fill_orphan(&mut node, rel, l, true),
-            (None, Some(r)) => self.fill_orphan(&mut node, rel, r, false),
+            (Some(l), None) => self.fill_orphan(&mut node, rel, l, true, is_root),
+            (None, Some(r)) => self.fill_orphan(&mut node, rel, r, false, is_root),
             (None, None) => Ok(()),
         };
         if let Err(e) = result {
             self.counters.errors.fetch_add(1, Ordering::Relaxed);
             node.status = Status::Error;
             node.message = Some(e.to_string());
+        }
+        if let Some(partial) = &self.control.partial
+            && !is_root
+            && depth(rel) <= PARTIAL_DEPTH
+        {
+            partial.lock().done.push(Finished {
+                path: rel.to_string(),
+                status: node.status,
+                unexpanded: node.unexpanded,
+                message: node.message.clone(),
+            });
         }
         node
     }
@@ -384,6 +461,18 @@ impl<'a> Engine<'a> {
             {
                 self.counters.identical_subtrees.fetch_add(1, Ordering::Relaxed);
                 node.unexpanded = true;
+                return Ok(());
+            }
+            if !is_root && self.lazy_archive(rel, l) && self.lazy_archive(rel, r) {
+                // Compared as files; opened when expanded.
+                self.control.files_done.fetch_add(1, Ordering::Relaxed);
+                node.status = self.compare_archive_files(rel, l, r)?;
+                node.unexpanded = true;
+                let counter = if node.status == Status::Same { &self.counters.same } else { &self.counters.different };
+                counter.fetch_add(1, Ordering::Relaxed);
+                if node.status == Status::Different {
+                    node.message = Some("the archives differ; open to compare their contents".into());
+                }
                 return Ok(());
             }
             node.children = self.children(rel, true, true)?;
@@ -408,9 +497,14 @@ impl<'a> Engine<'a> {
         Ok(())
     }
 
-    fn fill_orphan(&self, node: &mut Node, rel: &str, e: &Entry, left: bool) -> Result<()> {
+    fn fill_orphan(&self, node: &mut Node, rel: &str, e: &Entry, left: bool, is_root: bool) -> Result<()> {
         node.status = if left { Status::LeftOnly } else { Status::RightOnly };
-        if e.kind.is_container() {
+        if e.kind.is_container() && !is_root && self.lazy_archive(rel, e) {
+            node.unexpanded = true;
+            self.control.files_done.fetch_add(1, Ordering::Relaxed);
+            let counter = if left { &self.counters.left_only } else { &self.counters.right_only };
+            counter.fetch_add(1, Ordering::Relaxed);
+        } else if e.kind.is_container() {
             node.children = self.children(rel, left, !left)?;
         } else {
             self.control.files_done.fetch_add(1, Ordering::Relaxed);
@@ -449,6 +543,19 @@ impl<'a> Engine<'a> {
             let container = l.as_ref().or(r.as_ref()).is_some_and(|e| e.kind.is_container());
             (!container, name.to_lowercase(), name.clone())
         });
+        if let Some(partial) = &self.control.partial
+            && depth(rel) < PARTIAL_DEPTH
+        {
+            let entries = pairs
+                .iter()
+                .map(|(name, (l, r))| ListedEntry {
+                    name: name.clone(),
+                    left: l.as_ref().map(Side::from),
+                    right: r.as_ref().map(Side::from),
+                })
+                .collect();
+            partial.lock().listed.push(Listing { dir: rel.to_string(), entries });
+        }
         let filtered = !self.includes.is_empty();
         Ok(pairs
             .into_par_iter()
@@ -461,6 +568,32 @@ impl<'a> Engine<'a> {
                 (!(filtered && container && empty && !self.includes.covers(&child))).then_some(node)
             })
             .collect())
+    }
+
+    /// Whether the archive at `rel` is left closed: archives are opened on demand, and
+    /// the include patterns take all of it (else it is searched for matching files).
+    fn lazy_archive(&self, rel: &str, e: &Entry) -> bool {
+        e.kind == EntryKind::Archive && !self.opts.open_archives && self.includes.covers(rel)
+    }
+
+    /// Two archives compared as files: by size, by the CRC32 an outer archive stores
+    /// for them, else byte for byte, stopping at the first difference.
+    fn compare_archive_files(&self, rel: &str, l: &Entry, r: &Entry) -> Result<Status> {
+        if l.size != r.size {
+            return Ok(Status::Different);
+        }
+        if let (Some(a), Some(b)) = (&l.quick_id, &r.quick_id)
+            && let Some(equal) = a.matches(b)
+            && (!equal || self.trusts(a))
+        {
+            return Ok(if equal { Status::Same } else { Status::Different });
+        }
+        let left = self.left.vfs.open(&self.left.path(rel))?;
+        let right = self.right.vfs.open(&self.right.path(rel))?;
+        Ok(match compare_streams(left, right, false).map_err(|e| Error::io(rel, e))? {
+            Streams::Same => Status::Same,
+            _ => Status::Different,
+        })
     }
 
     /// Whether equal ids settle equal content: Git ids always, CRC32 unless verifying.

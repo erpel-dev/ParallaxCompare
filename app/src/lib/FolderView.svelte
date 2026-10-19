@@ -20,12 +20,14 @@
     findNode,
     flatFiles,
     flatten,
+    mergePartial,
     movedPairs,
     pairRows,
     refreshTarget,
     replaceNode,
     type Filter,
     type FlatRow,
+    type Partial,
     type PairStatus,
     type RowSide,
   } from "./tree";
@@ -66,6 +68,9 @@
   let selection = $state(new Set<string>());
   let anchor: string | null = null;
   let running = $state(false);
+  /** The tree shown while the compare runs, built from its partial results; not the result yet. */
+  let provisional = $state(false);
+  let provisionalIndex = new Map<string, Node>();
   let progress = $state(0);
   let error = $state("");
   let busy = $state("");
@@ -138,8 +143,7 @@
           const node = findNode(result.root, p);
           const fresh = await api.expand(session.id, p, $state.snapshot(options));
           if (node) {
-            node.children = fresh.children;
-            node.unexpanded = false;
+            replaceNode(result.root, p, fresh);
             loaded++;
           }
         } catch (e) {
@@ -238,19 +242,41 @@
     }
   }
 
+  /**
+   * Compares again. A refresh (`invalidate`) keeps showing the old result until the
+   * new one is there; otherwise the entries show as the compare finds them.
+   */
   async function run(invalidate = false) {
     running = true;
     error = "";
     progress = 0;
+    if (!invalidate) {
+      // Folders the user opens meanwhile stay open.
+      expanded = new Set();
+      provisionalIndex = new Map();
+      provisional = true;
+      result = {
+        root: { name: "", left: null, right: null, status: "pending", children: [] },
+        summary: { files: 0, same: 0, similar: 0, different: 0, leftOnly: 0, rightOnly: 0, errors: 0, identicalSubtrees: 0, elapsedMs: 0 },
+      };
+      version++;
+    }
     try {
       const r = await api.runCompare(session.id, $state.snapshot(options), invalidate);
       // Open folders with differences, but keep huge trees collapsed.
-      expanded = new Set(differingFolders(r.root, countNodes(r.root) > 20000 ? 0 : 400));
+      const opened = provisional ? [...expanded] : [];
+      expanded = new Set([...differingFolders(r.root, countNodes(r.root) > 20000 ? 0 : 400), ...opened]);
       pairStatus = new Map();
+      provisional = false;
       result = r;
       version++;
     } catch (e) {
       if (String(e) !== "cancelled") error = String(e);
+      if (provisional) {
+        provisional = false;
+        result = null;
+        version++;
+      }
     } finally {
       running = false;
     }
@@ -262,8 +288,13 @@
   onMount(() => {
     run();
     const unlisten = [
-      listen<{ session: number; files: number }>("compare-progress", (e) => {
-        if (e.payload.session === session.id) progress = e.payload.files;
+      listen<{ session: number; files: number; partial?: Partial }>("compare-progress", (e) => {
+        if (e.payload.session !== session.id) return;
+        progress = e.payload.files;
+        if (e.payload.partial && provisional && running && result) {
+          mergePartial(result.root, provisionalIndex, e.payload.partial);
+          version++;
+        }
       }),
       listen<{ session: number; done: number; total: number }>("op-progress", (e) => {
         if (e.payload.session === session.id && op) op = { ...op, done: e.payload.done, total: e.payload.total };
@@ -298,9 +329,8 @@
       if (node?.unexpanded) {
         busy = `Loading ${path}…`;
         try {
-          const fresh = await api.expand(session.id, path, $state.snapshot(options));
-          node.children = fresh.children;
-          node.unexpanded = false;
+          // An archive compared as a file may turn out to have the same entries.
+          replaceNode(result.root, path, await api.expand(session.id, path, $state.snapshot(options)));
         } catch (e) {
           error = String(e);
         } finally {
@@ -754,14 +784,17 @@
 
   const canCopy = $derived.by(() => {
     void version;
+    // Not on the tree shown during a compare: what a folder holds is not known yet.
+    if (provisional) return [false, false];
     return [session.left.writable && present(false).length > 0, session.right.writable && present(true).length > 0];
   });
   const canDelete = $derived.by(() => {
     void version;
+    if (provisional) return [false, false];
     return [session.left.writable && present(true).length > 0, session.right.writable && present(false).length > 0];
   });
 
-  const glyph = { same: "=", similar: "≈", different: "≠", leftOnly: "◀", rightOnly: "▶", error: "!" } as const;
+  const glyph = { same: "=", similar: "≈", different: "≠", leftOnly: "◀", rightOnly: "▶", error: "!", pending: "…" } as const;
 
   function icon(side: Side): string {
     switch (side.kind) {

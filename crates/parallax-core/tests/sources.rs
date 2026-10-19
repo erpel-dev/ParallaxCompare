@@ -587,6 +587,75 @@ fn archive_bytes(kind: &str, files: &[(&str, &str)]) -> Vec<u8> {
     }
 }
 
+/// With `open_archives` off, archives are compared as files and opened on request.
+#[test]
+fn archives_on_demand() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let same = zip_bytes(&[("x.txt", "1")]);
+    let outer = |inner: &[u8], text: &str| {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let mut zip = zip::ZipWriter::new(&mut buf);
+        zip.start_file("lib/inner.jar", zip::write::SimpleFileOptions::default()).unwrap();
+        zip.write_all(inner).unwrap();
+        zip.start_file("readme.txt", zip::write::SimpleFileOptions::default()).unwrap();
+        zip.write_all(text.as_bytes()).unwrap();
+        zip.finish().unwrap();
+        buf.into_inner()
+    };
+    fs::write(a.path().join("same.zip"), &same).unwrap();
+    fs::write(b.path().join("same.zip"), &same).unwrap();
+    fs::write(a.path().join("app.zip"), outer(&zip_bytes(&[("c.class", "old")]), "r")).unwrap();
+    fs::write(b.path().join("app.zip"), outer(&zip_bytes(&[("c.class", "new")]), "r")).unwrap();
+    fs::write(a.path().join("only.zip"), &same).unwrap();
+    let open = |p: &Path| SourceSpec::parse(&p.display().to_string());
+    let (l, r) = open_pair(&open(a.path()), &open(b.path()), SourceOptions::default(), false).unwrap();
+    let opts = CompareOptions { open_archives: false, ..Default::default() };
+    let result = compare::compare(&l, &r, &opts, &Control::default()).unwrap();
+    let node = |name: &str| result.root.children.iter().find(|c| c.name == name).unwrap();
+    assert!(node("same.zip").unexpanded && node("same.zip").status == Status::Same);
+    assert!(node("app.zip").unexpanded && node("app.zip").status == Status::Different);
+    assert!(node("only.zip").unexpanded && node("only.zip").status == Status::LeftOnly);
+    assert_eq!(result.summary.files, 3);
+    // Opened: its entries, with the nested archive closed again.
+    let app = compare::compare_path(&l, &r, "app.zip", &opts, &Control::default()).unwrap().root;
+    assert_eq!(app.status, Status::Different);
+    let lib = app.children.iter().find(|c| c.name == "lib").unwrap();
+    assert!(lib.children[0].unexpanded && lib.children[0].status == Status::Different);
+    let inner = compare::compare_path(&l, &r, "app.zip/lib/inner.jar", &opts, &Control::default()).unwrap().root;
+    assert_eq!(inner.children[0].status, Status::Different);
+    // Patterns that need to look inside open the archives.
+    let txt = CompareOptions { includes: vec!["*.txt".into()], ..opts.clone() };
+    let result = compare::compare(&l, &r, &txt, &Control::default()).unwrap();
+    assert!(!node_of(&result.root, "app.zip").unexpanded);
+}
+
+/// A compare reports the folders it listed and the entries it finished as it goes.
+#[test]
+fn partial_results() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    write(a.path(), &[("d/x.txt", "1"), ("d/e/f/g/deep.txt", "1"), ("top.txt", "a")]);
+    write(b.path(), &[("d/x.txt", "2"), ("d/e/f/g/deep.txt", "1")]);
+    let open = |p: &Path| SourceSpec::parse(&p.display().to_string());
+    let (l, r) = open_pair(&open(a.path()), &open(b.path()), SourceOptions::default(), false).unwrap();
+    let control = Control::with_partial();
+    compare::compare(&l, &r, &CompareOptions::default(), &control).unwrap();
+    let partial = control.take_partial().unwrap();
+    let dirs: Vec<&str> = partial.listed.iter().map(|l| l.dir.as_str()).collect();
+    assert!(dirs.contains(&"") && dirs.contains(&"d/e/f") && !dirs.contains(&"d/e/f/g"), "{dirs:?}");
+    let status = |p: &str| partial.done.iter().find(|f| f.path == p).map(|f| f.status);
+    assert_eq!(status("top.txt"), Some(Status::LeftOnly));
+    assert_eq!(status("d/x.txt"), Some(Status::Different));
+    assert_eq!(status("d/e/f/g"), Some(Status::Same));
+    assert_eq!(status("d/e/f/g/deep.txt"), None);
+    assert!(control.take_partial().is_none());
+}
+
+fn node_of<'a>(root: &'a compare::Node, name: &str) -> &'a compare::Node {
+    root.children.iter().find(|c| c.name == name).unwrap()
+}
+
 /// A tar hard link has the content of the file it names from the archive root.
 #[test]
 fn tar_hard_links() {

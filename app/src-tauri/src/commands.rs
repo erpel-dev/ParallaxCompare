@@ -382,6 +382,9 @@ pub async fn close_session(state: State<'_, AppState>, id: u64) -> CmdResult<()>
 struct CompareProgress {
     session: u64,
     files: u64,
+    /// What is known of the result so far, since the last progress event.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    partial: Option<compare::Partial>,
 }
 
 #[tauri::command]
@@ -401,7 +404,7 @@ pub async fn run_compare(
         // On Linux, which folders are watched depends on the excludes.
         start_watching(app.clone(), id, &session);
     }
-    let control = Arc::new(Control::default());
+    let control = Arc::new(Control::with_partial());
     {
         let mut slot = session.control.lock();
         slot.cancel.store(true, Ordering::Relaxed);
@@ -414,7 +417,8 @@ pub async fn run_compare(
             while !done.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(120));
                 let files = control.files_done.load(Ordering::Relaxed);
-                let _ = app.emit("compare-progress", CompareProgress { session: id, files });
+                let partial = control.take_partial();
+                let _ = app.emit("compare-progress", CompareProgress { session: id, files, partial });
             }
         });
     }
