@@ -373,16 +373,24 @@ type TextReader = fn(&[u8]) -> Result<String>;
 /// Extracts text from .doc/.xls/.ppt: with a native reader where there is one, otherwise
 /// (or when that reader fails and LibreOffice is installed) through LibreOffice.
 pub fn legacy_text(ext: &str, data: &[u8]) -> Result<String> {
-    let native: Option<TextReader> = match ext {
-        "xls" | "xlt" => Some(super::xls::text),
-        "ppt" | "pot" | "pps" => Some(super::ppt::text),
-        _ => None,
-    };
-    match native.map(|read| read(data)) {
+    match native_reader(ext).map(|read| read(data)) {
         Some(Ok(text)) => Ok(text),
         Some(Err(e)) if soffice().is_none() => Err(e),
         _ => libreoffice_text(ext, data),
     }
+}
+
+fn native_reader(ext: &str) -> Option<TextReader> {
+    match ext {
+        "xls" | "xlt" => Some(super::xls::text),
+        "ppt" | "pot" | "pps" => Some(super::ppt::text),
+        _ => None,
+    }
+}
+
+/// Whether .`ext` files are read without LibreOffice.
+pub fn has_native_reader(ext: &str) -> bool {
+    native_reader(ext).is_some()
 }
 
 /// Converts .doc/.xls/.ppt to their OOXML counterpart with LibreOffice, then extracts text.

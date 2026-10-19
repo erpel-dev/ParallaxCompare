@@ -352,7 +352,9 @@ fn kind_of(name: &str, data: &[u8]) -> Kind {
     if email::is_msg(&ext, data) {
         return Kind::Msg;
     }
-    if starts(&[0xD0, 0xCF, 0x11, 0xE0]) && matches!(ext.as_str(), "doc" | "xls" | "ppt" | "dot" | "xlt" | "pot") {
+    if starts(&[0xD0, 0xCF, 0x11, 0xE0])
+        && matches!(ext.as_str(), "doc" | "xls" | "ppt" | "dot" | "xlt" | "pot" | "pps")
+    {
         return Kind::LegacyOffice;
     }
     if starts(&[0xD0, 0xCF, 0x11, 0xE0]) && visio::BINARY_EXTENSIONS.contains(&ext.as_str()) {
@@ -484,7 +486,9 @@ pub fn views_for(name: &str, data: &[u8]) -> Vec<View> {
     let longest_line = || data.split(|&b| b == b'\n').map(<[u8]>::len).max().unwrap_or(0);
     let mut views = match kind_of(name, data) {
         Kind::Pdf | Kind::Ooxml | Kind::Odf => vec![View::Document],
-        Kind::LegacyOffice if office::soffice().is_some() => vec![View::Document],
+        Kind::LegacyOffice if office::has_native_reader(&extension(name)) || office::soffice().is_some() => {
+            vec![View::Document]
+        }
         Kind::Visio => vec![View::Diagram, View::Document],
         Kind::LegacyVisio if office::soffice().is_some() => vec![View::Diagram, View::Document],
         Kind::LegacyOffice | Kind::LegacyVisio | Kind::Binary => vec![],
@@ -721,6 +725,7 @@ pub fn has_content_rule(name: &str) -> bool {
                 .any(|n| f.eq_ignore_ascii_case(n))
         })
         || conan::is_graph_name(name)
+        || office::has_native_reader(&extension(name))
         || visio::XML_EXTENSIONS.contains(&extension(name).as_str())
         || visio::BINARY_EXTENSIONS.contains(&extension(name).as_str())
         || matches!(
@@ -829,6 +834,10 @@ pub fn content_equal(name: &str, left: &[u8], right: &[u8]) -> Option<&'static s
     }
     let equal = match kl {
         Kind::Pdf | Kind::Ooxml | Kind::Odf => {
+            render(View::Document, name, left).ok()? == render(View::Document, name, right).ok()?
+        }
+        // Without a native reader each side would take LibreOffice seconds.
+        Kind::LegacyOffice if office::has_native_reader(&extension(name)) => {
             render(View::Document, name, left).ok()? == render(View::Document, name, right).ok()?
         }
         Kind::Visio | Kind::LegacyVisio => {
@@ -1462,5 +1471,16 @@ mod tests {
         );
         assert_eq!(content_equal("flow.vsdx", &v1, &vsdx("Begin", true)), None);
         assert!(has_content_rule("flow.vsdx") && has_content_rule("old.VSD"));
+    }
+
+    #[test]
+    fn legacy_office_without_libreoffice() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/legacy-office/");
+        for name in ["xls-workbook.xls", "ppt-deck.ppt"] {
+            let data = std::fs::read(format!("{dir}{name}")).unwrap();
+            assert_eq!(views_for(name, &data)[0], View::Document, "{name}");
+            assert!(has_content_rule(name));
+            assert!(content_equal(name, &data, &data).is_some());
+        }
     }
 }
