@@ -133,6 +133,7 @@ fn docx(zip: &mut Zip) -> Result<String> {
                 paragraph_has_text = true;
             }
             Ev::Start("tab", _) => out.push('\t'),
+            Ev::Start("noBreakHyphen", _) => out.push('\u{2011}'),
             Ev::Start("br" | "cr", _) => out.push('\n'),
             Ev::Start("tc", _) => cell_depth += 1,
             Ev::End("tc") => {
@@ -382,6 +383,7 @@ pub fn legacy_text(ext: &str, data: &[u8]) -> Result<String> {
 
 fn native_reader(ext: &str) -> Option<TextReader> {
     match ext {
+        "doc" | "dot" => Some(super::doc::text),
         "xls" | "xlt" => Some(super::xls::text),
         "ppt" | "pot" | "pps" => Some(super::ppt::text),
         _ => None,

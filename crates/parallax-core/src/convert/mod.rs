@@ -15,6 +15,7 @@ mod class;
 mod conan;
 mod data;
 mod dbc;
+mod doc;
 mod dotnet;
 mod dwarf;
 mod ecuc;
@@ -1476,7 +1477,7 @@ mod tests {
     #[test]
     fn legacy_office_without_libreoffice() {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/legacy-office/");
-        for name in ["xls-workbook.xls", "ppt-deck.ppt"] {
+        for name in ["xls-workbook.xls", "ppt-deck.ppt", "doc-report.doc"] {
             let data = std::fs::read(format!("{dir}{name}")).unwrap();
             assert_eq!(views_for(name, &data)[0], View::Document, "{name}");
             assert!(has_content_rule(name));

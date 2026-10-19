@@ -121,3 +121,15 @@ fn views_survive_broken_source() {
         let _ = round;
     }
 }
+
+#[test]
+fn legacy_word_documents_render() {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/legacy-office");
+    for name in ["doc-report.doc", "doc-plain.doc", "doc-mixed.doc"] {
+        let data = std::fs::read(format!("{dir}/{name}")).unwrap();
+        // Read natively, so this does not depend on LibreOffice.
+        let text = convert::render(convert::View::Document, name, &data).unwrap();
+        assert!(text.lines().count() >= 3, "{name}: {text}");
+        let _ = convert::content_equal(name, &data, &data);
+    }
+}
