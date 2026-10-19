@@ -4100,7 +4100,7 @@ dependencies = [
 
 [[package]]
 name = "parallax-cli"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "anyhow",
  "clap",
@@ -4112,7 +4112,7 @@ dependencies = [
 
 [[package]]
 name = "parallax-compare"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "base64 0.22.1",
  "parallax-core",
@@ -4127,7 +4127,7 @@ dependencies = [
 
 [[package]]
 name = "parallax-core"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "aes",
  "anyhow",
