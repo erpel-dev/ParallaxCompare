@@ -133,3 +133,45 @@ fn legacy_word_documents_render() {
         let _ = convert::content_equal(name, &data, &data);
     }
 }
+
+/// Binary Visio drawings with bytes changed inside their VisioDocument stream
+/// (so that the compound file around it stays readable) render or fail, never
+/// panic. Bytes before 0x40 stay: with a broken header the native reader gives
+/// up, and the slow LibreOffice fallback would be tried.
+#[test]
+fn visio_drawings_survive_damage() {
+    use std::io::{Read, Write};
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/visio");
+    let mut random = Random(11);
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|e| e != "vsd") {
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let data = std::fs::read(&path).unwrap();
+        let mut stream = Vec::new();
+        cfb::CompoundFile::open(std::io::Cursor::new(&data))
+            .unwrap()
+            .open_stream("/VisioDocument")
+            .unwrap()
+            .read_to_end(&mut stream)
+            .unwrap();
+        for view in convert::views_for(&name, &data) {
+            let _ = convert::render(view, &name, &data);
+        }
+        for _ in 0..25 {
+            let mut broken = stream.clone();
+            for _ in 0..6 {
+                let at = 0x40 + random.next() % (broken.len() - 0x40);
+                broken[at] = random.next() as u8;
+            }
+            let mut file = cfb::CompoundFile::create(std::io::Cursor::new(Vec::new())).unwrap();
+            file.create_stream("/VisioDocument").unwrap().write_all(&broken).unwrap();
+            file.flush().unwrap();
+            let broken = file.into_inner().into_inner();
+            let _ = convert::render(convert::View::Diagram, &name, &broken);
+            let _ = convert::content_equal(&name, &data, &broken);
+        }
+    }
+}

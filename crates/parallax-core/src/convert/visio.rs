@@ -1,6 +1,7 @@
 //! Microsoft Visio drawings: .vsdx and its siblings (drawing, template, stencil,
-//! with or without macros) are read directly; the binary .vsd/.vss/.vst go through
-//! LibreOffice, which converts them to an OpenDocument drawing.
+//! with or without macros) are read directly, and so are the binary .vsd/.vss/.vst
+//! of Visio 2000–2010 (see `vsd`); older binary files go through LibreOffice,
+//! which converts them to an OpenDocument drawing.
 //!
 //! The **Diagram** view lists every page with its shapes: name, master, text,
 //! position and size, colours set on the shape, shape data, nested shapes of
@@ -24,48 +25,48 @@ pub const XML_EXTENSIONS: [&str; 6] = ["vsdx", "vsdm", "vstx", "vstm", "vssx", "
 pub const BINARY_EXTENSIONS: [&str; 3] = ["vsd", "vss", "vst"];
 
 #[derive(Default)]
-struct Drawing {
-    pages: Vec<Page>,
+pub(super) struct Drawing {
+    pub(super) pages: Vec<Page>,
     /// The masters (from the stencils) with their shapes, shown after the pages.
-    masters: Vec<(String, Vec<Shape>)>,
+    pub(super) masters: Vec<(String, Vec<Shape>)>,
 }
 
 #[derive(Default)]
-struct Page {
-    name: String,
-    background: bool,
+pub(super) struct Page {
+    pub(super) name: String,
+    pub(super) background: bool,
     /// Width and height with their unit.
-    size: Option<(String, String)>,
-    shapes: Vec<Shape>,
+    pub(super) size: Option<(String, String)>,
+    pub(super) shapes: Vec<Shape>,
 }
 
 #[derive(Default)]
-struct Shape {
+pub(super) struct Shape {
     /// The shape's id within its page; empty where the format has none.
-    id: String,
-    kind: String,
-    name: String,
-    master: Option<String>,
-    text: String,
+    pub(super) id: String,
+    pub(super) kind: String,
+    pub(super) name: String,
+    pub(super) master: Option<String>,
+    pub(super) text: String,
     /// Shape cells and attributes worth showing: position, size, angle, colours.
-    cells: BTreeMap<String, String>,
+    pub(super) cells: BTreeMap<String, String>,
     /// Shape data (label, value) and user-defined cells.
-    data: Vec<(String, String)>,
-    image: Option<String>,
+    pub(super) data: Vec<(String, String)>,
+    pub(super) image: Option<String>,
     /// The outline, one entry per geometry section: `MoveTo 0, 0; LineTo 1, 0`.
-    geometry: Vec<String>,
+    pub(super) geometry: Vec<String>,
     /// A checksum of the cells and sections not shown otherwise (text format,
     /// line ends, protection …), so that a change to them is still a difference.
-    other: Option<u32>,
+    pub(super) other: Option<u32>,
     /// The master's id, and for a shape inside a group the master shape it is from.
-    master_id: Option<String>,
-    master_shape: Option<String>,
+    pub(super) master_id: Option<String>,
+    pub(super) master_shape: Option<String>,
     /// The text comes from the master, the shape has none of its own.
-    inherited_text: bool,
+    pub(super) inherited_text: bool,
     /// For connectors: the ids of the shapes at the begin and the end.
-    begin: Option<String>,
-    end: Option<String>,
-    children: Vec<Shape>,
+    pub(super) begin: Option<String>,
+    pub(super) end: Option<String>,
+    pub(super) children: Vec<Shape>,
 }
 
 /// The Diagram view of a .vsdx (or .vsdm, .vstx, .vssx …) file.
@@ -78,13 +79,24 @@ pub fn diagram_text(data: &[u8]) -> Result<String> {
     Ok(render(&read_vsdx(data)?, false))
 }
 
-/// The Diagram view of a binary .vsd (or .vss, .vst) file, through LibreOffice.
+/// The Diagram view of a binary .vsd (or .vss, .vst) file.
 pub fn legacy_diagram(ext: &str, data: &[u8]) -> Result<String> {
-    Ok(render(&Drawing { pages: read_odg(&converted(ext, data)?)?, masters: Vec::new() }, true))
+    Ok(render(&read_legacy(ext, data)?, true))
 }
 
 pub fn legacy_text(ext: &str, data: &[u8]) -> Result<String> {
-    Ok(render(&Drawing { pages: read_odg(&converted(ext, data)?)?, masters: Vec::new() }, false))
+    Ok(render(&read_legacy(ext, data)?, false))
+}
+
+/// Read natively where the version is known, else through LibreOffice if there is one.
+fn read_legacy(ext: &str, data: &[u8]) -> Result<Drawing> {
+    match super::vsd::read(data) {
+        Ok(drawing) => Ok(drawing),
+        Err(_) if super::office::soffice().is_some() => {
+            Ok(Drawing { pages: read_odg(&converted(ext, data)?)?, masters: Vec::new() })
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// The file converted to an OpenDocument drawing. A conversion takes seconds, and
@@ -735,7 +747,7 @@ fn kind_name(kind: &str) -> &str {
 }
 
 /// Numbers to at most four decimals (`2.165354297` → `2.1654`), others as they are.
-fn number(v: &str) -> String {
+pub(super) fn number(v: &str) -> String {
     match v.parse::<f64>() {
         Ok(n) if v.chars().all(|c| c.is_ascii_digit() || "-.eE+".contains(c)) => {
             let s = format!("{:.4}", n);

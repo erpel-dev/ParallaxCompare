@@ -44,6 +44,7 @@ mod safetensors;
 mod sqlite;
 mod table;
 mod visio;
+mod vsd;
 mod wasm;
 mod xls;
 mod xpand;
@@ -491,8 +492,9 @@ pub fn views_for(name: &str, data: &[u8]) -> Vec<View> {
             vec![View::Document]
         }
         Kind::Visio => vec![View::Diagram, View::Document],
-        Kind::LegacyVisio if office::soffice().is_some() => vec![View::Diagram, View::Document],
-        Kind::LegacyOffice | Kind::LegacyVisio | Kind::Binary => vec![],
+        // Visio 2000 to 2010 are read natively; Visio 5 needs LibreOffice.
+        Kind::LegacyVisio => vec![View::Diagram, View::Document],
+        Kind::LegacyOffice | Kind::Binary => vec![],
         Kind::Executable if dwarf::has_debug_info(data) => vec![View::Executable, View::DebugSymbols],
         Kind::Executable => vec![View::Executable],
         Kind::Raster => vec![View::Image, View::ImageMetadata],
@@ -1477,9 +1479,10 @@ mod tests {
     #[test]
     fn legacy_office_without_libreoffice() {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/legacy-office/");
-        for name in ["xls-workbook.xls", "ppt-deck.ppt", "doc-report.doc"] {
+        for name in ["xls-workbook.xls", "ppt-deck.ppt", "doc-report.doc", "../visio/dwg.vsd"] {
             let data = std::fs::read(format!("{dir}{name}")).unwrap();
-            assert_eq!(views_for(name, &data)[0], View::Document, "{name}");
+            let first = if name.ends_with(".vsd") { View::Diagram } else { View::Document };
+            assert_eq!(views_for(name, &data)[0], first, "{name}");
             assert!(has_content_rule(name));
             assert!(content_equal(name, &data, &data).is_some());
         }
