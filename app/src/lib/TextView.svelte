@@ -91,14 +91,26 @@
   /** The line being typed in: its row, and its line number (null in a filler row). */
   let editing = $state<{ side: 0 | 1; row: number; line: number | null } | null>(null);
   let draft = $state("");
-  let original = "";
+  let original = $state("");
   let input = $state<HTMLInputElement>();
+  /** The editor opened last has its input focused, with the caret set. */
+  let inputReady = false;
   /** After an edit, the caret waits for its row to be loaded. */
   let caretWanted: { side: 0 | 1; line: number; col: number; hint: number } | null = null;
   /** File changed on disk while it has unsaved edits. */
   let changedOnDisk = $state(false);
   // Edits run one after another, in the order they were made.
   let queue: Promise<unknown> = Promise.resolve();
+  /** Edits sent and not answered yet. */
+  let unanswered = $state(0);
+  /** An edit that moves the caret is on its way; the editor waits for where it goes. */
+  let awaiting = $state(false);
+  /** Keys and pastes held back while the editor waits, typed once it is back (see `replay`). */
+  let ahead = $state.raw<Ahead[]>([]);
+  type Ahead = { key: string; shift: boolean; ctrl: boolean; meta: boolean } | { paste: string };
+  /** Counts the loads, so that an answer overtaken by a newer load is closed unseen. */
+  let loads = 0;
+  let destroyed = false;
 
   // Find.
   let root = $state<HTMLDivElement>();
@@ -158,7 +170,10 @@
     const a = anchor ?? selected;
     return [Math.min(a, selected), Math.max(a, selected) + 1];
   });
-  const anyDirty = $derived(dirty[0] || dirty[1]);
+  /** Unsaved work: changed sides, but also the line being typed, edits on their way and held-back keys. */
+  const anyDirty = $derived(
+    dirty[0] || dirty[1] || (editing !== null && draft !== original) || unanswered > 0 || ahead.length > 0,
+  );
   /** Section index by its first row, for the copy arrows. */
   /**
    * The overview's marks: sections merged per thousandth of the file, so a file
@@ -219,17 +234,26 @@
   $effect(() => onDirty?.(anyDirty));
 
   async function load(keepPosition = false) {
+    const run = ++loads;
     loading = true;
     error = "";
     changedOnDisk = false;
-    const previous = info?.id;
     const top = viewport?.scrollTop ?? 0;
     try {
-      info = await api.openFileDiff(session.id, path, $state.snapshot(options), syntaxOverride || null, view);
+      const opened = await api.openFileDiff(session.id, path, $state.snapshot(options), syntaxOverride || null, view);
+      // The tab was closed or loaded again meanwhile: nothing shows this diff.
+      if (destroyed || run !== loads) {
+        api.closeFileDiff(opened.id);
+        return;
+      }
+      const previous = info?.id;
+      info = opened;
       view = info.view;
       dirty = [false, false];
       canUndo = canRedo = false;
       editing = null;
+      caretWanted = null;
+      ahead = [];
       anchor = null;
       resetRows();
       section = -1;
@@ -240,9 +264,9 @@
       else ensureLoaded();
       if (findOpen && findQuery) runSearch(keepPosition);
     } catch (e) {
-      error = String(e);
+      if (run === loads && !destroyed) error = String(e);
     } finally {
-      loading = false;
+      if (run === loads) loading = false;
     }
   }
 
@@ -299,7 +323,13 @@
     const from = Math.floor(first / CHUNK);
     const to = Math.floor(Math.max(first, last - 1) / CHUNK);
     const list: number[] = [];
-    if (caretWanted) list.push(Math.floor(caretWanted.hint / CHUNK));
+    if (caretWanted) {
+      // The caret's chunk and those around it, where `placeCaret` looks for its line.
+      const c = Math.floor(caretWanted.hint / CHUNK);
+      list.push(c);
+      if ((c + 1) * CHUNK < total) list.push(c + 1);
+      if (c > 0) list.push(c - 1);
+    }
     for (let c = from; c <= to; c++) list.push(c);
     // So that scrolling on finds its rows loaded already.
     if ((to + 1) * CHUNK < total) list.push(to + 1);
@@ -391,13 +421,53 @@
 
   // ---- Editing ----
 
-  function enqueue<T>(task: () => Promise<T>): Promise<T | undefined> {
-    const run = queue.then(task).catch((e) => {
-      error = String(e);
-      return undefined;
-    });
+  /** Queues an edit; `changes` is false for one that leaves the text as it is. */
+  function enqueue(task: () => Promise<EditInfo>, changes = true): Promise<EditInfo | undefined> {
+    const id = info?.id;
+    if (changes) unanswered++;
+    const run = queue
+      .then(task)
+      .then(
+        (e) => {
+          // At once, not after the rows are fetched: saving and closing the tab look at it.
+          if (info?.id === id) dirty = e.dirty;
+          return e;
+        },
+        (e) => {
+          error = String(e);
+          return undefined;
+        },
+      )
+      .finally(() => {
+        if (changes) unanswered--;
+      });
     queue = run;
     return run;
+  }
+
+  /**
+   * Sends an edit after which typing goes on where it puts the caret (Enter, a
+   * pasted block, joining lines). Until the editor is there, keys are held back
+   * rather than typed into the line edited before.
+   */
+  function caretEdit(task: () => Promise<EditInfo>, then?: (e: EditInfo | undefined) => void) {
+    awaiting = true;
+    enqueue(task)
+      .then(async (e) => {
+        await applyEdit(e);
+        then?.(e);
+      })
+      .finally(() => {
+        awaiting = false;
+        tick().then(replay);
+      });
+  }
+
+  /** Closes the line editor until `caretWanted` opens it again; the view keeps the keys meanwhile. */
+  function detachEditor() {
+    const focused = !!input && document.activeElement === input;
+    editing = null;
+    if (focused) keepFocus();
   }
 
   /** Edits whose rows are still being fetched; only the latest is shown. */
@@ -444,7 +514,7 @@
     }
     if (e.caret && editing) {
       caretWanted = { side: editing.side, line: e.caret.line, col: e.caret.col, hint: e.caret.row };
-      editing = null;
+      detachEditor();
       reveal(e.caret.row);
     }
     if (fetched) {
@@ -473,9 +543,19 @@
         if (line?.n === want.line) {
           caretWanted = null;
           openEditor(want.side, i, want.col);
+          // Also when the editor could not open: the held keys then go to the view.
+          tick().then(replay);
           return;
         }
       }
+    }
+    // Not near where it was expected, with the rows around loaded: the editor stays
+    // closed, rather than holding back the keys for good.
+    const c = Math.floor(want.hint / CHUNK);
+    const near = [c - 1, c, c + 1].filter((k) => k >= 0 && k * CHUNK < total);
+    if (near.every((k) => loaded.has(k))) {
+      caretWanted = null;
+      tick().then(replay);
     }
   }
 
@@ -501,9 +581,12 @@
       draft = draft.slice(0, at) + insert + draft.slice(at);
       at += insert.length;
     }
+    inputReady = false;
     tick().then(() => {
       input?.focus();
       input?.setSelectionRange(at, at);
+      inputReady = true;
+      replay();
     });
   }
 
@@ -526,6 +609,8 @@
     if (!editable[side] || e.shiftKey || e.ctrlKey || e.metaKey || textSelected()) return;
     // The row's own click would take the focus back to the view.
     e.stopPropagation();
+    // An edit is on its way and moves rows: the click would land on the wrong line.
+    if (waiting()) return;
     anchor = null;
     const col = columnAt(e, e.currentTarget as HTMLElement);
     const line = lineOf(side, cache.get(index));
@@ -549,21 +634,19 @@
     if (!ed || !info) return;
     const id = info.id;
     const side = SIDE_NAMES[ed.side];
-    if (caret === null) editing = null;
+    if (caret === null) detachEditor();
     if (text === original && caret === null) return;
-    enqueue(() =>
+    const task = () =>
       ed.line === null
         ? api.insertLine(id, side, ed.row, text)
-        : api.editText(id, side, { line: ed.line, col: 0 }, { line: ed.line, col: END }, text, caret),
-    ).then(async (e) => {
-      await applyEdit(e);
-      then?.(e);
-    });
+        : api.editText(id, side, { line: ed.line, col: 0 }, { line: ed.line, col: END }, text, caret);
+    if (caret === null && !then) enqueue(task).then(applyEdit);
+    else caretEdit(task, then);
   }
 
   function editKey(e: KeyboardEvent) {
     const ed = editing;
-    if (!ed || !info || !input) return;
+    if (!ed || !info || !input || holdKey(e)) return;
     const [a, b] = [input.selectionStart ?? 0, input.selectionEnd ?? 0];
     const id = info.id;
     const side = SIDE_NAMES[ed.side];
@@ -584,24 +667,15 @@
     } else if (e.key === "Backspace" && a === 0 && b === 0 && ed.line !== null && ed.line > 0) {
       // Joins the line to the one above.
       const line = ed.line;
-      editing = null;
-      enqueue(() => api.editText(id, side, { line: line - 1, col: END }, { line, col: END }, draft, 0)).then((r) => {
-        if (r?.caret) editing = { side: ed.side, row: r.caret.row, line: r.caret.line };
-        applyEdit(r);
-      });
+      caretEdit(() => api.editText(id, side, { line: line - 1, col: END }, { line, col: END }, draft, 0));
     } else if (e.key === "Delete" && a === draft.length && b === a && ed.line !== null) {
       // Joins the line below to this one.
       const line = ed.line;
       const sideLines = ed.side === 0 ? info.left.lines : info.right.lines;
       if (line + 1 >= sideLines) return;
-      editing = null;
-      enqueue(() => api.editText(id, side, { line, col: 0 }, { line: line + 1, col: 0 }, draft, a)).then((r) => {
-        if (r?.caret) editing = { side: ed.side, row: r.caret.row, line: r.caret.line };
-        applyEdit(r);
-      });
+      caretEdit(() => api.editText(id, side, { line, col: 0 }, { line: line + 1, col: 0 }, draft, a));
     } else if (e.key === "Tab" && !mod) {
-      draft = draft.slice(0, a) + "\t" + draft.slice(b);
-      tick().then(() => input?.setSelectionRange(a + 1, a + 1));
+      typeText("\t");
     } else if (mod && e.key === "s") {
       commit(draft, null);
       save();
@@ -624,7 +698,7 @@
     if (target === null || target < 0 || target >= sideLines) return false;
     const move = (hint: number) => {
       caretWanted = { side: ed.side, line: target, col, hint: hint + dir };
-      editing = null;
+      detachEditor();
       placeCaret();
     };
     if (draft === original) move(ed.row);
@@ -633,12 +707,107 @@
   }
 
   function onPaste(e: ClipboardEvent) {
+    if (holdPaste(e)) return;
     const text = e.clipboardData?.getData("text/plain") ?? "";
     if (!input || !/[\r\n]/.test(text)) return;
-    // Several lines: they replace the selection and become lines of the file.
     e.preventDefault();
+    pasteText(text);
+  }
+
+  /** Pastes into the line editor; several lines replace the selection and become lines of the file. */
+  function pasteText(text: string) {
+    if (!input) return;
+    if (!/[\r\n]/.test(text)) return typeText(text);
     const [a, b] = [input.selectionStart ?? 0, input.selectionEnd ?? 0];
     commit(draft.slice(0, a) + text + draft.slice(b), a + text.length);
+  }
+
+  // ---- Typing ahead ----
+  // An edit that moves the caret takes a moment, and so does loading the row the
+  // caret goes to. Keys typed meanwhile are held back and typed, in order, into
+  // the editor where the edit puts it: else they would go to the line edited
+  // before, and be lost when the editor moves.
+
+  const waiting = () => awaiting || caretWanted !== null;
+  /** Keys held back besides the characters: those that edit, move the caret or leave the line. */
+  const AHEAD_KEYS = new Set(["Enter", "Escape", "Tab", "Backspace", "Delete", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "F2"]);
+  /** With Ctrl: save, undo, redo, select all. Others (copy, close the tab) work as usual. */
+  const AHEAD_MOD_KEYS = new Set(["s", "z", "Z", "y", "a"]);
+
+  /** Holds a key back while the editor waits; true when it did. */
+  function holdKey(e: KeyboardEvent): boolean {
+    if (!waiting() || e.altKey) return false;
+    const held = e.ctrlKey || e.metaKey ? AHEAD_MOD_KEYS.has(e.key) : e.key.length === 1 || AHEAD_KEYS.has(e.key);
+    if (!held) return false;
+    ahead = [...ahead, { key: e.key, shift: e.shiftKey, ctrl: e.ctrlKey, meta: e.metaKey }];
+    e.preventDefault();
+    e.stopPropagation();
+    return true;
+  }
+
+  function holdPaste(e: ClipboardEvent): boolean {
+    if (!waiting()) return false;
+    const text = e.clipboardData?.getData("text/plain") ?? "";
+    if (text) ahead = [...ahead, { paste: text }];
+    e.preventDefault();
+    e.stopPropagation();
+    return true;
+  }
+
+  /** Types the held keys once the editor is back; stops when one of them makes it wait again. */
+  function replay() {
+    while (ahead.length && !waiting() && !(editing && !inputReady)) {
+      const [next, ...rest] = ahead;
+      ahead = rest;
+      if ("paste" in next) {
+        if (editing) pasteText(next.paste);
+        else if (selected !== null && editable[activeSide]) replaceLines(next.paste, anchor !== null);
+        continue;
+      }
+      const e = new KeyboardEvent("keydown", { key: next.key, shiftKey: next.shift, ctrlKey: next.ctrl, metaKey: next.meta, cancelable: true });
+      if (!editing) onKey(e);
+      else {
+        editKey(e);
+        // What the input itself does with a key the editor leaves to it.
+        if (!e.defaultPrevented) typeKey(e);
+      }
+    }
+  }
+
+  /** Sets the editor's text and selection at once, not waiting for the binding. */
+  function setDraft(text: string, from: number, to = from, dir: "forward" | "backward" = "forward") {
+    draft = text;
+    if (!input) return;
+    input.value = text;
+    input.setSelectionRange(from, to, dir);
+  }
+
+  /** Types `text` over the editor's selection. */
+  function typeText(text: string) {
+    if (!input) return;
+    const [a, b] = [input.selectionStart ?? 0, input.selectionEnd ?? 0];
+    setDraft(draft.slice(0, a) + text + draft.slice(b), a + text.length);
+  }
+
+  /** A held key, as the input would have handled it: characters, deleting, moving the caret. */
+  function typeKey(e: KeyboardEvent) {
+    if (!input) return;
+    const mod = e.ctrlKey || e.metaKey;
+    const [a, b] = [input.selectionStart ?? 0, input.selectionEnd ?? 0];
+    const back = input.selectionDirection === "backward";
+    const [fixed, moving] = back ? [b, a] : [a, b];
+    // Shift extends the selection from its fixed end.
+    const moveTo = (to: number) =>
+      e.shiftKey ? setDraft(draft, Math.min(fixed, to), Math.max(fixed, to), to < fixed ? "backward" : "forward") : setDraft(draft, to);
+    if (e.key.length === 1 && !mod) typeText(e.key);
+    else if (mod && e.key === "a") setDraft(draft, 0, draft.length);
+    else if ((e.key === "Backspace" || e.key === "Delete") && a !== b) typeText("");
+    else if (e.key === "Backspace" && a > 0) setDraft(draft.slice(0, a - 1) + draft.slice(a), a - 1);
+    else if (e.key === "Delete") setDraft(draft.slice(0, a) + draft.slice(a + 1), a);
+    else if (e.key === "ArrowLeft") moveTo(e.shiftKey ? Math.max(0, moving - 1) : a !== b ? a : Math.max(0, a - 1));
+    else if (e.key === "ArrowRight") moveTo(e.shiftKey ? Math.min(draft.length, moving + 1) : a !== b ? b : Math.min(draft.length, b + 1));
+    else if (e.key === "Home") moveTo(0);
+    else if (e.key === "End") moveTo(draft.length);
   }
 
   function copySection(i: number, to: 0 | 1) {
@@ -684,6 +853,7 @@
 
   /** Ctrl+V outside the line editor: lines go above the current one, or replace the selected ones. */
   function onViewPaste(e: ClipboardEvent) {
+    if (holdPaste(e)) return;
     if (editing || selected === null || !editable[activeSide]) return;
     const text = e.clipboardData?.getData("text/plain") ?? "";
     if (!text) return;
@@ -730,7 +900,8 @@
   async function save(sides: (0 | 1)[] = [0, 1]) {
     if (!info) return;
     const id = info.id;
-    // Typed edits land first, so they are saved too.
+    // The line being typed is an edit too; typed edits land first, so they are saved too.
+    if (editing && draft !== original && !awaiting) commit(draft, null);
     await queue;
     for (const side of sides) {
       if (!dirty[side]) continue;
@@ -835,7 +1006,7 @@
       return;
     }
     const id = info.id;
-    enqueue(() => api.updateDiff(id, $state.snapshot(options), syntaxOverride || null)).then(applyEdit);
+    enqueue(() => api.updateDiff(id, $state.snapshot(options), syntaxOverride || null), false).then(applyEdit);
   }
 
   async function reloadFromDisk() {
@@ -1000,7 +1171,7 @@
 
   function onKey(e: KeyboardEvent) {
     // Keys typed into the line editor.
-    if (e.target instanceof HTMLInputElement) return;
+    if (e.target instanceof HTMLInputElement || holdKey(e)) return;
     const mod = e.ctrlKey || e.metaKey;
     // Typing on a selected line of an editable side edits it, from its end.
     if (e.key.length === 1 && !mod && !e.altKey && selected !== null && editable[activeSide]) {
@@ -1139,6 +1310,8 @@
   });
 
   onDestroy(() => {
+    // A load still on its way closes its diff when it arrives.
+    destroyed = true;
     if (info) api.closeFileDiff(info.id);
   });
 </script>
@@ -1327,7 +1500,8 @@
                       bind:value={draft}
                       onkeydown={editKey}
                       onpaste={onPaste}
-                      onblur={() => editing?.row === index && editing.side === s && commit(draft, null)}
+                      readonly={awaiting}
+                      onblur={() => !awaiting && editing?.row === index && editing.side === s && commit(draft, null)}
                       spellcheck="false"
                     />
                   </div>
