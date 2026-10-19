@@ -32,7 +32,8 @@ fn u32_at(b: &[u8], at: usize) -> Option<u32> {
 }
 
 fn stream(file: &mut cfb::CompoundFile<Cursor<&[u8]>>, path: &str) -> Result<Vec<u8>> {
-    let mut s = file.open_stream(path).map_err(|_| Error::Unsupported(format!("the .doc file has no {path} stream")))?;
+    let mut s =
+        file.open_stream(path).map_err(|_| Error::Unsupported(format!("the .doc file has no {path} stream")))?;
     if s.len() > MAX_STREAM {
         return Err(Error::Unsupported("the .doc file is too large".into()));
     }
@@ -198,7 +199,8 @@ impl Paragraphs {
 /// Parses a PapxInFkp at `offset` of an FKP page.
 fn papx(page: &[u8], offset: usize) -> Option<Para> {
     let cb = usize::from(*page.get(offset)?);
-    let (start, len) = if cb == 0 { (offset + 2, usize::from(*page.get(offset + 1)?) * 2) } else { (offset + 1, cb * 2 - 1) };
+    let (start, len) =
+        if cb == 0 { (offset + 2, usize::from(*page.get(offset + 1)?) * 2) } else { (offset + 1, cb * 2 - 1) };
     // The style index comes before the properties.
     let grpprl = page.get(start + 2..start + len)?;
     let mut para = Para::default();
@@ -332,8 +334,8 @@ fn end_cell(out: &mut String, has_text: bool) {
 }
 
 fn read(data: &[u8]) -> Result<String> {
-    let mut file =
-        cfb::CompoundFile::open(Cursor::new(data)).map_err(|e| Error::Unsupported(format!("not a readable .doc file: {e}")))?;
+    let mut file = cfb::CompoundFile::open(Cursor::new(data))
+        .map_err(|e| Error::Unsupported(format!("not a readable .doc file: {e}")))?;
     let word = stream(&mut file, "/WordDocument")?;
     let fib = Fib::parse(&word)?;
     let table = stream(&mut file, if fib.table1 { "/1Table" } else { "/0Table" })?;
@@ -419,9 +421,217 @@ mod tests {
         };
     }
 
+    const REPORT: &str = "Überblick
+Der Umsatz stieg um 12 € auf 1.234 €. Grüße aus Köln.
+日本語のテキストと中文。
+First line
+second line after a break.
+Visit the example site for details.
+Reviewed text here.
+Region  │ Q1  │ Q2  │\x20
+Nord  │ 100  │ 120  │\x20
+Süd und West  │  │ 90  │\x20
+Silbentrennung und Bindestrich\u{2011}fest.
+Before the box.
+Closing paragraph on a new page.
+
+=== Header 1 ===
+Quarterly report – Müller & Söhne
+
+=== Footer 1 ===
+Page 2
+
+=== Footnotes ===
+
+
+\tAlle Beträge in Euro.
+\tSecond footnote.
+
+=== Endnotes ===
+
+
+\tAn endnote.
+
+=== Comments ===
+Please check this number.
+
+=== Text boxes ===
+Boxed text
+";
+
     #[test]
-    fn dump() {
-        println!("{}", text(fixture!("doc-report.doc")).unwrap());
-        println!("----\n{}", super::super::office::ooxml_text("docx", fixture!("doc-report.docx")).unwrap());
+    fn report() {
+        assert_eq!(text(fixture!("doc-report.doc")).unwrap(), REPORT);
+    }
+
+    #[test]
+    fn compressed_and_utf16_pieces() {
+        let expected = "Plain 8-bit text: café\nA second paragraph with a tab:\there.\nGröße – Ende 3€\n";
+        assert_eq!(text(fixture!("doc-mixed.doc")).unwrap(), expected);
+        assert_eq!(
+            text(fixture!("doc-plain.doc")).unwrap(),
+            "Plain ASCII text only.\nA second paragraph with a tab:\there.\nThird and last.\n"
+        );
+    }
+
+    /// The same documents converted to .docx by LibreOffice read the same, except
+    /// for text boxes: the .docx reader shows them where they are anchored, twice
+    /// (the drawing and its VML fallback), after the page break LibreOffice moves
+    /// there; the .doc keeps them apart from the text, so they come last.
+    #[test]
+    fn same_as_docx() {
+        let docx = |data: &[u8]| super::super::office::ooxml_text("docx", data).unwrap();
+        let native = text(fixture!("doc-report.doc")).unwrap();
+        let (native, boxes) = native.split_once("\n=== Text boxes ===\n").unwrap();
+        assert_eq!(boxes, "Boxed text\n");
+        let converted = docx(fixture!("doc-report.docx"));
+        assert_eq!(native, converted.replacen("\nBoxed text\nBoxed text\n", "", 1));
+        for (doc, docx_data) in [
+            (&fixture!("doc-plain.doc")[..], &fixture!("doc-plain.docx")[..]),
+            (fixture!("doc-mixed.doc"), fixture!("doc-mixed.docx")),
+        ] {
+            assert_eq!(text(doc).unwrap(), docx(docx_data));
+        }
+    }
+
+    #[test]
+    fn damaged_input() {
+        for data in [&fixture!("doc-report.doc")[..], fixture!("doc-mixed.doc")] {
+            for n in (0..data.len()).step_by(509).chain([1, 511, 513, data.len() - 1]) {
+                let _ = text(&data[..n]);
+            }
+            for step in [97, 13, 5] {
+                let mut garbage = data.to_vec();
+                for i in (512..garbage.len()).step_by(step) {
+                    garbage[i] ^= 0x5A;
+                }
+                let _ = text(&garbage);
+            }
+        }
+        assert!(text(b"").is_err());
+        assert!(text(&fixture!("doc-report.doc")[..4096]).is_err());
+    }
+
+    /// Rewrites a header field of the WordDocument stream (always the first
+    /// 512-byte sector after the header and FAT in these small V3 files).
+    fn patched(at: usize, value: u16) -> Vec<u8> {
+        let mut data = fixture!("doc-plain.doc").to_vec();
+        let word = data.windows(2).position(|w| w == [0xEC, 0xA5]).unwrap();
+        data[word + at..word + at + 2].copy_from_slice(&value.to_le_bytes());
+        data
+    }
+
+    #[test]
+    fn unsupported_variants() {
+        let message = |data: &[u8]| match text(data) {
+            Err(Error::Unsupported(m)) => m,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(message(&patched(2, 0x0068)), "Word 6/95 documents are not read natively");
+        assert_eq!(message(&patched(0x0A, 0x13F0)), "the .doc file is encrypted");
+        assert_eq!(message(&patched(0, 0x1234)), "not a Word document");
+        assert!(message(fixture!("../email/order.msg")).contains("WordDocument"));
+    }
+
+    /// LibreOffice writes all text as UTF-16. Word stores runs of Windows-1252
+    /// text compressed (8 bits per character), so `doc-mixed.doc` is `doc-plain.doc`
+    /// rewritten with a compressed piece followed by a UTF-16 one; the
+    /// formatting tables are moved along. Run with
+    /// `cargo test -p parallax-core regenerate_mixed -- --ignored`, then convert
+    /// the result to `doc-mixed.docx` with LibreOffice (see doc-regenerate.sh).
+    #[test]
+    #[ignore]
+    fn regenerate_mixed_fixture() {
+        use std::io::Write;
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/legacy-office/");
+        let source = std::fs::read(format!("{dir}doc-plain.doc")).unwrap();
+        let mut file = cfb::CompoundFile::open(Cursor::new(&source[..])).unwrap();
+        let mut word = stream(&mut file, "/WordDocument").unwrap();
+        let mut table = stream(&mut file, "/1Table").unwrap();
+        let fib = Fib::parse(&word).unwrap();
+        let (units, pieces) = characters(&word, fib.part(&table, CLX)).unwrap();
+        assert_eq!((pieces.len(), pieces[0].fc), (1, 0x800));
+        let mut text = String::from_utf16(&units).unwrap();
+        // Same lengths, so that every character position stays valid.
+        text = text.replacen("Plain ASCII text only.", "Plain 8-bit text: café", 1);
+        text = text.replacen("Third and last.", "Größe – Ende 3€", 1);
+        let split = text.find("Größe").unwrap();
+        let (first, second) = text.split_at(split);
+        let a = first.chars().count();
+        assert_eq!(a % 2, 0);
+        let (compressed, _, _) = encoding_rs::WINDOWS_1252.encode(first);
+        assert_eq!(compressed.len(), a);
+        let base = 0x800usize;
+        let utf16: Vec<u8> = second.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        word[base..base + a].copy_from_slice(&compressed);
+        word[base + a..base + a + utf16.len()].copy_from_slice(&utf16);
+        let old_end = base + units.len() * 2;
+        word[base + a + utf16.len()..old_end].fill(0);
+        let remap = |fc: u32| -> u32 {
+            let fc = fc as usize;
+            (if fc <= base {
+                fc
+            } else if fc <= base + 2 * a {
+                base + (fc - base) / 2
+            } else {
+                fc - a
+            }) as u32
+        };
+        let put = |b: &mut [u8], at: usize, v: u32| b[at..at + 4].copy_from_slice(&v.to_le_bytes());
+        let shift = |b: &mut [u8], at: usize| {
+            let v = remap(u32_at(b, at).unwrap());
+            put(b, at, v);
+        };
+        // fcMac, then the bin tables of character and paragraph runs and their pages.
+        shift(&mut word, 0x1C);
+        for i in [12, 13] {
+            let (fc, lcb) = fib.fc_lcb[i];
+            let n = (lcb - 4) / 8;
+            for k in 0..=n {
+                shift(&mut table, fc + k * 4);
+            }
+            for k in 0..n {
+                let page = (u32_at(&table, fc + (n + 1) * 4 + k * 4).unwrap() & 0x3F_FFFF) as usize * 512;
+                let crun = usize::from(word[page + 511]);
+                for r in 0..=crun {
+                    shift(&mut word, page + r * 4);
+                }
+            }
+        }
+        // A new piece table at the end of the table stream.
+        let (clx_fc, clx_lcb) = fib.fc_lcb[CLX];
+        let old = &table[clx_fc..clx_fc + clx_lcb];
+        let (pcd_flags, prm) = (&old[5 + 8..5 + 10].to_vec(), &old[5 + 14..5 + 16].to_vec());
+        let mut clx = vec![0x02];
+        clx.extend(28u32.to_le_bytes());
+        for cp in [0, a, units.len()] {
+            clx.extend((cp as u32).to_le_bytes());
+        }
+        for fc in [(base as u32 * 2) | 0x4000_0000, (base + a) as u32] {
+            clx.extend(pcd_flags);
+            clx.extend(fc.to_le_bytes());
+            clx.extend(prm);
+        }
+        let new_fc = table.len();
+        table.extend(&clx);
+        let fc_at = 34 + 14 * 2 + 2 + 22 * 4 + 2 + CLX * 8;
+        assert_eq!(u32_at(&word, fc_at).unwrap() as usize, clx_fc);
+        put(&mut word, fc_at, new_fc as u32);
+        put(&mut word, fc_at + 4, clx.len() as u32);
+
+        let path = format!("{dir}doc-mixed.doc");
+        let mut out =
+            cfb::CompoundFile::create_with_version(cfb::Version::V3, std::fs::File::create(path).unwrap()).unwrap();
+        out.set_storage_clsid("/", *file.root_entry().clsid()).unwrap();
+        let names: Vec<String> = file.read_root_storage().map(|e| e.name().to_string()).collect();
+        for name in names {
+            let data = match name.as_str() {
+                "WordDocument" => word.clone(),
+                "1Table" => table.clone(),
+                _ => stream(&mut file, &format!("/{name}")).unwrap(),
+            };
+            out.create_stream(format!("/{name}")).unwrap().write_all(&data).unwrap();
+        }
+        out.flush().unwrap();
     }
 }
