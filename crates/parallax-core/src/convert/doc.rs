@@ -125,7 +125,7 @@ fn characters(word: &[u8], clx: &[u8]) -> Result<(Vec<u16>, Vec<Piece>)> {
     }
     let lcb = u32_at(clx, at + 1).ok_or_else(damaged)? as usize;
     let plc = clx.get(at + 5..(at + 5).saturating_add(lcb)).ok_or_else(damaged)?;
-    if lcb < 4 || (lcb - 4) % 12 != 0 {
+    if lcb < 4 || !(lcb - 4).is_multiple_of(12) {
         return Err(damaged());
     }
     let n = (lcb - 4) / 12;
@@ -141,12 +141,12 @@ fn characters(word: &[u8], clx: &[u8]) -> Result<(Vec<u16>, Vec<Piece>)> {
         let fc = (raw & 0x3FFF_FFFF) as usize;
         if compressed {
             let fc = fc / 2;
-            let bytes = word.get(fc..fc + len).ok_or_else(damaged)?;
+            let bytes = word.get(fc..fc.saturating_add(len)).ok_or_else(damaged)?;
             let (text, _) = encoding_rs::WINDOWS_1252.decode_without_bom_handling(bytes);
             units.extend(text.encode_utf16());
             pieces.push(Piece { cp: start as usize, fc, compressed });
         } else {
-            let bytes = word.get(fc..fc + len * 2).ok_or_else(damaged)?;
+            let bytes = word.get(fc..fc.saturating_add(len.saturating_mul(2))).ok_or_else(damaged)?;
             units.extend(bytes.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)));
             pieces.push(Piece { cp: start as usize, fc, compressed });
         }
@@ -339,8 +339,13 @@ fn read(data: &[u8]) -> Result<String> {
     let word = stream(&mut file, "/WordDocument")?;
     let fib = Fib::parse(&word)?;
     let table = stream(&mut file, if fib.table1 { "/1Table" } else { "/0Table" })?;
-    let (units, pieces) = characters(&word, fib.part(&table, CLX))?;
-    let paragraphs = Paragraphs::read(&word, fib.part(&table, PLCF_BTE_PAPX));
+    document(&word, &fib, &table)
+}
+
+/// Renders a document from its WordDocument and table streams.
+fn document(word: &[u8], fib: &Fib, table: &[u8]) -> Result<String> {
+    let (units, pieces) = characters(word, fib.part(table, CLX))?;
+    let paragraphs = Paragraphs::read(word, fib.part(table, PLCF_BTE_PAPX));
     let doc = Doc { units, pieces, paragraphs };
     // Story ranges in stream order.
     let mut ranges = Vec::with_capacity(8);
@@ -356,7 +361,7 @@ fn read(data: &[u8]) -> Result<String> {
     // Headers and footers: six separator stories, then six stories per section
     // (even/odd header, even/odd footer, first-page header and footer), then a guard.
     let (mut headers, mut footers) = (Vec::new(), Vec::new());
-    let hdd = fib.part(&table, PLCF_HDD);
+    let hdd = fib.part(table, PLCF_HDD);
     let cps: Vec<usize> = hdd.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c) as usize).collect();
     let base = ranges[2].start;
     for i in 6..cps.len().saturating_sub(2) {
@@ -508,6 +513,36 @@ Boxed text
                 let _ = text(&garbage);
             }
         }
+        // Below the compound file, without the panic guard: every field of the
+        // streams may be wrong.
+        let mut file = cfb::CompoundFile::open(Cursor::new(&fixture!("doc-report.doc")[..])).unwrap();
+        let (word, table) = (stream(&mut file, "/WordDocument").unwrap(), stream(&mut file, "/1Table").unwrap());
+        let mut seed = 7u64;
+        let mut random = |n: usize| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as usize % n
+        };
+        for _ in 0..3000 {
+            let (mut w, mut t) = (word.clone(), table.clone());
+            for _ in 0..1 + random(4) {
+                // The FIB, the text and formatting pages, and the table stream.
+                match random(3) {
+                    0 => w[random(0x200)] = random(256) as u8,
+                    1 => {
+                        let i = random(w.len());
+                        w[i] = random(256) as u8;
+                    }
+                    _ => {
+                        let i = random(t.len());
+                        t[i] = random(256) as u8;
+                    }
+                }
+            }
+            if let Ok(fib) = Fib::parse(&w) {
+                let _ = document(&w, &fib, &t);
+            }
+            let _ = document(&w, &Fib::parse(&word).unwrap(), &t[..random(t.len())]);
+        }
         assert!(text(b"").is_err());
         assert!(text(&fixture!("doc-report.doc")[..4096]).is_err());
     }
@@ -558,7 +593,7 @@ Boxed text
         let split = text.find("Größe").unwrap();
         let (first, second) = text.split_at(split);
         let a = first.chars().count();
-        assert_eq!(a % 2, 0);
+        assert!(a.is_multiple_of(2));
         let (compressed, _, _) = encoding_rs::WINDOWS_1252.encode(first);
         assert_eq!(compressed.len(), a);
         let base = 0x800usize;
