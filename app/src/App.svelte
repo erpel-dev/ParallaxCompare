@@ -477,6 +477,7 @@
             onSwap={() => swap(tab)}
             onCompareRows={(a, b) => compareRows(tab, a, b)}
             edit={sideEdits(tab)}
+            onSetBase={(changes) => changeSides(tab, changes)}
             nav={navFor(tab)}
             reveal={tab.reveal}
           />

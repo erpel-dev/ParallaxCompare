@@ -2,7 +2,7 @@
   import { onMount, tick } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { ask } from "@tauri-apps/plugin-dialog";
-  import { api, defaultCompareOptions, sourceText, type CompareResult, type Node, type OpResult, type PathsChanged, type SessionInfo, type Side } from "./api";
+  import { api, defaultCompareOptions, sourceText, type CompareResult, type Node, type OpResult, type PathsChanged, type SessionInfo, type Side, type SourceSpec } from "./api";
   import type { Command } from "./commands";
   import Dropdown from "./Dropdown.svelte";
   import Menu, { type MenuItem } from "./Menu.svelte";
@@ -36,6 +36,7 @@
     onSwap,
     onCompareRows,
     edit,
+    onSetBase,
     nav,
     reveal,
   }: {
@@ -44,6 +45,8 @@
     onSwap: () => void;
     onCompareRows?: (a: RowSide, b: RowSide) => void;
     edit?: [SideEdit, SideEdit];
+    /** Compares with these sides replaced, e.g. by a folder of the tree as the new base. */
+    onSetBase?: (changes: { left?: SourceSpec; right?: SourceSpec }) => Promise<boolean>;
     nav?: NavActions;
     /** A row to select and scroll to, e.g. the file just left with "up"; `n` repeats a request. */
     reveal?: { path: string; n: number };
@@ -626,6 +629,20 @@
     }
   }
 
+  /** Makes the folder at `path` the top folder of the given sides. */
+  async function setBase(path: string, sides: ("left" | "right")[]) {
+    if (!onSetBase) return;
+    try {
+      const changes: { left?: SourceSpec; right?: SourceSpec } = {};
+      for (const side of sides) {
+        changes[side] = await api.sideSource(session.id, side === "left", sidePath(path, side === "left"));
+      }
+      await onSetBase(changes);
+    } catch (e) {
+      notify(String(e));
+    }
+  }
+
   /** The context menu for the row at `path`: it acts on the selection, like the toolbar. */
   function rowMenu(path: string, x: number, y: number) {
     if (!selection.has(path)) selectOnly(path);
@@ -654,6 +671,17 @@
       items.push({ label: "Compare these two", run: () => onCompareRows(a, b) });
     }
     if (sideActions.length) items.push("separator", ...sideActions);
+    // A folder (or archive) of the tree as the new top folder of its side.
+    if (onSetBase && row.container) {
+      const folder = `“${path.split("/").pop()}”`;
+      const isFolder = (s: typeof row.node.left) => !!s && (s.kind === "dir" || s.kind === "archive");
+      const [onLeft, onRight] = [isFolder(row.node.left), isFolder(row.node.right)];
+      const base: MenuItem[] = [];
+      if (onLeft && onRight) base.push({ label: `Set ${folder} as base folder on both sides`, run: () => setBase(path, ["left", "right"]) });
+      if (onLeft) base.push({ label: `Set left ${folder} as base folder`, run: () => setBase(path, ["left"]) });
+      if (onRight) base.push({ label: `Set right ${folder} as base folder`, run: () => setBase(path, ["right"]) });
+      if (base.length) items.push("separator", ...base);
+    }
     for (const [left, side, name] of [[true, row.node.left, "left"], [false, row.node.right, "right"]] as const) {
       if (!side) continue;
       items.push(
