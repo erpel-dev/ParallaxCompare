@@ -157,6 +157,12 @@ pub trait Vfs: Send + Sync {
     fn list(&self, dir: &str) -> Result<Vec<Entry>>;
     fn stat(&self, path: &str) -> Result<Entry>;
     fn read(&self, path: &str) -> Result<Data>;
+    /// The contents as a stream, for reading only as far as needed (a comparison
+    /// that stops at the first difference). Providers that decompress entries
+    /// decompress as the stream is read; others hand out what [`read`](Self::read) gives.
+    fn open(&self, path: &str) -> Result<Box<dyn std::io::Read + Send>> {
+        Ok(Box::new(std::io::Cursor::new(self.read(path)?)))
+    }
     /// Real filesystem path of an entry, for providers that can be written to.
     fn local_path(&self, _path: &str) -> Option<PathBuf> {
         None

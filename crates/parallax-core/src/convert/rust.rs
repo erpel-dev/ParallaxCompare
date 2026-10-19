@@ -320,7 +320,7 @@ fn items(toks: &[Tok]) -> Vec<(usize, usize)> {
             }
         }
         // Inner attributes stand alone.
-        if i > start && toks[start + 1].is("!") {
+        if i > start && toks.get(start + 1).is_some_and(|t| t.is("!")) {
             out.push((start, i));
             continue;
         }
@@ -451,9 +451,34 @@ fn macro_rules_ranges(toks: &[Tok]) -> Vec<bool> {
     literal
 }
 
+/// Whether every bracket is closed by its own kind, in order. The rules below rely
+/// on it; text that is not Rust (or not finished) is compared by its plain tokens.
+fn balanced(toks: &[Tok]) -> bool {
+    let mut open: Vec<&str> = Vec::new();
+    for t in toks {
+        if t.open() {
+            open.push(&t.text);
+        } else if t.close() {
+            let expected = match t.text.as_str() {
+                ")" => "(",
+                "]" => "[",
+                _ => "{",
+            };
+            if open.pop() != Some(expected) {
+                return false;
+            }
+        }
+    }
+    open.is_empty()
+}
+
 /// Tokens with what rustfmt adds, removes or reorders taken out.
 pub fn canonical(text: &str) -> Vec<Tok> {
-    let toks = normalize_forms(sort_declarations(tokens(text)));
+    let toks = tokens(text);
+    if !balanced(&toks) {
+        return toks;
+    }
+    let toks = normalize_forms(sort_declarations(toks));
     let n = toks.len();
     let mut drop = vec![false; n];
     let literal = macro_rules_ranges(&toks);
@@ -1017,6 +1042,9 @@ fn outline_items(toks: &[Tok], indent: &str, out: &mut Vec<String>) {
 
 /// The outline of a Rust source file.
 pub fn outline(text: &str) -> String {
+    if !balanced(&tokens(text)) {
+        return "// The brackets do not balance, so this is not Rust that can be outlined.\n".to_string();
+    }
     let toks = canonical(text);
     let mut lines = Vec::new();
     outline_items(&toks, "", &mut lines);

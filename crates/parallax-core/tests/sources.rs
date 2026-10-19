@@ -973,3 +973,51 @@ fn symlinks_survive_a_round_trip_through_7z() {
         assert_eq!(fs::read_link(out.join("dangling")).unwrap(), Path::new("missing"), "{kind}");
     }
 }
+
+/// A zip with data in front of it, like a self-extracting archive (`cat stub zip`):
+/// opened by detecting where the archive starts.
+#[test]
+fn zips_with_data_in_front_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut data = vec![b'M'; 4096];
+    data.extend(zip_bytes(&[("a/x.txt", "x"), ("y.txt", "y")]));
+    fs::write(dir.path().join("sfx.zip"), data).unwrap();
+    fs::write(dir.path().join("plain.zip"), zip_bytes(&[("a/x.txt", "x"), ("y.txt", "y")])).unwrap();
+    let list = statuses(
+        &dir.path().join("sfx.zip").display().to_string(),
+        &dir.path().join("plain.zip").display().to_string(),
+        &CompareOptions::default(),
+    );
+    assert_eq!(status_of(&list, "a/x.txt"), Status::Same, "{list:?}");
+    assert_eq!(status_of(&list, "y.txt"), Status::Same, "{list:?}");
+}
+
+/// Entries inside zips are compared as streams: differences, line endings and
+/// equal entries with different CRC32 (stored vs re-encoded) come out as before.
+#[test]
+fn zip_entries_compare_as_streams() {
+    let dir = tempfile::tempdir().unwrap();
+    let body: String = (0..20_000).map(|i| format!("line {i}\n")).collect();
+    let crlf = body.replace('\n', "\r\n");
+    let mut changed_late = body.clone();
+    changed_late.push_str("one more\n");
+    let left = zip_bytes(&[("lf.txt", &body), ("late.txt", &body), ("same.txt", &body)]);
+    let right = zip_bytes(&[("lf.txt", &crlf), ("late.txt", &changed_late), ("same.txt", &body)]);
+    fs::write(dir.path().join("l.zip"), left).unwrap();
+    fs::write(dir.path().join("r.zip"), right).unwrap();
+    let (l, r) = (dir.path().join("l.zip").display().to_string(), dir.path().join("r.zip").display().to_string());
+    let list = statuses(&l, &r, &CompareOptions::default());
+    assert_eq!(status_of(&list, "lf.txt"), Status::Similar);
+    assert_eq!(status_of(&list, "late.txt"), Status::Different);
+    assert_eq!(status_of(&list, "same.txt"), Status::Same);
+    let strict = CompareOptions { ignore_line_endings: false, ..Default::default() };
+    assert_eq!(status_of(&statuses(&l, &r, &strict), "lf.txt"), Status::Different);
+    // Against a folder: the plain file on one side, the zip entry streamed on the other.
+    let folder = dir.path().join("folder");
+    fs::create_dir(&folder).unwrap();
+    fs::write(folder.join("lf.txt"), &crlf).unwrap();
+    fs::write(folder.join("same.txt"), &body).unwrap();
+    let list = statuses(&l, &folder.display().to_string(), &CompareOptions::default());
+    assert_eq!(status_of(&list, "lf.txt"), Status::Similar);
+    assert_eq!(status_of(&list, "same.txt"), Status::Same);
+}

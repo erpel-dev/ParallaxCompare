@@ -191,7 +191,8 @@ impl Lexer<'_> {
                     }
                 }
             }
-            let c = self.b[self.i];
+            // Indentation at the very end of the file.
+            let Some(&c) = self.b.get(self.i) else { break };
             match c {
                 b'\n' => {
                     self.i += 1;

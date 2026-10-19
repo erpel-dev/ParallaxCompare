@@ -66,3 +66,7 @@ tar = "0.4"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 anyhow.workspace = true
+
+[[bench]]
+name = "archives"
+harness = false

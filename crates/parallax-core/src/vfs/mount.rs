@@ -66,9 +66,12 @@ impl ArchiveMount {
         if let Some(archive) = self.cache.lock().get(outer) {
             return Ok(archive.clone());
         }
-        // A copy, not a memory map: Windows cannot replace a mapped file when the
-        // archive is written to.
-        let data = Data::from_vec(vfs.read(inner)?.to_vec());
+        // Large archives on disk are memory-mapped, so opening one reads only its
+        // index. Writing replaces the file by renaming a new one over it, which
+        // leaves the mapped old file intact on Unix. Windows cannot replace a mapped
+        // file, so there the archive is copied into memory.
+        let data = vfs.read(inner)?;
+        let data = if cfg!(windows) { Data::from_vec(data.to_vec()) } else { data };
         let label = format!("{}/{}", vfs.label(), inner);
         let archive = Arc::new(ArchiveFs::open(data, format, label)?);
         self.cache.lock().insert(outer.to_string(), archive.clone());
@@ -103,6 +106,12 @@ impl Vfs for ArchiveMount {
         let (parent, name) = split_parent(path);
         let (vfs, inner, _) = self.resolve(parent)?;
         vfs.read(&join(&inner, name))
+    }
+
+    fn open(&self, path: &str) -> Result<Box<dyn std::io::Read + Send>> {
+        let (parent, name) = split_parent(path);
+        let (vfs, inner, _) = self.resolve(parent)?;
+        vfs.open(&join(&inner, name))
     }
 
     fn local_path(&self, path: &str) -> Option<PathBuf> {

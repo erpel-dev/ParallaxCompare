@@ -614,6 +614,10 @@ impl<'a> Lexer<'a> {
             // `{expr}`: `{" "}` is text, `{/* comment */}` is nothing.
             let at = self.out.len();
             self.jsx_expression();
+            // Unclosed at the end of the file: only the `{`.
+            if self.out.len() < at + 2 {
+                continue;
+            }
             let inner = &self.out[at + 1..self.out.len() - 1];
             if inner.is_empty() {
                 self.out.truncate(at);

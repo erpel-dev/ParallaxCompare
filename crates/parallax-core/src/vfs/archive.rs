@@ -157,7 +157,14 @@ impl ArchiveFs {
 }
 
 fn open_zip(data: Data, index: &mut Index) -> Result<Backend> {
-    let mut archive = zip::ZipArchive::new(Cursor::new(data)).map_err(Error::archive)?;
+    // Offset 0 first: detecting it scans the whole file for central directory
+    // headers, which reads every page of a large archive. Archives with data in
+    // front (self-extracting ones) fail that and are detected after all.
+    let known = zip::read::Config { archive_offset: zip::read::ArchiveOffset::Known(0) };
+    let mut archive = match zip::ZipArchive::with_config(known, Cursor::new(data.clone())) {
+        Ok(archive) => archive,
+        Err(_) => zip::ZipArchive::new(Cursor::new(data)).map_err(Error::archive)?,
+    };
     let mut index_of = HashMap::new();
     for i in 0..archive.len() {
         let file = archive.by_index_raw(i).map_err(Error::archive)?;
@@ -213,6 +220,22 @@ fn open_7z(data: Data, index: &mut Index) -> Result<Backend> {
     }
     let solid = files_per_block.iter().map(|&n| (n > 1).then(|| Mutex::new(None))).collect();
     Ok(Backend::SevenZ { data, archive: Box::new(archive), index_of, solid })
+}
+
+/// A range of shared data, read as a stream.
+struct DataSlice {
+    data: Data,
+    at: usize,
+    end: usize,
+}
+
+impl Read for DataSlice {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = buf.len().min(self.end - self.at);
+        buf[..n].copy_from_slice(&self.data[self.at..self.at + n]);
+        self.at += n;
+        Ok(n)
+    }
 }
 
 /// A symlink, when the entry has a Unix mode, which 7-Zip stores in the high 16
@@ -313,6 +336,34 @@ impl Vfs for ArchiveFs {
             return Ok(root_entry());
         }
         find_entry(&self.index.dirs, path)
+    }
+
+    fn open(&self, path: &str) -> Result<Box<dyn Read + Send>> {
+        // Zip entries are decompressed while they are read, so a comparison that
+        // stops at the first difference decompresses only up to it.
+        if let Backend::Zip { archive, index_of } = &self.backend {
+            let i = *index_of.get(path).ok_or_else(|| Error::NotFound(join(&self.label, path)))?;
+            let mut archive = archive.clone();
+            let (method, start, len) = {
+                let file = archive.by_index_raw(i).map_err(Error::archive)?;
+                let plain = !file.encrypted();
+                (plain.then(|| file.compression()), file.data_start(), file.compressed_size())
+            };
+            let data = archive.into_inner().into_inner();
+            if let Some(start) = start
+                && let Some(end) = start.checked_add(len).filter(|&end| end <= data.len() as u64)
+            {
+                let raw = DataSlice { data, at: start as usize, end: end as usize };
+                match method {
+                    Some(zip::CompressionMethod::Stored) => return Ok(Box::new(raw)),
+                    Some(zip::CompressionMethod::Deflated) => {
+                        return Ok(Box::new(flate2::read::DeflateDecoder::new(raw)));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(Box::new(Cursor::new(self.read(path)?)))
     }
 
     fn read(&self, path: &str) -> Result<Data> {

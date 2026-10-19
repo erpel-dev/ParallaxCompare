@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use crate::convert;
 use crate::source::Source;
 use crate::text::is_binary;
-use crate::vfs::{Entry, EntryKind, QuickId, join};
+use crate::vfs::{Data, Entry, EntryKind, QuickId, join};
 use crate::{Error, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -425,7 +425,7 @@ impl<'a> Engine<'a> {
                 } else if !must_read {
                     return DIFFERENT;
                 }
-                (read_left()?, data)
+                (None, Some(data))
             }
             (None, Some(id)) => {
                 let data = read_left()?;
@@ -437,9 +437,37 @@ impl<'a> Engine<'a> {
                 } else if !must_read {
                     return DIFFERENT;
                 }
-                (data, read_right()?)
+                (Some(data), None)
             }
-            _ => (read_left()?, read_right()?),
+            _ => (None, None),
+        };
+        // Entries that are decompressed to be read (archives) are compared as streams
+        // that stop at the first difference; files on disk are mapped, which already
+        // reads only as far as the comparison goes. Content rules need all of both.
+        let on_disk = |source: &Source, rel: &str| source.vfs.local_path(&source.path(rel)).is_some();
+        let streamed = !content && !(on_disk(self.left, lrel) && on_disk(self.right, rrel));
+        if streamed {
+            let open = |source: &Source, rel: &str, data: Option<Data>| -> Result<Box<dyn std::io::Read + Send>> {
+                match data {
+                    Some(data) => Ok(Box::new(std::io::Cursor::new(data))),
+                    None => source.vfs.open(&source.path(rel)),
+                }
+            };
+            let left_stream = open(self.left, lrel, left_data)?;
+            let right_stream = open(self.right, rrel, right_data)?;
+            return match compare_streams(left_stream, right_stream, eol).map_err(|e| Error::io(lrel, e))? {
+                Streams::Same => SAME,
+                Streams::LineEndings => Ok((Status::Similar, Some("only line endings differ"))),
+                Streams::Different => DIFFERENT,
+            };
+        }
+        let left_data = match left_data {
+            Some(data) => data,
+            None => read_left()?,
+        };
+        let right_data = match right_data {
+            Some(data) => data,
+            None => read_right()?,
         };
         if *left_data == *right_data {
             return SAME;
@@ -451,6 +479,125 @@ impl<'a> Engine<'a> {
             return Ok((Status::Similar, Some(reason)));
         }
         DIFFERENT
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Streams {
+    Same,
+    /// Equal once `\r\n` counts as `\n`, as [`equal_ignoring_cr`] decides it.
+    LineEndings,
+    Different,
+}
+
+/// Compares two streams, reading only up to the first difference. With
+/// `ignore_cr`, text (not binary, judged like [`is_binary`] by its start) that
+/// differs only in line endings is [`Streams::LineEndings`].
+fn compare_streams(
+    a: Box<dyn std::io::Read + Send>,
+    b: Box<dyn std::io::Read + Send>,
+    ignore_cr: bool,
+) -> std::io::Result<Streams> {
+    use std::io::{BufRead, BufReader, Cursor, Read};
+    const HEAD: u64 = 8000;
+    let head = |r: &mut Box<dyn Read + Send>| -> std::io::Result<Vec<u8>> {
+        let mut head = Vec::new();
+        r.by_ref().take(HEAD).read_to_end(&mut head)?;
+        Ok(head)
+    };
+    let (mut a, mut b) = (a, b);
+    let (head_a, head_b) = (head(&mut a)?, head(&mut b)?);
+    let ignore_cr = ignore_cr && !is_binary(&head_a) && !is_binary(&head_b);
+    let mut a = BufReader::with_capacity(64 << 10, Cursor::new(head_a).chain(a));
+    let mut b = BufReader::with_capacity(64 << 10, Cursor::new(head_b).chain(b));
+    // Byte for byte while both are equal.
+    let mut ends_with_cr = false;
+    loop {
+        let (x, y) = (a.fill_buf()?, b.fill_buf()?);
+        if x.is_empty() && y.is_empty() {
+            return Ok(Streams::Same);
+        }
+        let n = x.len().min(y.len());
+        let equal = if x[..n] == y[..n] { n } else { x.iter().zip(y).take_while(|(p, q)| p == q).count() };
+        if equal > 0 {
+            ends_with_cr = x[equal - 1] == b'\r';
+        }
+        a.consume(equal);
+        b.consume(equal);
+        if equal < n || n == 0 {
+            break;
+        }
+    }
+    if !ignore_cr {
+        return Ok(Streams::Different);
+    }
+    // From the first difference on, with `\r` before `\n` left out, a chunk at a
+    // time. A `\r` that ended the equal part counts by what follows it on each side.
+    let pending = ends_with_cr;
+    let (mut a, mut b) = (Stripped::new(a, pending), Stripped::new(b, pending));
+    loop {
+        let (x, y) = (a.available()?, b.available()?);
+        if x.is_empty() || y.is_empty() {
+            return Ok(if x.is_empty() && y.is_empty() { Streams::LineEndings } else { Streams::Different });
+        }
+        let n = x.len().min(y.len());
+        if x[..n] != y[..n] {
+            return Ok(Streams::Different);
+        }
+        a.take(n);
+        b.take(n);
+    }
+}
+
+/// A stream with every `\r` that comes right before `\n` left out, read in chunks.
+struct Stripped<R> {
+    r: R,
+    /// A `\r` at the end of the last chunk, kept until the next byte shows whether
+    /// a `\n` follows.
+    held_cr: bool,
+    out: Vec<u8>,
+    at: usize,
+}
+
+impl<R: std::io::BufRead> Stripped<R> {
+    fn new(r: R, held_cr: bool) -> Self {
+        Stripped { r, held_cr, out: Vec::new(), at: 0 }
+    }
+
+    /// The stripped bytes not taken yet; empty at the end of the stream.
+    fn available(&mut self) -> std::io::Result<&[u8]> {
+        while self.at == self.out.len() {
+            self.out.clear();
+            self.at = 0;
+            let buf = self.r.fill_buf()?;
+            if buf.is_empty() {
+                if std::mem::take(&mut self.held_cr) {
+                    self.out.push(b'\r');
+                }
+                break;
+            }
+            let mut rest = buf;
+            if std::mem::take(&mut self.held_cr) && rest[0] != b'\n' {
+                self.out.push(b'\r');
+            }
+            while let Some(i) = memchr::memchr(b'\r', rest) {
+                self.out.extend_from_slice(&rest[..i]);
+                match rest.get(i + 1) {
+                    Some(b'\n') => {}
+                    Some(_) => self.out.push(b'\r'),
+                    None => self.held_cr = true,
+                }
+                rest = &rest[i + 1..];
+            }
+            self.out.extend_from_slice(rest);
+            let n = buf.len();
+            self.r.consume(n);
+        }
+        Ok(&self.out[self.at..])
+    }
+
+    fn take(&mut self, n: usize) {
+        self.at += n;
     }
 }
 
@@ -506,5 +653,69 @@ mod tests {
         assert!(equal_ignoring_cr(b"a\r\nb\r\n", b"a\nb\n"));
         assert!(!equal_ignoring_cr(b"a\rb", b"ab"));
         assert!(!equal_ignoring_cr(b"a\n", b"a\nb"));
+    }
+
+    /// Hands out data a few bytes at a time, so chunk boundaries fall everywhere.
+    struct Trickle(Vec<u8>, usize, u64);
+
+    impl std::io::Read for Trickle {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.2 = self.2.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let n = (1 + (self.2 >> 60) as usize).min(buf.len()).min(self.0.len() - self.1);
+            buf[..n].copy_from_slice(&self.0[self.1..self.1 + n]);
+            self.1 += n;
+            Ok(n)
+        }
+    }
+
+    /// The streaming comparison decides exactly like the one on whole buffers.
+    #[test]
+    fn streams_compare_like_buffers() {
+        let mut seed = 7u64;
+        let mut random = move |n: u64| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) % n
+        };
+        let alphabet = b"ab\r\n\r\n\0";
+        for round in 0..20_000 {
+            let make = |random: &mut dyn FnMut(u64) -> u64| {
+                let len = random(12);
+                (0..len).map(|_| alphabet[random(alphabet.len() as u64) as usize]).collect::<Vec<u8>>()
+            };
+            let a = make(&mut random);
+            // Often a variant of `a`: CRs added or removed, or a byte changed.
+            let b = match round % 4 {
+                0 => make(&mut random),
+                1 => a.iter().flat_map(|&c| if c == b'\n' { vec![b'\r', b'\n'] } else { vec![c] }).collect(),
+                2 => a.iter().copied().filter(|&c| c != b'\r').collect(),
+                _ => a.clone(),
+            };
+            let expected = |ignore_cr: bool| {
+                if a == b {
+                    Streams::Same
+                } else if ignore_cr && !is_binary(&a) && !is_binary(&b) && equal_ignoring_cr(&a, &b) {
+                    Streams::LineEndings
+                } else {
+                    Streams::Different
+                }
+            };
+            for ignore_cr in [false, true] {
+                let got = compare_streams(
+                    Box::new(Trickle(a.clone(), 0, round)),
+                    Box::new(Trickle(b.clone(), 0, round + 1)),
+                    ignore_cr,
+                )
+                .unwrap();
+                assert_eq!(got, expected(ignore_cr), "{a:?} vs {b:?}, ignore_cr: {ignore_cr}");
+            }
+        }
+        // Binary data is judged by its start, like is_binary.
+        let mut a = vec![b'x'; 9000];
+        a.extend_from_slice(b"\0\r\n");
+        let b: Vec<u8> = a.iter().copied().filter(|&c| c != b'\r').collect();
+        assert_eq!(
+            compare_streams(Box::new(std::io::Cursor::new(a)), Box::new(std::io::Cursor::new(b)), true).unwrap(),
+            Streams::LineEndings
+        );
     }
 }

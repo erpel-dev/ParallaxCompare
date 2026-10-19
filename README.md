@@ -102,9 +102,9 @@ On Linux, where each folder needs its own watch, only the folders the compare sh
 All of the work happens in a multi-threaded Rust core; the UI only renders the rows that are visible.
 
 - **Git vs. Git:** tree ids are compared before anything is read. An unchanged folder costs a single id comparison, however large it is. Changed files are decided by their blob ids, without inflating the objects.
-- **Archives:** zip and 7z entries are compared with the CRC32 stored in the archive headers, so nothing is decompressed for listing or for entries with equal CRC32 and size. Different data has the same CRC32 only by a one-in-four-billion chance or when made to; *Verify archive entries byte for byte* under Options (`--verify-archives` in the CLI) decompresses such entries and compares them. That costs time: two copies of a 69 MB solid 7z with 223 MB of files take 3 s instead of 0.1 s.
+- **Archives:** large archives are memory-mapped (copied into memory on Windows, which cannot replace a mapped file when saving into it), and only their index is read on opening. zip and 7z entries are compared with the CRC32 stored in the archive headers, so nothing is decompressed for listing or for entries with equal CRC32 and size. Differing zip entries are decompressed only up to their first difference. Different data has the same CRC32 only by a one-in-four-billion chance or when made to; *Verify archive entries byte for byte* under Options (`--verify-archives` in the CLI) decompresses such entries and compares them. That costs time: two copies of a 69 MB solid 7z with 223 MB of files take 3 s instead of 0.1 s.
 - **Git vs. local file:** the local file's Git blob id is computed and compared, instead of reading the Git object.
-- **Local files:** parallel walking (rayon), files are memory-mapped, and size mismatches short-circuit.
+- **Local files:** parallel walking (rayon), files are memory-mapped, and a comparison stops at the first differing byte, so differing files are read only that far. Different sizes settle it without reading at all when no rule can make the files equal anyway (line endings, or a content rule for the file type).
 - **Text views:** rows, intra-line marks and syntax colours are produced only for the visible window. Highlighter state is checkpointed every 128 lines, so jumping to line 900 000 does not re-parse the file from the top.
 
 Measured with the CLI on two Linux kernel releases (v6.11 and v6.12, ~87 000 files, 1.6 GB per tree). The machine is a 4-core cloud VM, the OS file cache was warm, and each time is the full wall-clock run including output:
@@ -117,6 +117,15 @@ Measured with the CLI on two Linux kernel releases (v6.11 and v6.12, ~87 000 fil
 | Folder vs. folder, quick (size and date) | 0.62 s | 0.23 s |
 | Worktree vs. `HEAD` (one file edited) | 2.2 s | 0.69 s |
 | Text diff, 1 million lines (55 MB), 2 500 changed lines | 0.41 s | — |
+
+Archives, measured with `cargo bench -p parallax-core --bench archives` (same machine, 200 MB of content per zip, median of 5 compares, peak memory of the process):
+
+| Two zips | Time | Peak memory |
+|---|---|---|
+| Identical, 100 stored binary files | 1.2 ms | 20 MB |
+| 200 text files, each changed near its start | 8.4 ms | 49 MB |
+| 200 text files, each changed near its end | 145 ms | 101 MB |
+| 200 text files, LF vs CRLF (≈ similar) | 193 ms | 102 MB |
 
 Opening files with the content views (same machine): a 12 MB ARXML (242 000 lines) diffs in about 35 ms, and highlighting anywhere in it takes under 10 ms. A 5 MB Latin-1 A2L with 10 000 changed lines diffs in 0.1 s; with histogram instead of Myers it takes 0.9 s, which is why Myers is the default. A 300-page PDF extracts in 0.18 s, and a 100 000-row XLSX in 0.2 s.
 
