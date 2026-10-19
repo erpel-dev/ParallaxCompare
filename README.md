@@ -170,7 +170,7 @@ Right-click a row (or press Shift+F10) for what you can do with it: open, compar
 
 The *New comparison* tab lists recent comparisons: click one to compare again with the same options, ☆ pins it to the top, ✎ puts it into the form to change it first. Errors and confirmations appear briefly in the lower right corner.
 
-Keyboard: arrow keys, Enter (open or expand), ←/→ (collapse/expand), F5 (refresh), F7/F8 (previous/next difference), Ctrl+F (find), F3/Shift+F3 (next/previous match), Ctrl+Shift+P / Ctrl+K / F1 (command palette), Shift+F10 (context menu), Ctrl+T (new tab), Ctrl+W (close tab), Ctrl+Tab / Ctrl+Shift+Tab (next/previous tab), Ctrl+1…8 (that tab), Ctrl+9 (last tab). With many tabs, the tab bar scrolls with the mouse wheel.
+Keyboard: arrow keys, Enter (open or expand), ←/→ (collapse/expand), F5 (refresh), F7/F8 (previous/next difference), Ctrl+F (find), F3/Shift+F3 (next/previous match), Ctrl+Shift+P / Ctrl+K / F1 (command palette), Shift+F10 (context menu), Ctrl+T (new tab), Ctrl+W (close tab), Ctrl+Tab / Ctrl+Shift+Tab (next/previous tab), Ctrl+1…8 (that tab), Ctrl+9 (last tab), Ctrl+Shift+PageUp/PageDown (move the tab). Tabs can be dragged to another place. With many tabs, the tab bar scrolls with the mouse wheel.
 
 ### Source syntax (CLI and path fields)
 

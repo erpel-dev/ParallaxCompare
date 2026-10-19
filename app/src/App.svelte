@@ -52,6 +52,65 @@
 
   let tabs = $state<Tab[]>([]);
   let active = $state(0);
+  // The pages stay in the order they were opened, so reordering tabs never moves
+  // (and resets) an open view.
+  const pages = $derived([...tabs].sort((a, b) => a.key - b.key));
+
+  // ---- Reordering tabs by dragging ----
+  let drag: { key: number; x: number; moved: boolean } | null = null;
+  let dragging = $state<number | null>(null);
+  let justDragged = false;
+
+  function tabDown(e: PointerEvent, key: number) {
+    if (e.button !== 0 || (e.target as HTMLElement).closest(".x")) return;
+    drag = { key, x: e.clientX, moved: false };
+  }
+
+  function tabMove(e: PointerEvent) {
+    if (!drag || !tabBar) return;
+    if (!drag.moved) {
+      if (Math.abs(e.clientX - drag.x) < 6) return;
+      // Captured only once it is a drag, so that a plain click still reaches the tab's button.
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+      drag.moved = true;
+    }
+    dragging = active = drag.key;
+    // Where the tab goes: before the first tab whose middle is right of the pointer.
+    const els = [...tabBar.querySelectorAll<HTMLElement>(".tab")];
+    const from = tabs.findIndex((t) => t.key === drag!.key);
+    let to = els.findIndex((el) => {
+      const r = el.getBoundingClientRect();
+      return e.clientX < r.left + r.width / 2;
+    });
+    to = to === -1 ? tabs.length - 1 : to > from ? to - 1 : to;
+    if (from !== -1 && to !== from) {
+      const [tab] = tabs.splice(from, 1);
+      tabs.splice(to, 0, tab);
+    }
+    // Near an edge of a bar that scrolls, it scrolls along.
+    const bar = tabBar.getBoundingClientRect();
+    if (e.clientX < bar.left + 30) tabBar.scrollLeft -= 12;
+    else if (e.clientX > bar.right - 30) tabBar.scrollLeft += 12;
+  }
+
+  /** Moves the active tab one place to the left or right. */
+  function moveTab(dir: -1 | 1) {
+    const from = tabs.findIndex((t) => t.key === active);
+    const to = from + dir;
+    if (from === -1 || to < 0 || to >= tabs.length) return;
+    const [tab] = tabs.splice(from, 1);
+    tabs.splice(to, 0, tab);
+  }
+
+  function tabUp() {
+    // The click that ends a drag does not count as one.
+    if (drag?.moved) {
+      justDragged = true;
+      setTimeout(() => (justDragged = false));
+    }
+    drag = null;
+    dragging = null;
+  }
   let nextKey = 1;
   let revealCount = 0;
   let paletteOpen = $state(false);
@@ -395,6 +454,7 @@
     else if ((mod && e.shiftKey && key === "p") || (mod && !e.shiftKey && key === "k") || e.key === "F1") {
       paletteOpen = !paletteOpen;
     } else if (e.ctrlKey && e.key === "Tab") cycle(e.shiftKey ? -1 : 1);
+    else if (e.ctrlKey && e.shiftKey && (e.key === "PageUp" || e.key === "PageDown")) moveTab(e.key === "PageUp" ? -1 : 1);
     // Ctrl+1 … Ctrl+8 pick a tab, Ctrl+9 the last.
     else if (mod && !e.shiftKey && !e.altKey && /^[1-9]$/.test(e.key) && tabs.length) {
       const n = Number(e.key);
@@ -438,9 +498,10 @@
 <svelte:window onkeydown={onKey} onmouseup={onMouseUp} />
 
 <div class="app">
-  <nav
+  <div
     class="tabs"
     aria-label="Comparisons"
+    role="tablist"
     bind:this={tabBar}
     onwheel={(e) => {
       // The wheel scrolls the tabs sideways.
@@ -451,18 +512,30 @@
     }}
   >
     {#each tabs as tab (tab.key)}
-      <div class="tab" class:on={tab.key === active} data-key={tab.key}>
-        <button class="label" onclick={() => (active = tab.key)} title={tab.title}>
+      <div
+        class="tab"
+        class:on={tab.key === active}
+        class:dragging={tab.key === dragging}
+        data-key={tab.key}
+        role="tab"
+        tabindex="-1"
+        aria-selected={tab.key === active}
+        onpointerdown={(e) => tabDown(e, tab.key)}
+        onpointermove={tabMove}
+        onpointerup={tabUp}
+        onpointercancel={tabUp}
+      >
+        <button class="label" onclick={() => !justDragged && (active = tab.key)} title={`${tab.title}\nDrag to move the tab`}>
           <span>{tab.kind === "folder" ? "📁" : tab.kind === "text" ? "📄" : "＋"}</span><span class="name">{tab.title}</span>{tab.kind === "text" && tab.dirty ? " ●" : ""}
         </button>
         <button class="x" onclick={() => close(tab.key)} title="Close (Ctrl+W)">×</button>
       </div>
     {/each}
     <button class="add" onclick={newTab} title="New comparison (Ctrl+T)">＋</button>
-  </nav>
+  </div>
 
   <main bind:this={mainEl}>
-    {#each tabs as tab (tab.key)}
+    {#each pages as tab (tab.key)}
       <section class="page" hidden={tab.key !== active}>
         {#if tab.kind === "new"}
           <NewCompare
@@ -548,6 +621,10 @@
   .tab.on {
     background: var(--panel);
     border-top-color: var(--accent);
+  }
+  .tab.dragging {
+    box-shadow: 0 0 0 1px var(--accent) inset;
+    cursor: grabbing;
   }
   .tab button {
     background: none;
