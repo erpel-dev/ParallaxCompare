@@ -56,3 +56,19 @@ fn unreadable_entries_exit_with_2() {
     assert_eq!(code, 2);
     assert!(out.contains("\"errors\":1"), "{out}");
 }
+
+#[test]
+fn include_patterns() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    for (dir, text) in [(&a, "1"), (&b, "2")] {
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/Main.java"), "same").unwrap();
+        fs::write(dir.path().join("src/notes.txt"), text).unwrap();
+    }
+    let (left, right) = (a.path().to_str().unwrap(), b.path().to_str().unwrap());
+    assert_eq!(parallax(&[left, right]).0, 1);
+    let (code, out) = parallax(&[left, right, "--include", "*.java"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("1 files compared"), "{out}");
+}

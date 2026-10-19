@@ -213,6 +213,28 @@
     viewport?.focus();
   }
 
+  // ---- File patterns ----
+  let patternText = $state("");
+  let patternInput = $state<HTMLInputElement>();
+  let patternTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /** Compares again with the patterns typed, when they changed. */
+  function applyPatterns() {
+    clearTimeout(patternTimer);
+    const list = patternText.split(/[\s,;]+/).filter(Boolean);
+    if (list.join("\n") === options.includes.join("\n")) return;
+    options.includes = list;
+    run();
+  }
+
+  function onPatternKey(e: KeyboardEvent) {
+    if (e.key === "Enter") applyPatterns();
+    else if (e.key === "Escape") {
+      patternText = "";
+      applyPatterns();
+    }
+  }
+
   async function run(invalidate = false) {
     running = true;
     error = "";
@@ -665,6 +687,7 @@
           version++;
         },
       })),
+      { group, title: "Filter files by name pattern", run: () => patternInput?.focus() },
       { group, title: "Expand all folders", run: () => setAll(true) },
       { group, title: "Collapse all folders", run: () => setAll(false) },
       { group, title: flat ? "Show folders" : "Flat list: all files without folders", run: () => setFlat(!flat) },
@@ -742,6 +765,32 @@
     {#each [["all", "All"], ["diffs", "Diffs"], ["same", "Same"], ["orphans", "Orphans"]] as const as [id, label] (id)}
       <button class:on={filter === id} onclick={() => { filter = id; version++; }}>{label}</button>
     {/each}
+    <span class="sep"></span>
+    <span class="patterns" class:active={options.includes.length > 0}>
+      <input
+        bind:this={patternInput}
+        bind:value={patternText}
+        class="mono"
+        placeholder="Files: *.java *.xml"
+        spellcheck="false"
+        title={"Compare only files matching these patterns, separated by spaces, commas or semicolons, e.g. *.java *hello*w*c.\n" +
+          "* matches any text, ? one character, [abc] one of them, {java,kt} either. A pattern with / matches the path (src/**/*.rs); a matching folder takes all files in it. Case does not matter.\n" +
+          "Folders without matching files are left out. Enter applies at once, Esc clears."}
+        oninput={() => {
+          clearTimeout(patternTimer);
+          patternTimer = setTimeout(applyPatterns, 500);
+        }}
+        onkeydown={onPatternKey}
+      />
+      {#if patternText}<button
+          class="clear"
+          title="Show all files"
+          onclick={() => {
+            patternText = "";
+            applyPatterns();
+          }}>×</button
+        >{/if}
+    </span>
     <span class="sep"></span>
     <button onclick={() => setAll(true)} disabled={flat} title="Expand all folders">Expand</button>
     <button onclick={() => setAll(false)} disabled={flat} title="Collapse all folders">Collapse</button>
@@ -910,6 +959,28 @@
   }
   .grow {
     flex: 1;
+  }
+  .patterns {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+  }
+  .patterns input {
+    width: 150px;
+    padding: 4px 22px 4px 7px;
+    font-size: 12.5px;
+  }
+  .patterns.active input {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent);
+  }
+  .patterns .clear {
+    position: absolute;
+    right: 3px;
+    border: none;
+    background: none;
+    padding: 0 4px;
+    color: var(--dim);
   }
   .pathbars,
   .head {

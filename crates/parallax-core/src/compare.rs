@@ -42,6 +42,11 @@ pub struct CompareOptions {
     pub ignore_line_endings: bool,
     /// Glob patterns matched against names and relative paths, e.g. `.git`, `*.o`, `build/**`.
     pub excludes: Vec<String>,
+    /// When not empty, only files matching one of these globs are compared and
+    /// shown, and folders without such files are left out. A pattern matches the
+    /// file name (`*.java`), or the relative path when it has a `/` (`src/**/*.rs`);
+    /// a matching folder or archive takes everything in it. Case does not matter.
+    pub includes: Vec<String>,
     /// Documents (PDF, Office, OpenDocument) with equal text and images with equal
     /// pixels count as similar even when their bytes differ.
     pub compare_contents: bool,
@@ -59,6 +64,7 @@ impl Default for CompareOptions {
             mode: CompareMode::Content,
             ignore_line_endings: true,
             excludes: vec![".git".into(), ".svn".into(), ".hg".into()],
+            includes: Vec::new(),
             compare_contents: true,
             verify_checksums: false,
         }
@@ -128,6 +134,53 @@ pub struct CompareResult {
     pub summary: Summary,
 }
 
+/// Include patterns: those without `/` match names, the others relative paths.
+pub struct Includes {
+    names: GlobSet,
+    paths: GlobSet,
+}
+
+impl Includes {
+    pub fn new(patterns: &[String]) -> Result<Self> {
+        let invalid = |e: globset::Error| Error::InvalidSource(format!("file pattern: {e}"));
+        let (mut names, mut paths) = (GlobSetBuilder::new(), GlobSetBuilder::new());
+        for pattern in patterns.iter().map(|p| p.trim()).filter(|p| !p.is_empty()) {
+            let by_path = pattern.contains('/');
+            let glob = globset::GlobBuilder::new(pattern.trim_start_matches('/'))
+                .case_insensitive(true)
+                .literal_separator(by_path)
+                .build()
+                .map_err(invalid)?;
+            if by_path {
+                paths.add(glob)
+            } else {
+                names.add(glob)
+            };
+        }
+        Ok(Includes { names: names.build().map_err(invalid)?, paths: paths.build().map_err(invalid)? })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty() && self.paths.is_empty()
+    }
+
+    /// Whether the entry at `rel`, or a folder above it, matches a pattern.
+    pub fn covers(&self, rel: &str) -> bool {
+        if self.is_empty() {
+            return true;
+        }
+        let mut end = 0;
+        for part in rel.split('/') {
+            end += part.len();
+            if self.names.is_match(part) || self.paths.is_match(&rel[..end]) {
+                return true;
+            }
+            end += 1;
+        }
+        false
+    }
+}
+
 /// Exclude patterns, matched against entry names and relative paths.
 pub struct Excludes(GlobSet);
 
@@ -185,6 +238,7 @@ struct Engine<'a> {
     right: &'a Source,
     opts: &'a CompareOptions,
     excludes: Excludes,
+    includes: Includes,
     control: &'a Control,
     counters: Counters,
 }
@@ -262,7 +316,8 @@ fn as_container(mut e: Entry) -> Entry {
 impl<'a> Engine<'a> {
     fn new(left: &'a Source, right: &'a Source, opts: &'a CompareOptions, control: &'a Control) -> Result<Self> {
         let excludes = Excludes::new(&opts.excludes)?;
-        Ok(Engine { left, right, opts, excludes, control, counters: Counters::default() })
+        let includes = Includes::new(&opts.includes)?;
+        Ok(Engine { left, right, opts, excludes, includes, control, counters: Counters::default() })
     }
 
     fn excluded(&self, rel: &str, name: &str) -> bool {
@@ -346,7 +401,9 @@ impl<'a> Engine<'a> {
         let mut collect = |source: &Source, is_left: bool| -> Result<()> {
             for entry in source.vfs.list(&source.path(rel))? {
                 let child = join(rel, &entry.name);
-                if self.excluded(&child, &entry.name) {
+                // Files outside the include patterns are not compared; folders are
+                // walked for files that match.
+                if self.excluded(&child, &entry.name) || (!entry.kind.is_container() && !self.includes.covers(&child)) {
                     continue;
                 }
                 let slot = pairs.entry(entry.name.clone()).or_default();
@@ -365,11 +422,16 @@ impl<'a> Engine<'a> {
             let container = l.as_ref().or(r.as_ref()).is_some_and(|e| e.kind.is_container());
             (!container, name.to_lowercase(), name.clone())
         });
+        let filtered = !self.includes.is_empty();
         Ok(pairs
             .into_par_iter()
-            .map(|(name, (l, r))| {
+            .filter_map(|(name, (l, r))| {
                 let child = join(rel, &name);
-                self.node(&child, name, l, r, false)
+                let node = self.node(&child, name, l, r, false);
+                // With include patterns, folders without matching files are left out.
+                let empty = node.children.is_empty() && !node.unexpanded && node.status != Status::Error;
+                let container = node.left.as_ref().or(node.right.as_ref()).is_some_and(|s| s.kind.is_container());
+                (!(filtered && container && empty && !self.includes.covers(&child))).then_some(node)
             })
             .collect())
     }

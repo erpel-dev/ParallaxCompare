@@ -53,6 +53,11 @@ struct Cli {
     #[arg(long, short = 'x', value_name = "GLOB")]
     exclude: Vec<String>,
 
+    /// Compare only files matching a glob (repeatable), e.g. --include '*.java' --include '*hello*w*c';
+    /// a pattern with a slash matches the path, and folders without matching files are left out
+    #[arg(long, value_name = "GLOB")]
+    include: Vec<String>,
+
     /// Show archives as files instead of expanding them
     #[arg(long)]
     no_archives: bool,
@@ -153,6 +158,7 @@ fn compare_folders(cli: &Cli, left: &Source, right: &Source, paint: &Paint) -> R
         ignore_line_endings: !cli.strict_eol,
         compare_contents: !cli.bytes,
         verify_checksums: cli.verify_archives,
+        includes: cli.include.clone(),
         ..Default::default()
     };
     if !cli.exclude.is_empty() {

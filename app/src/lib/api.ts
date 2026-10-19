@@ -93,6 +93,8 @@ export interface CompareOptions {
   mode: "quick" | "content";
   ignoreLineEndings: boolean;
   excludes: string[];
+  /** Only files matching one of these globs are compared and shown; empty for all. */
+  includes: string[];
   compareContents: boolean;
   /** Archive entries with equal CRC32 are decompressed and compared byte for byte. */
   verifyChecksums: boolean;
@@ -323,6 +325,7 @@ export const defaultCompareOptions = (): CompareOptions => ({
   mode: "content",
   ignoreLineEndings: true,
   excludes: [".git", ".svn", ".hg"],
+  includes: [],
   compareContents: true,
   verifyChecksums: false,
 });

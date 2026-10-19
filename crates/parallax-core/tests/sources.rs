@@ -1021,3 +1021,49 @@ fn zip_entries_compare_as_streams() {
     assert_eq!(status_of(&list, "lf.txt"), Status::Similar);
     assert_eq!(status_of(&list, "same.txt"), Status::Same);
 }
+
+/// Include patterns: only matching files are compared and listed, folders without
+/// any are left out, and a matching folder takes everything in it.
+#[test]
+fn include_patterns_select_files() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    write(
+        a.path(),
+        &[
+            ("src/Main.java", "class Main {}"),
+            ("src/util/Helper.JAVA", "x"),
+            ("src/readme.txt", "a"),
+            ("docs/guide.md", "a"),
+            ("tools/hello_world.c", "a"),
+            ("gen/out.txt", "a"),
+        ],
+    );
+    write(
+        b.path(),
+        &[
+            ("src/Main.java", "class Main { }"),
+            ("src/util/Helper.JAVA", "x"),
+            ("src/readme.txt", "b"),
+            ("docs/guide.md", "b"),
+            ("tools/hello_world.c", "b"),
+            ("gen/out.txt", "b"),
+        ],
+    );
+    let (l, r) = (a.path().display().to_string(), b.path().display().to_string());
+    let opts = CompareOptions { includes: vec!["*.java".into(), "*hello*w*c".into()], ..Default::default() };
+    let list = statuses(&l, &r, &opts);
+    let paths: Vec<&str> = list.iter().map(|(p, _)| p.as_str()).collect();
+    assert_eq!(
+        paths,
+        ["src", "src/util", "src/util/Helper.JAVA", "src/Main.java", "tools", "tools/hello_world.c"],
+        "{list:?}"
+    );
+    assert_eq!(status_of(&list, "src/util/Helper.JAVA"), Status::Same);
+    assert_eq!(status_of(&list, "tools/hello_world.c"), Status::Different);
+    // A pattern with a slash matches the path; a matching folder takes all it holds.
+    let opts = CompareOptions { includes: vec!["src/*.txt".into(), "gen".into()], ..Default::default() };
+    let list = statuses(&l, &r, &opts);
+    let paths: Vec<&str> = list.iter().map(|(p, _)| p.as_str()).collect();
+    assert_eq!(paths, ["gen", "gen/out.txt", "src", "src/readme.txt"], "{list:?}");
+}
