@@ -280,7 +280,13 @@ pub async fn file_history(spec: SourceSpec) -> CmdResult<FileHistory> {
 
 #[tauri::command]
 pub async fn git_refs(repo: String) -> CmdResult<RefList> {
-    blocking(move || GitRepo::discover(&repo).and_then(|r| r.refs(40)).map_err(err)).await
+    blocking(move || {
+        if parallax_core::remote::is_remote(&repo) {
+            return parallax_core::remote::ref_list(&repo).map_err(err);
+        }
+        GitRepo::discover(&repo).and_then(|r| r.refs(40)).map_err(err)
+    })
+    .await
 }
 
 #[derive(Serialize)]

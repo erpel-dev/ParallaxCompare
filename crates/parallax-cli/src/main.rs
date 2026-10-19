@@ -299,8 +299,13 @@ fn compare_files(cli: &Cli, left: &Source, right: &Source, paint: &Paint) -> Res
         }
         return Ok(true);
     }
-    writeln!(out, "{}", paint.wrap("1", &format!("--- {}", left.info.display)))?;
-    writeln!(out, "{}", paint.wrap("1", &format!("+++ {}", right.info.display)))?;
+    // A Git revision is named with the file, so two revisions of one repository differ.
+    let label = |info: &parallax_core::source::SourceInfo| match &info.rev {
+        Some(rev) => format!("{} @ {rev}", info.display),
+        None => info.display.clone(),
+    };
+    writeln!(out, "{}", paint.wrap("1", &format!("--- {}", label(&left.info))))?;
+    writeln!(out, "{}", paint.wrap("1", &format!("+++ {}", label(&right.info))))?;
     // Merge sections whose context overlaps, like `diff -u`.
     let rows = &diff.rows;
     let ctx = cli.context as u32;

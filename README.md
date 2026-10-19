@@ -181,6 +181,10 @@ Keyboard: arrow keys, Enter (open or expand), ←/→ (collapse/expand), F5 (ref
 | `release.7z!/bin` | a folder inside an archive |
 | `repo@main`, `repo@v1.4.0`, `repo@HEAD~3` | a Git revision of the repository at `repo` |
 | `repo@main:src/lib` | a folder (or file) inside a Git revision |
+| `https://github.com/o/r/blob/main/src/lib.rs`, `…/tree/v1.4/src` | a file or folder on GitHub, GitLab (`/-/blob/…`), Bitbucket (`/src/…`), Gitea/Codeberg (`/src/branch/…`), or `raw.githubusercontent.com` |
+| `https://host/o/r.git@v1.4:src`, `git@host:o/r.git@main` | a revision of a remote repository by its clone URL |
+
+Remote repositories are read through the installed `git`, so its credential helpers, SSH keys and proxy settings apply (private repositories work as with `git clone`). Only the commit compared is fetched (`git fetch --depth 1`), into a cache folder (`ParallaxCompare/remotes` in the user's cache folder, or `PARALLAX_CACHE`); a branch is fetched again each time it is opened, a commit id only once. Branch names with `/` in web links are looked up on the remote.
 
 A text that names an existing path is always read as a path, so folders with `@` in their name keep working.
 

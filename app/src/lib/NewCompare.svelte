@@ -151,7 +151,7 @@
     </div>
     <footer>
       <span class="tip">
-        Paths also accept <code>release.7z!/bin</code> and <code>~/src/repo@v1.4:src</code>.
+        Paths also accept <code>release.7z!/bin</code>, <code>~/src/repo@v1.4:src</code> and links to files or folders on GitHub, GitLab, Bitbucket or Gitea.
       </span>
       <button type="submit" class="primary" disabled={!ready}>Compare</button>
     </footer>

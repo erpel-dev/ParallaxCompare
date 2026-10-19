@@ -125,6 +125,10 @@ impl SourceSpec {
         if !text.contains('!') && Path::new(text).exists() {
             return SourceSpec::Local { path: text.to_string() };
         }
+        // A remote repository: `url@rev:path`, or a link to a file or folder on GitHub & co.
+        if let Some(spec) = crate::remote::parse(text) {
+            return spec;
+        }
         if let Some(at) = text.rfind('@') {
             let (repo, rest) = (&text[..at], &text[at + 1..]);
             if !repo.is_empty() && Path::new(repo).is_dir() {
@@ -210,6 +214,9 @@ impl SourceSpec {
     /// tree) and the path inside the repository.
     pub fn git_location(&self) -> Result<GitLocation> {
         match self {
+            SourceSpec::GitRev { repo, .. } if crate::remote::is_remote(repo) => {
+                Err(Error::Unsupported("the history of files in a remote repository is not available".into()))
+            }
             SourceSpec::GitRev { repo, rev, subpath } => Ok(GitLocation {
                 repo: repo.clone(),
                 rev: Some(rev.clone()),
@@ -236,8 +243,18 @@ impl SourceSpec {
         match self {
             SourceSpec::Local { path } => open_local(self, path, opts),
             SourceSpec::GitRev { repo, rev, subpath } => {
-                let git = GitRepo::discover(repo)?;
-                let resolved = git.resolve(rev)?;
+                // A remote repository: the commit is fetched into the cache and read from there.
+                let (git, resolved, repo) = if crate::remote::is_remote(repo) {
+                    let (dir, commit) = crate::remote::fetch(repo, rev)?;
+                    let git = GitRepo::discover(dir.display().to_string())?;
+                    let resolved = git.resolve(&commit)?;
+                    (git, resolved, crate::remote::display(repo))
+                } else {
+                    let git = GitRepo::discover(repo)?;
+                    let resolved = git.resolve(rev)?;
+                    (git, resolved, repo.clone())
+                };
+                let repo = &repo;
                 let short = resolved.commit.as_ref().map(|c| c.short_id.clone());
                 let label = format!("{repo}@{rev}");
                 let tree: Arc<dyn Vfs> = Arc::new(GitTreeFs::new(git, resolved.tree, label));
