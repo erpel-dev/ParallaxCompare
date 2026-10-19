@@ -117,14 +117,14 @@
     if (leftPath && rightPath) submit();
   }
 
-  function submit() {
+  async function submit() {
     if (!ready) return;
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({ left, right, options, mergeBase }));
     } catch {
       // Remembering the last comparison is a convenience only.
     }
-    onCompare(toSpec(left), toSpec(right), { ...options }, bothGit && mergeBase);
+    onCompare(await toSpec(left), await toSpec(right), { ...options }, bothGit && mergeBase);
   }
 </script>
 

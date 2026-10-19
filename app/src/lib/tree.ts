@@ -278,6 +278,55 @@ function likeness(a: string, b: string): number {
   return tail * 1000 + head * 10 - Math.abs(x.length - y.length);
 }
 
+/** Above this many left × right pairs of one name, every pair is not scored. */
+const MAX_CANDIDATES = 20_000;
+
+/**
+ * Matching for names that many files share (`index.ts` in hundreds of folders):
+ * each left file looks only at right files whose folders end the same way (the
+ * last three, two or one folder names), at most 64 of them, instead of scoring
+ * every pair. Files with no such partner stay unmatched.
+ */
+function matchByFolderSuffix(left: string[], right: string[]): [string, string][] {
+  const folders = (p: string) => parent(p).split("/").filter(Boolean);
+  const key = (parts: string[], k: number) => `${k}:${parts.slice(-k).join("/")}`;
+  // Matched files leave their buckets, so later lookups do not step over them.
+  const index = new Map<string, Set<string>>();
+  const bucketsOf = new Map<string, string[]>();
+  for (const r of right) {
+    const parts = folders(r);
+    const keys: string[] = [];
+    for (let k = 1; k <= Math.min(3, parts.length); k++) {
+      const name = key(parts, k);
+      keys.push(name);
+      const bucket = index.get(name);
+      if (bucket) bucket.add(r);
+      else index.set(name, new Set([r]));
+    }
+    bucketsOf.set(r, keys);
+  }
+  const pairs: [string, string][] = [];
+  for (const l of [...left].sort()) {
+    const parts = folders(l);
+    for (let k = Math.min(3, parts.length); k >= 1; k--) {
+      let best: string | null = null;
+      let bestScore = -Infinity;
+      let looked = 0;
+      for (const r of index.get(key(parts, k)) ?? []) {
+        const score = likeness(parent(l), parent(r));
+        if (score > bestScore || (score === bestScore && best !== null && r < best)) [best, bestScore] = [r, score];
+        if (++looked >= 64) break;
+      }
+      if (best !== null) {
+        for (const name of bucketsOf.get(best) ?? []) index.get(name)?.delete(best);
+        pairs.push([l, best]);
+        break;
+      }
+    }
+  }
+  return pairs;
+}
+
 /**
  * Files only on the left matched with files of the same name only on the right,
  * as `[left path, right path]`: files at the same path are matched already, so
@@ -296,6 +345,10 @@ export function movedPairs(root: Node): [string, string][] {
   const pairs: [string, string][] = [];
   for (const { left, right } of byName.values()) {
     if (!left.length || !right.length) continue;
+    if (left.length * right.length > MAX_CANDIDATES) {
+      pairs.push(...matchByFolderSuffix(left, right));
+      continue;
+    }
     const candidates = left.flatMap((l) => right.map((r) => ({ l, r, score: likeness(parent(l), parent(r)) })));
     candidates.sort((a, b) => b.score - a.score || a.l.localeCompare(b.l) || a.r.localeCompare(b.r));
     const used = new Set<string>();

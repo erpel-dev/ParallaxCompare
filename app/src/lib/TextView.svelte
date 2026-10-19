@@ -661,10 +661,12 @@
     const single = (e: string) => e === "LF" || e === "CRLF" || e === "CR";
     const [l, r] = [info.left.lineEnding, info.right.lineEnding];
     if (l === r || (!single(l) && !single(r))) return null;
-    return { left: single(r) && editable[0] ? r : null, right: single(l) && editable[1] ? l : null } as {
-      left: "LF" | "CRLF" | "CR" | null;
-      right: "LF" | "CRLF" | "CR" | null;
-    };
+    // A side without any line break has nothing to convert.
+    const fix = {
+      left: single(r) && l !== "None" && editable[0] ? r : null,
+      right: single(l) && r !== "None" && editable[1] ? l : null,
+    } as { left: "LF" | "CRLF" | "CR" | null; right: "LF" | "CRLF" | "CR" | null };
+    return fix.left || fix.right ? fix : null;
   });
 
   function setLineEndings(side: 0 | 1, ending: "LF" | "CRLF" | "CR") {
@@ -938,6 +940,8 @@
     if (mod && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "f") openFind();
     else if (e.key === "F3" && findOpen) nextHit(e.shiftKey ? -1 : 1);
     else if (mod && e.key.toLowerCase() === "g" && findOpen) nextHit(e.shiftKey ? -1 : 1);
+    // Saving works from anywhere in the tab: the find field, the toolbar, the path bars.
+    else if (mod && !e.altKey && e.key.toLowerCase() === "s" && !e.defaultPrevented) save();
     // F7/F8 also when the focus has left the scroll area (which handles them otherwise), but not in a field.
     else if ((e.key === "F7" || e.key === "F8") && !e.defaultPrevented && !isField(e.target))
       next(e.key === "F8" ? 1 : -1);
@@ -1027,7 +1031,12 @@
   }
 
   /** Splits a line at every syntax-colour, change-mark and match boundary. */
-  function segments(line: LineView, found: Hit[] = []): Segment[] {
+  function segments(line: LineView, hits: Hit[] = []): Segment[] {
+    // Matches count from the start of the line; a long line is shown from `o` on.
+    const o = line.o ?? 0;
+    const found = hits
+      .map((h) => ({ hit: h, start: Math.max(0, h.start - o), end: Math.min(line.t.length, h.end - o) }))
+      .filter((h) => h.start < h.end);
     const cuts = new Set<number>([0, line.t.length]);
     for (const [a, b] of line.s) cuts.add(a).add(b);
     for (const [a, b] of line.m) cuts.add(a).add(b);
@@ -1044,7 +1053,7 @@
         color: span ? "#" + span[2].toString(16).padStart(6, "0") : null,
         mark: line.m.some(([ma, mb]) => ma <= a && b <= mb),
         hit: found.some((h) => h.start <= a && b <= h.end),
-        now: !!currentHit && found.some((h) => h === currentHit && h.start <= a && b <= h.end),
+        now: !!currentHit && found.some((h) => h.hit === currentHit && h.start <= a && b <= h.end),
       });
     }
     return out;

@@ -44,6 +44,11 @@ struct Cli {
     #[arg(long)]
     bytes: bool,
 
+    /// Decompress and compare archive entries with equal CRC32 byte for byte,
+    /// instead of taking the stored CRC32 as proof (slower for large archives)
+    #[arg(long)]
+    verify_archives: bool,
+
     /// Exclude names or paths matching a glob (repeatable); replaces the default .git/.svn/.hg
     #[arg(long, short = 'x', value_name = "GLOB")]
     exclude: Vec<String>,
@@ -147,6 +152,7 @@ fn compare_folders(cli: &Cli, left: &Source, right: &Source, paint: &Paint) -> R
         mode: if cli.quick { CompareMode::Quick } else { CompareMode::Content },
         ignore_line_endings: !cli.strict_eol,
         compare_contents: !cli.bytes,
+        verify_checksums: cli.verify_archives,
         ..Default::default()
     };
     if !cli.exclude.is_empty() {

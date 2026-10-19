@@ -102,7 +102,7 @@ On Linux, where each folder needs its own watch, only the folders the compare sh
 All of the work happens in a multi-threaded Rust core; the UI only renders the rows that are visible.
 
 - **Git vs. Git:** tree ids are compared before anything is read. An unchanged folder costs a single id comparison, however large it is. Changed files are decided by their blob ids, without inflating the objects.
-- **Archives:** zip and 7z entries are listed from the archive headers, so nothing is decompressed for listing. Their stored CRC32 tells differing entries apart without reading them; entries with equal CRC32 and size are decompressed and compared byte for byte, since different data can share a CRC32 (the quick compare by size and date does not read them).
+- **Archives:** zip and 7z entries are compared with the CRC32 stored in the archive headers, so nothing is decompressed for listing or for entries with equal CRC32 and size. Different data has the same CRC32 only by a one-in-four-billion chance or when made to; *Verify archive entries byte for byte* under Options (`--verify-archives` in the CLI) decompresses such entries and compares them. That costs time: two copies of a 69 MB solid 7z with 223 MB of files take 3 s instead of 0.1 s.
 - **Git vs. local file:** the local file's Git blob id is computed and compared, instead of reading the Git object.
 - **Local files:** parallel walking (rayon), files are memory-mapped, and size mismatches short-circuit.
 - **Text views:** rows, intra-line marks and syntax colours are produced only for the visible window. Highlighter state is checkpointed every 128 lines, so jumping to line 900 000 does not re-parse the file from the top.
@@ -196,7 +196,7 @@ $ parallax ~/src/shop@main ~/src/shop@feature/checkout
 
 Files are compared through their content view, so `parallax old.docx new.docx` prints a diff of the document text, and two images report their differing pixels. `--raw` compares the plain bytes as text instead, and `--bytes` turns off the ≈ similar status in folder compares.
 
-`parallax --help` lists all options (`--merge-base`, `--quick`, `--strict-eol`, `-x/--exclude`, `--json`, `--whitespace`, `--histogram`, `-U` …). Exit status: 0 identical or only similar, 1 different, 2 error.
+`parallax --help` lists all options (`--merge-base`, `--quick`, `--strict-eol`, `--verify-archives`, `-x/--exclude`, `--json`, `--whitespace`, `--histogram`, `-U` …). Exit status: 0 identical or only similar, 1 different, 2 error.
 
 ## Building
 

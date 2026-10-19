@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use crate::convert;
 use crate::source::Source;
 use crate::text::is_binary;
-use crate::vfs::{Entry, EntryKind, join};
+use crate::vfs::{Entry, EntryKind, QuickId, join};
 use crate::{Error, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -45,6 +45,12 @@ pub struct CompareOptions {
     /// Documents (PDF, Office, OpenDocument) with equal text and images with equal
     /// pixels count as similar even when their bytes differ.
     pub compare_contents: bool,
+    /// Archive entries with equal CRC32 and size are decompressed and compared byte
+    /// for byte. Off, an equal CRC32 counts as equal content: different data shares
+    /// a CRC32 only by a one-in-four-billion chance or by design, and verifying
+    /// decompresses every equal entry (a large solid 7z takes seconds instead of a
+    /// tenth of one).
+    pub verify_checksums: bool,
 }
 
 impl Default for CompareOptions {
@@ -54,6 +60,7 @@ impl Default for CompareOptions {
             ignore_line_endings: true,
             excludes: vec![".git".into(), ".svn".into(), ".hg".into()],
             compare_contents: true,
+            verify_checksums: false,
         }
     }
 }
@@ -367,6 +374,11 @@ impl<'a> Engine<'a> {
             .collect())
     }
 
+    /// Whether equal ids settle equal content: Git ids always, CRC32 unless verifying.
+    fn trusts(&self, id: &QuickId) -> bool {
+        id.proves_equality() || !self.opts.verify_checksums
+    }
+
     /// `Same`, `Different`, or `Similar` with the reason when the bytes differ but
     /// the active rules consider the content equal.
     fn compare_files(&self, lrel: &str, rrel: &str, l: &Entry, r: &Entry) -> Result<(Status, Option<&'static str>)> {
@@ -388,7 +400,7 @@ impl<'a> Engine<'a> {
         if let (Some(a), Some(b)) = (&l.quick_id, &r.quick_id)
             && let Some(equal) = a.matches(b)
         {
-            if equal && l.size == r.size && a.proves_equality() {
+            if equal && l.size == r.size && self.trusts(a) {
                 return SAME;
             }
             if !equal && !must_read {
@@ -407,7 +419,7 @@ impl<'a> Engine<'a> {
                 let data = read_right()?;
                 if l.size == r.size && id.matches_data(&data) {
                     // A CRC match still needs the bytes compared below.
-                    if id.proves_equality() {
+                    if self.trusts(id) {
                         return SAME;
                     }
                 } else if !must_read {
@@ -419,7 +431,7 @@ impl<'a> Engine<'a> {
                 let data = read_left()?;
                 if l.size == r.size && id.matches_data(&data) {
                     // A CRC match still needs the bytes compared below.
-                    if id.proves_equality() {
+                    if self.trusts(id) {
                         return SAME;
                     }
                 } else if !must_read {

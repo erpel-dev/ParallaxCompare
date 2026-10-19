@@ -8,11 +8,12 @@
     subpath: string;
   }
 
-  export function toSpec(v: PickerValue): import("./api").SourceSpec {
+  /** The source the picker describes; a typed path may use any source syntax (`repo@v1.4`, `~/…`). */
+  export async function toSpec(v: PickerValue): Promise<import("./api").SourceSpec> {
     switch (v.kind) {
       case "folder":
       case "file":
-        return { type: "local", path: v.path.trim() };
+        return (await import("./api")).api.parseSource(v.path.trim());
       case "gitRev":
         return { type: "gitRev", repo: v.path.trim(), rev: v.rev.trim() || "HEAD", subpath: v.subpath.trim() };
       case "gitWorktree":

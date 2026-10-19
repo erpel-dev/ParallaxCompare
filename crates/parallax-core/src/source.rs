@@ -120,7 +120,8 @@ impl Source {
 
 impl SourceSpec {
     pub fn parse(text: &str) -> SourceSpec {
-        let text = text.trim();
+        let text = expand_home(text.trim());
+        let text = text.as_str();
         if !text.contains('!') && Path::new(text).exists() {
             return SourceSpec::Local { path: text.to_string() };
         }
@@ -478,6 +479,19 @@ pub fn open_pair(
     Ok((left, right.open(opts)?))
 }
 
+/// `~` and `~/…` (also `~\…`, and `~@rev` for the home folder at a Git revision)
+/// in the home folder, as a shell would expand them.
+fn expand_home(text: &str) -> String {
+    let rest = match text.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with(['/', '\\', '@']) => rest,
+        _ => return text.to_string(),
+    };
+    match std::env::home_dir() {
+        Some(home) => format!("{}{rest}", home.display()),
+        None => text.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -492,6 +506,18 @@ mod tests {
         );
         assert_eq!(SourceSpec::parse(&repo), SourceSpec::Local { path: repo.clone() });
         assert_eq!(SourceSpec::parse("missing.zip!/bin"), SourceSpec::Local { path: "missing.zip!/bin".into() });
+    }
+
+    #[test]
+    fn parse_home_folder() {
+        let home = std::env::home_dir().unwrap().display().to_string();
+        assert_eq!(SourceSpec::parse("~"), SourceSpec::Local { path: home.clone() });
+        assert_eq!(SourceSpec::parse("~/x/y.zip"), SourceSpec::Local { path: format!("{home}/x/y.zip") });
+        assert_eq!(SourceSpec::parse("~other/x"), SourceSpec::Local { path: "~other/x".into() });
+        assert_eq!(
+            SourceSpec::parse("~@HEAD"),
+            SourceSpec::GitRev { repo: home, rev: "HEAD".into(), subpath: String::new() }
+        );
     }
 
     #[test]

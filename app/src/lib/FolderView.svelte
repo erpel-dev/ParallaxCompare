@@ -111,9 +111,13 @@
       });
   });
 
-  /** Switches the flat view; identical folders not walked yet are loaded first, so their files show. */
-  async function setFlat(on: boolean) {
-    if (on && result) {
+  /**
+   * Loads the identical folders not walked yet (skipped by Git tree id), also those
+   * inside them, so all their files show.
+   */
+  async function loadSkipped() {
+    if (!result) return;
+    for (;;) {
       const pending: string[] = [];
       const walk = (node: Node, dir: string) => {
         for (const c of node.children ?? []) {
@@ -123,6 +127,8 @@
         }
       };
       walk(result.root, "");
+      if (!pending.length) break;
+      let loaded = 0;
       for (const p of pending) {
         busy = `Loading ${p}…`;
         try {
@@ -131,13 +137,21 @@
           if (node) {
             node.children = fresh.children;
             node.unexpanded = false;
+            loaded++;
           }
         } catch (e) {
           error = String(e);
         }
       }
-      busy = "";
+      // Nothing could be loaded: stop rather than ask again.
+      if (!loaded) break;
     }
+    busy = "";
+  }
+
+  /** Switches the flat view; identical folders not walked yet are loaded first, so their files show. */
+  async function setFlat(on: boolean) {
+    if (on) await loadSkipped();
     flat = on;
     version++;
   }
@@ -273,8 +287,9 @@
     version++;
   }
 
-  function setAll(open: boolean) {
+  async function setAll(open: boolean) {
     if (!result) return;
+    if (open) await loadSkipped();
     expanded = open ? new Set(allFolders(result.root)) : new Set();
     version++;
   }
@@ -569,6 +584,7 @@
       options.mode !== d.mode ||
       options.ignoreLineEndings !== d.ignoreLineEndings ||
       options.compareContents !== d.compareContents ||
+      options.verifyChecksums !== d.verifyChecksums ||
       options.excludes.join("\n") !== d.excludes.join("\n")
     );
   });
@@ -747,6 +763,9 @@
       <label><input type="checkbox" bind:checked={options.ignoreLineEndings} onchange={() => run()} /> Ignore CRLF/LF differences</label>
       <label title="Documents (PDF, Word, Excel, PowerPoint, OpenDocument) with the same text and images with the same pixels are marked ≈ instead of ≠">
         <input type="checkbox" bind:checked={options.compareContents} onchange={() => run()} /> Equal content counts as similar (≈)
+      </label>
+      <label title="Zip and 7z entries with the same CRC32 and size are taken as equal without decompressing them. Different data shares a CRC32 only by a one-in-four-billion chance or when made to. Verifying decompresses every such entry, which takes seconds for large solid 7z archives.">
+        <input type="checkbox" bind:checked={options.verifyChecksums} onchange={() => run()} /> Verify archive entries byte for byte
       </label>
       <div class="field">
         <span>Exclude (globs, comma separated)</span>

@@ -642,7 +642,8 @@ pub fn render(view: View, name: &str, data: &[u8]) -> Result<String> {
 /// compare is shown in that view, so ≈ does not open on a page of differences.
 pub fn similar_view(name: &str, left: &[u8], right: &[u8], views: &[View]) -> Option<(View, &'static str)> {
     const MAX: usize = 64 * 1024 * 1024;
-    if left == right || left.len().max(right.len()) > MAX {
+    // The size first: comparing large files byte for byte is what this avoids.
+    if left.len().max(right.len()) > MAX || left == right {
         return None;
     }
     let reason = content_equal(name, left, right)?;

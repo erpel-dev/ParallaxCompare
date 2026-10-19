@@ -908,10 +908,11 @@ fn copying_keeps_the_executable_bit() {
     assert_eq!(mode("tools/script.sh"), 0o755);
 }
 
-/// Two different payloads with the same CRC32 and size: an equal CRC is not taken
-/// as equal content, inside zips and against a plain file.
+/// Two different payloads with the same CRC32 and size: by default the stored CRC32
+/// settles it (fast, without decompressing); verifying compares the bytes, inside
+/// zips and against a plain file.
 #[test]
-fn equal_crc32_is_not_equal_content() {
+fn equal_crc32_with_and_without_verifying() {
     let a: &[u8] = &[0x13, 0x51, 0x7a, 0x08, 0xbf, 0xc8, 0xc2, 0x63];
     let b: &[u8] = &[0x5d, 0xfc, 0xf5, 0x23, 0x46, 0x54, 0x0e, 0xd9];
     assert_eq!(crc32fast::hash(a), crc32fast::hash(b));
@@ -919,17 +920,19 @@ fn equal_crc32_is_not_equal_content() {
     let (left, right) = (dir.path().join("l.zip"), dir.path().join("r.zip"));
     fs::write(&left, zip_raw(&[("payload.bin", a)])).unwrap();
     fs::write(&right, zip_raw(&[("payload.bin", b)])).unwrap();
-    let list = statuses(&left.display().to_string(), &right.display().to_string(), &CompareOptions::default());
-    assert_eq!(status_of(&list, "payload.bin"), Status::Different);
     let folder = dir.path().join("folder");
     fs::create_dir(&folder).unwrap();
     fs::write(folder.join("payload.bin"), b).unwrap();
-    let list = statuses(&left.display().to_string(), &folder.display().to_string(), &CompareOptions::default());
-    assert_eq!(status_of(&list, "payload.bin"), Status::Different);
+    let (left, right, folder) = (left.display().to_string(), right.display().to_string(), folder.display().to_string());
+
+    let trusting = CompareOptions::default();
+    assert_eq!(status_of(&statuses(&left, &right, &trusting), "payload.bin"), Status::Same);
+
+    let verifying = CompareOptions { verify_checksums: true, ..Default::default() };
+    assert_eq!(status_of(&statuses(&left, &right, &verifying), "payload.bin"), Status::Different);
+    assert_eq!(status_of(&statuses(&left, &folder, &verifying), "payload.bin"), Status::Different);
     // Equal data with an equal CRC is still the same.
-    fs::write(folder.join("payload.bin"), a).unwrap();
-    let list = statuses(&left.display().to_string(), &folder.display().to_string(), &CompareOptions::default());
-    assert_eq!(status_of(&list, "payload.bin"), Status::Same);
+    assert_eq!(status_of(&statuses(&right, &folder, &verifying), "payload.bin"), Status::Same);
 }
 
 #[cfg(unix)]

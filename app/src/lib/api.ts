@@ -94,6 +94,8 @@ export interface CompareOptions {
   ignoreLineEndings: boolean;
   excludes: string[];
   compareContents: boolean;
+  /** Archive entries with equal CRC32 are decompressed and compared byte for byte. */
+  verifyChecksums: boolean;
 }
 
 export interface DiffOptions {
@@ -322,6 +324,7 @@ export const defaultCompareOptions = (): CompareOptions => ({
   ignoreLineEndings: true,
   excludes: [".git", ".svn", ".hg"],
   compareContents: true,
+  verifyChecksums: false,
 });
 
 export const defaultDiffOptions = (): DiffOptions => ({ whitespace: "exact", ignoreCase: false, histogram: false });

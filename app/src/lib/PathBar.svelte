@@ -265,7 +265,7 @@
   async function submitPicker(e: SubmitEvent) {
     e.preventDefault();
     if (!picker.path.trim()) return;
-    if (await apply(toSpec(picker))) picking = false;
+    if (await apply(await toSpec(picker))) picking = false;
   }
 </script>
 

@@ -761,6 +761,9 @@ fn invisible_difference(left: &TextDoc, right: &TextDoc, l: &[u8], r: &[u8], min
     }
 }
 
+/// Above this size, files shown in a summary view are not compared byte for byte.
+const FULL_COMPARE_LIMIT: usize = 64 << 20;
+
 #[tauri::command]
 pub async fn open_file_diff(
     state: State<'_, AppState>,
@@ -774,7 +777,6 @@ pub async fn open_file_diff(
     let (info, file_diff) = blocking(move || {
         let (mut left_info, left_data) = load_side(&session.left, &path)?;
         let (mut right_info, right_data) = load_side(&session.right, &path)?;
-        let identical = left_data.is_some() && left_data.as_deref() == right_data.as_deref();
         // The name to pick views and grammars from: the compared path, or the root file name.
         let name = if path.is_empty() {
             let root = if session.left.root.is_empty() { &session.right.root } else { &session.left.root };
@@ -787,6 +789,12 @@ pub async fn open_file_diff(
             right_data.as_deref().map(|d| (name.as_str(), d)),
         );
         let mut chosen = view.filter(|v| views.contains(v)).unwrap_or(views[0]);
+        // Summary views of large files (models, media) read only headers: comparing all
+        // bytes would read gigabytes of weights just to say whether the files are equal.
+        let unread = matches!((&left_data, &right_data), (Some(l), Some(r)) if l.len() == r.len())
+            && left_data.as_deref().map_or(0, <[u8]>::len) > FULL_COMPARE_LIMIT
+            && !matches!(chosen, View::Text | View::Hex | View::Image);
+        let identical = !unread && left_data.is_some() && left_data.as_deref() == right_data.as_deref();
         let mut note = None;
         // ≈ similar files open in the view where they are equal, and say why.
         if view.is_none()
@@ -847,7 +855,9 @@ pub async fn open_file_diff(
                 let r = render(&right_data, chosen);
                 (l.join().unwrap_or(None), r)
             });
-            if let Some(Err(e)) = left_text.as_ref().or(right_text.as_ref()).filter(|r| r.is_err()) {
+            // Either side failing falls back, whichever it is.
+            let failed = [&left_text, &right_text].into_iter().flatten().find_map(|r| r.as_ref().err()).cloned();
+            if let Some(e) = failed {
                 let fallback = if left_info.binary || right_info.binary { View::Hex } else { View::Text };
                 note = Some(format!("{} is not available: {e}. Showing {}.", chosen.label(), fallback.label()));
                 chosen = fallback;
@@ -935,6 +945,13 @@ pub async fn open_file_diff(
             View::Image => None,
             _ => Some(highlight::view_syntax().name.clone()),
         };
+        if note.is_none() && unread && diff.sections.is_empty() && !matches!(chosen, View::Text | View::Hex) {
+            note = Some(format!(
+                "“{}” shows no difference. The files are over {} MB, so their contents were not compared byte for byte; “Hex” compares them.",
+                chosen.label(),
+                FULL_COMPARE_LIMIT >> 20
+            ));
+        }
         if note.is_none()
             && !identical
             && diff.sections.is_empty()
