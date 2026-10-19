@@ -367,8 +367,26 @@ pub fn soffice() -> Option<&'static PathBuf> {
         .as_ref()
 }
 
-/// Converts .doc/.xls/.ppt to their OOXML counterpart with LibreOffice, then extracts text.
+/// Reads the text of a file in one format.
+type TextReader = fn(&[u8]) -> Result<String>;
+
+/// Extracts text from .doc/.xls/.ppt: with a native reader where there is one, otherwise
+/// (or when that reader fails and LibreOffice is installed) through LibreOffice.
 pub fn legacy_text(ext: &str, data: &[u8]) -> Result<String> {
+    let native: Option<TextReader> = match ext {
+        "xls" | "xlt" => Some(super::xls::text),
+        "ppt" | "pot" | "pps" => Some(super::ppt::text),
+        _ => None,
+    };
+    match native.map(|read| read(data)) {
+        Some(Ok(text)) => Ok(text),
+        Some(Err(e)) if soffice().is_none() => Err(e),
+        _ => libreoffice_text(ext, data),
+    }
+}
+
+/// Converts .doc/.xls/.ppt to their OOXML counterpart with LibreOffice, then extracts text.
+fn libreoffice_text(ext: &str, data: &[u8]) -> Result<String> {
     let target = match ext.chars().next() {
         Some('d') => "docx",
         Some('x') => "xlsx",
@@ -473,6 +491,20 @@ mod tests {
             "=== Sheet: S ===\n-1.5\tTRUE\tFALSE\n"
         );
         assert_eq!(text(r#"<c r="A1"><f>B1+1</f><v>4</v></c>"#), "=== Sheet: S ===\n4 {=B1+1}\n");
+    }
+
+    #[test]
+    fn legacy_without_libreoffice() {
+        let fixture = |f: &str| {
+            std::fs::read(format!("{}/tests/fixtures/legacy-office/{f}", env!("CARGO_MANIFEST_DIR"))).unwrap()
+        };
+        let ppt = legacy_text("pps", &fixture("ppt-deck.ppt")).unwrap();
+        assert!(ppt.starts_with("=== Slide 1 ===\nQuarterly Review\n"), "{ppt}");
+        let xls = legacy_text("xls", &fixture("xls-workbook.xls")).unwrap();
+        assert!(xls.starts_with("=== Sheet: Parts ===\n"), "{xls}");
+        if soffice().is_none() {
+            assert!(legacy_text("xls", b"\xD0\xCF\x11\xE0 damaged").is_err());
+        }
     }
 
     #[test]

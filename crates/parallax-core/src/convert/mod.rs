@@ -34,6 +34,7 @@ mod office;
 mod onnx;
 mod parquet;
 mod perl;
+mod ppt;
 mod pretty;
 mod python;
 mod rst;
@@ -43,6 +44,7 @@ mod sqlite;
 mod table;
 mod visio;
 mod wasm;
+mod xls;
 mod xpand;
 
 use serde::{Deserialize, Serialize};
