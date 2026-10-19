@@ -483,7 +483,8 @@
     return row && (side === 0 ? row.l : row.r);
   }
 
-  function openEditor(side: 0 | 1, index: number, col?: number) {
+  /** Opens the line editor with the caret at `col` (the end without), typing `insert` there. */
+  function openEditor(side: 0 | 1, index: number, col?: number, insert = "") {
     const row = cache.get(index);
     if (!row || !editable[side]) return;
     const line = lineOf(side, row);
@@ -495,7 +496,11 @@
     selected = index;
     editing = { side, row: index, line: line ? line.n : null };
     draft = original = line?.t ?? "";
-    const at = Math.min(col ?? draft.length, draft.length);
+    let at = Math.min(col ?? draft.length, draft.length);
+    if (insert) {
+      draft = draft.slice(0, at) + insert + draft.slice(at);
+      at += insert.length;
+    }
     tick().then(() => {
       input?.focus();
       input?.setSelectionRange(at, at);
@@ -514,9 +519,28 @@
     return range.toString().length;
   }
 
-  function startEdit(e: MouseEvent, side: 0 | 1, index: number) {
-    if (!editable[side]) return;
-    openEditor(side, index, columnAt(e, e.currentTarget as HTMLElement));
+  /** A click in an editable line puts the caret there, as in an editor. Shift+click
+   *  selects lines, and a click after selecting text with the mouse keeps the selection. */
+  function clickCode(e: MouseEvent, side: 0 | 1, index: number) {
+    activeSide = side;
+    if (!editable[side] || e.shiftKey || e.ctrlKey || e.metaKey || textSelected()) return;
+    // The row's own click would take the focus back to the view.
+    e.stopPropagation();
+    anchor = null;
+    const col = columnAt(e, e.currentTarget as HTMLElement);
+    const line = lineOf(side, cache.get(index));
+    if (editing && draft !== original && line) {
+      // The line being edited is sent first, which can move rows; the caret then
+      // goes to the clicked line by its number.
+      const want = { side, line: line.n, col: col ?? END, hint: index };
+      commit(draft, null, () => {
+        caretWanted = want;
+        placeCaret();
+      });
+      return;
+    }
+    editing = null;
+    openEditor(side, index, col);
   }
 
   /** Sends the typed line; `text` may hold line breaks, `caret` where typing goes on. */
@@ -547,20 +571,16 @@
     if (e.key === "Enter") {
       commit(draft.slice(0, a) + "\n" + draft.slice(b), a + 1);
     } else if (e.key === "Escape") {
-      editing = null;
+      // Leaves the line; what was typed stays.
+      commit(draft, null);
       viewport?.focus();
-    } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
-      const target = ed.line === null ? null : ed.line + (e.key === "ArrowUp" ? -1 : 1);
-      const col = a;
-      const sideLines = ed.side === 0 ? info.left.lines : info.right.lines;
-      if (target === null || target < 0 || target >= sideLines) return;
-      const move = (hint: number) => {
-        caretWanted = { side: ed.side, line: target, col, hint: hint + (e.key === "ArrowUp" ? -1 : 1) };
-        editing = null;
-        placeCaret();
-      };
-      if (draft === original) move(ed.row);
-      else commit(draft, col, (r) => r?.caret && move(r.caret.row));
+    } else if ((e.key === "ArrowUp" || e.key === "ArrowDown") && !e.shiftKey && !mod) {
+      if (!toLine(ed, e.key === "ArrowUp" ? -1 : 1, a)) return;
+    } else if (e.key === "ArrowLeft" && a === 0 && b === 0 && !e.shiftKey && !mod) {
+      // Past the start of the line: the end of the one above.
+      if (!toLine(ed, -1, END)) return;
+    } else if (e.key === "ArrowRight" && a === draft.length && b === a && !e.shiftKey && !mod) {
+      if (!toLine(ed, 1, 0)) return;
     } else if (e.key === "Backspace" && a === 0 && b === 0 && ed.line !== null && ed.line > 0) {
       // Joins the line to the one above.
       const line = ed.line;
@@ -594,6 +614,22 @@
     }
     e.preventDefault();
     e.stopPropagation();
+  }
+
+  /** Moves the editor to the line above (`-1`) or below, caret at `col`; false at the edge. */
+  function toLine(ed: NonNullable<typeof editing>, dir: -1 | 1, col: number): boolean {
+    if (!info) return false;
+    const target = ed.line === null ? null : ed.line + dir;
+    const sideLines = ed.side === 0 ? info.left.lines : info.right.lines;
+    if (target === null || target < 0 || target >= sideLines) return false;
+    const move = (hint: number) => {
+      caretWanted = { side: ed.side, line: target, col, hint: hint + dir };
+      editing = null;
+      placeCaret();
+    };
+    if (draft === original) move(ed.row);
+    else commit(draft, Math.min(col, draft.length), (r) => r?.caret && move(r.caret.row));
+    return true;
   }
 
   function onPaste(e: ClipboardEvent) {
@@ -966,8 +1002,21 @@
     // Keys typed into the line editor.
     if (e.target instanceof HTMLInputElement) return;
     const mod = e.ctrlKey || e.metaKey;
-    if (e.key === "F8" || (e.altKey && e.key === "ArrowDown") || e.key === "n") next(1);
-    else if (e.key === "F7" || (e.altKey && e.key === "ArrowUp") || e.key === "p") next(-1);
+    // Typing on a selected line of an editable side edits it, from its end.
+    if (e.key.length === 1 && !mod && !e.altKey && selected !== null && editable[activeSide]) {
+      e.preventDefault();
+      openEditor(activeSide, selected, undefined, e.key);
+      return;
+    }
+    // n and p are shortcuts only where typing does not edit.
+    const letters = !editable[activeSide];
+    if (e.key === "F8" || (e.altKey && e.key === "ArrowDown") || (letters && e.key === "n")) next(1);
+    else if (e.key === "F7" || (e.altKey && e.key === "ArrowUp") || (letters && e.key === "p")) next(-1);
+    // Space does not scroll the view.
+    else if (e.key === " ") {
+      e.preventDefault();
+      return;
+    }
     else if (e.altKey && e.key === "ArrowRight") copySection(currentSection, 1);
     else if (e.altKey && e.key === "ArrowLeft") copySection(currentSection, 0);
     else if (mod && e.key === "z" && !e.shiftKey) undo();
@@ -1278,18 +1327,20 @@
                       bind:value={draft}
                       onkeydown={editKey}
                       onpaste={onPaste}
-                      onblur={() => commit(draft, null)}
+                      onblur={() => editing?.row === index && editing.side === s && commit(draft, null)}
                       spellcheck="false"
                     />
                   </div>
                 {:else if line}
-                  <div class="ln">{line.n + 1}</div>
                   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                  <div class="code" class:editable={editable[s]} class:sel={anchor !== null && s === activeSide && lineRange && index >= lineRange[0] && index < lineRange[1]} onclick={() => (activeSide = s)} ondblclick={(e) => startEdit(e, s, index)}><span class="text" style:transform="translateX({-hscroll}px)">{#if line.o}<span class="cut lead" title="The start of the line is left out, so its first change shows">{line.o.toLocaleString()} characters …</span>{/if}{#each segments(line, hitsAt.get(index * 2 + s)) as seg, si (si)}<span class:mk={seg.mark} class:hit={seg.hit} class:now={seg.now} style:color={seg.now ? null : seg.color}>{seg.text}</span>{/each}</span>{#if line.nn}<span class="cut" title="The other file ends with a line break">no line break at end</span>{/if}{#if line.x}<span class="cut" title="The line is cut for display">… {line.x.toLocaleString()} more characters</span>{/if}</div>
+                  <div class="ln" onclick={() => (activeSide = s)}>{line.n + 1}</div>
+                  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+                  <div class="code" class:editable={editable[s]} class:sel={anchor !== null && s === activeSide && lineRange && index >= lineRange[0] && index < lineRange[1]} onclick={(e) => clickCode(e, s, index)}><span class="text" style:transform="translateX({-hscroll}px)">{#if line.o}<span class="cut lead" title="The start of the line is left out, so its first change shows">{line.o.toLocaleString()} characters …</span>{/if}{#each segments(line, hitsAt.get(index * 2 + s)) as seg, si (si)}<span class:mk={seg.mark} class:hit={seg.hit} class:now={seg.now} style:color={seg.now ? null : seg.color}>{seg.text}</span>{/each}</span>{#if line.nn}<span class="cut" title="The other file ends with a line break">no line break at end</span>{/if}{#if line.x}<span class="cut" title="The line is cut for display">… {line.x.toLocaleString()} more characters</span>{/if}</div>
                 {:else if row}
-                  <div class="ln fill"></div>
                   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                  <div class="code fill" class:sel={anchor !== null && s === activeSide && lineRange && index >= lineRange[0] && index < lineRange[1]} onclick={() => (activeSide = s)} ondblclick={(e) => startEdit(e, s, index)}></div>
+                  <div class="ln fill" onclick={() => (activeSide = s)}></div>
+                  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+                  <div class="code fill" class:sel={anchor !== null && s === activeSide && lineRange && index >= lineRange[0] && index < lineRange[1]} onclick={(e) => clickCode(e, s, index)}></div>
                 {:else}
                   <div class="ln"></div>
                   <div class="code"></div>
@@ -1326,7 +1377,7 @@
       {#if selected !== null}<span>Row {selected + 1} of {total}</span>{/if}
       <span>{info.view === "text" ? (info.syntax ?? "Plain text") : info.views.find((v) => v.id === info?.view)?.label}</span>
       {#if busy}<span>{busy}</span>{/if}
-      <span class="hint">{editable[0] || editable[1] ? "Double-click to edit · Shift+click/↑↓ select lines · Ctrl+C/X/V, Delete · Alt+←/→: copy difference · " : ""}F7 / F8: previous / next difference · Ctrl+F: find</span>
+      <span class="hint">{editable[0] || editable[1] ? "Click to edit · Shift+click or the line number selects lines · Ctrl+C/X/V, Delete · Alt+←/→: copy difference · " : ""}F7 / F8: previous / next difference · Ctrl+F: find</span>
     {/if}
   </div>
 </div>
