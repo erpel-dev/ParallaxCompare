@@ -184,10 +184,11 @@ pub async fn inspect_path(path: String) -> CmdResult<PathInfo> {
     .await
 }
 
-/// Reads a path typed into a path bar: `repo@rev:sub` is a Git revision.
+/// Reads a path typed into a path bar: `repo@rev:sub` is a Git revision. A web
+/// link may ask the server for its branch names, so this runs off the main thread.
 #[tauri::command]
-pub fn parse_source(text: String) -> SourceSpec {
-    SourceSpec::parse(&text)
+pub async fn parse_source(text: String) -> CmdResult<SourceSpec> {
+    blocking(move || Ok(SourceSpec::parse(&text))).await
 }
 
 /// The source of the entry at `rel` on one side of a comparison, so a file opened
@@ -525,9 +526,10 @@ pub async fn copy_entries(
     options: CompareOptions,
 ) -> CmdResult<OpResult> {
     let session = state.session(id)?;
+    let filter = compare::Filter::new(&options).map_err(err)?;
     run_op(app, id, session, paths, options, move |s, paths, progress| {
         let (from, to) = if to_right { (&s.left, &s.right) } else { (&s.right, &s.left) };
-        parallax_core::ops::copy(from, to, paths, progress).map(|_| Vec::new())
+        parallax_core::ops::copy(from, to, paths, &filter, progress).map(|_| Vec::new())
     })
     .await
 }
@@ -851,15 +853,20 @@ pub async fn open_file_diff(
 
         // Converted text for both sides; LibreOffice conversions take seconds, so the
         // two sides run at the same time.
+        // A converter that panics on damaged input fails like one that returns an error,
+        // on either side, and falls back below.
         let render = |data: &Option<Data>, view: View| -> Option<Result<String, String>> {
-            data.as_ref().map(|d| convert::render(view, &name, d).map_err(err))
+            data.as_ref().map(|d| {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| convert::render(view, &name, d).map_err(err)))
+                    .unwrap_or_else(|_| Err("the file could not be read (internal error)".into()))
+            })
         };
         let (mut left_text, mut right_text) = (None, None);
         if !matches!(chosen, View::Image | View::Text) {
             (left_text, right_text) = std::thread::scope(|s| {
                 let l = s.spawn(|| render(&left_data, chosen));
                 let r = render(&right_data, chosen);
-                (l.join().unwrap_or(None), r)
+                (l.join().unwrap_or_else(|_| Some(Err("the file could not be read (internal error)".into()))), r)
             });
             // Either side failing falls back, whichever it is.
             let failed = [&left_text, &right_text].into_iter().flatten().find_map(|r| r.as_ref().err()).cloned();
@@ -1423,11 +1430,16 @@ pub async fn save_side(app: AppHandle, state: State<'_, AppState>, id: u64, side
             convert::write_back(fd.view, original, &fd.edit.doc(side).text, other)
                 .map_err(|e| format!("Cannot save: {e}."))?
         };
-        let written = Data::from_vec(bytes);
         let source = fd.source(side);
+        // A symlink shows its target path, and saving it changes the target; it stays a link.
+        let kind = match source.stat(&fd.path) {
+            Ok(e) if e.kind == EntryKind::Symlink => EntryKind::Symlink,
+            _ => EntryKind::File,
+        };
+        let bytes = if kind == EntryKind::Symlink { link_target(bytes)? } else { bytes };
+        let written = Data::from_vec(bytes);
         let _guard = fd.session.writing(std::slice::from_ref(&fd.path));
-        let change =
-            Change::Put { path: source.path(&fd.path), kind: EntryKind::File, data: written.clone(), mtime: None };
+        let change = Change::Put { path: source.path(&fd.path), kind, data: written.clone(), mtime: None };
         source.vfs.apply(vec![change], &Progress::default()).map_err(err)?;
         if fd.data[side as usize].is_some() {
             fd.data[side as usize] = Some(written);
@@ -1444,6 +1456,17 @@ pub async fn save_side(app: AppHandle, state: State<'_, AppState>, id: u64, side
         let _ = app.emit("paths-changed", changed);
     }
     Ok(info)
+}
+
+/// The edited target path of a symlink: one line, without the line break an editor adds.
+fn link_target(mut bytes: Vec<u8>) -> Result<Vec<u8>, String> {
+    while bytes.last().is_some_and(|b| matches!(b, b'\n' | b'\r')) {
+        bytes.pop();
+    }
+    if bytes.is_empty() || bytes.iter().any(|&b| b == 0 || b == b'\n' || b == b'\r') {
+        return Err("Cannot save: a symlink target is one line of text.".into());
+    }
+    Ok(bytes)
 }
 
 /// Paths of a comparison that changed on disk or were saved from a file tab.

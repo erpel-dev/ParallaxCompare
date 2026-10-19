@@ -83,14 +83,15 @@ pub struct Tensor {
 }
 
 impl Tensor {
+    /// The number of elements; parsing checked that it fits.
     pub fn elements(&self) -> u64 {
-        self.dims.iter().product()
+        self.dims.iter().try_fold(1u64, |a, &d| a.checked_mul(d)).unwrap_or(u64::MAX)
     }
 
     /// Bytes of the tensor's data, when its type is known.
     pub fn bytes(&self) -> Option<u64> {
         let t = ggml_type(self.ggml_type)?;
-        Some(self.elements() / t.block * t.size)
+        (self.elements() / t.block).checked_mul(t.size)
     }
 }
 
@@ -307,7 +308,13 @@ impl Gguf {
             let dims = (0..n_dims).map(|_| r.u64()).collect::<Result<Vec<_>>>()?;
             let ggml_type = r.u32()?;
             let offset = r.u64()?;
-            tensors.push(Tensor { name, dims, ggml_type, offset });
+            let tensor = Tensor { name, dims, ggml_type, offset };
+            let fits = tensor.dims.iter().try_fold(1u64, |a, &d| a.checked_mul(d)).is_some()
+                && (self::ggml_type(ggml_type).is_none() || tensor.bytes().is_some());
+            if !fits {
+                return Err(Error::Unsupported(format!("tensor {}: its dimensions are too large", tensor.name)));
+            }
+            tensors.push(tensor);
         }
         let alignment = metadata
             .iter()
@@ -336,11 +343,11 @@ impl Gguf {
     }
 
     pub fn parameters(&self) -> u64 {
-        self.tensors.iter().map(Tensor::elements).sum()
+        self.tensors.iter().map(Tensor::elements).fold(0, u64::saturating_add)
     }
 
     fn tensor_bytes(&self) -> u64 {
-        self.tensors.iter().filter_map(Tensor::bytes).sum()
+        self.tensors.iter().filter_map(Tensor::bytes).fold(0, u64::saturating_add)
     }
 
     /// The text of token `id`.
@@ -368,7 +375,14 @@ impl Gguf {
     /// Whether the header ends inside the file: a split part or a cut-off download
     /// does not hold all of its tensor data.
     fn is_complete(&self) -> bool {
-        self.tensors.iter().all(|t| t.bytes().is_none_or(|b| self.data_offset + t.offset + b <= self.file_size))
+        self.tensors.iter().all(|t| {
+            t.bytes().is_none_or(|b| {
+                self.data_offset
+                    .checked_add(t.offset)
+                    .and_then(|o| o.checked_add(b))
+                    .is_some_and(|end| end <= self.file_size)
+            })
+        })
     }
 }
 
@@ -658,8 +672,8 @@ fn recipe(g: &Gguf, out: &mut String) {
     for t in &g.tensors {
         let e = by_type.entry(t.ggml_type).or_default();
         e.0 += 1;
-        e.1 += t.elements();
-        e.2 += t.bytes().unwrap_or(0);
+        e.1 = e.1.saturating_add(t.elements());
+        e.2 = e.2.saturating_add(t.bytes().unwrap_or(0));
     }
     let total: u64 = by_type.values().map(|v| v.2).sum::<u64>().max(1);
     let mut rows: Vec<_> = by_type.into_iter().collect();
@@ -991,5 +1005,19 @@ pub(crate) mod tests {
         let mut huge = data.clone();
         huge[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
         assert!(Gguf::parse(&huge).is_err());
+        // One tensor of 2^63 × 4 elements: an error, not an overflow.
+        let mut b = b"GGUF".to_vec();
+        for n in [3u32.to_le_bytes().to_vec(), 1u64.to_le_bytes().to_vec(), 0u64.to_le_bytes().to_vec()] {
+            b.extend(n);
+        }
+        b.extend(1u64.to_le_bytes());
+        b.push(b'x');
+        b.extend(2u32.to_le_bytes());
+        b.extend((1u64 << 63).to_le_bytes());
+        b.extend(4u64.to_le_bytes());
+        b.extend(0u32.to_le_bytes());
+        b.extend(0u64.to_le_bytes());
+        b.resize(b.len().div_ceil(32) * 32, 0);
+        assert!(Gguf::parse(&b).err().unwrap().to_string().contains("too large"));
     }
 }

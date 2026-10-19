@@ -5,8 +5,10 @@
 //! The **Diagram** view lists every page with its shapes: name, master, text,
 //! position and size, colours set on the shape, shape data, nested shapes of
 //! groups, embedded images, and which shapes each connector joins. Each property
-//! is a line of its own, so a diff shows what changed. **Document text** keeps the
-//! text alone.
+//! is a line of its own, so a diff shows what changed: also the outline of each
+//! shape and, as a checksum, its other settings. The masters follow the pages,
+//! and a shape without text of its own shows its master's. **Document text**
+//! keeps the text alone.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
@@ -20,6 +22,13 @@ use crate::{Error, Result};
 pub const XML_EXTENSIONS: [&str; 6] = ["vsdx", "vsdm", "vstx", "vstm", "vssx", "vssm"];
 /// Extensions of the binary formats (Visio 2010 and older).
 pub const BINARY_EXTENSIONS: [&str; 3] = ["vsd", "vss", "vst"];
+
+#[derive(Default)]
+struct Drawing {
+    pages: Vec<Page>,
+    /// The masters (from the stencils) with their shapes, shown after the pages.
+    masters: Vec<(String, Vec<Shape>)>,
+}
 
 #[derive(Default)]
 struct Page {
@@ -43,6 +52,16 @@ struct Shape {
     /// Shape data (label, value) and user-defined cells.
     data: Vec<(String, String)>,
     image: Option<String>,
+    /// The outline, one entry per geometry section: `MoveTo 0, 0; LineTo 1, 0`.
+    geometry: Vec<String>,
+    /// A checksum of the cells and sections not shown otherwise (text format,
+    /// line ends, protection …), so that a change to them is still a difference.
+    other: Option<u32>,
+    /// The master's id, and for a shape inside a group the master shape it is from.
+    master_id: Option<String>,
+    master_shape: Option<String>,
+    /// The text comes from the master, the shape has none of its own.
+    inherited_text: bool,
     /// For connectors: the ids of the shapes at the begin and the end.
     begin: Option<String>,
     end: Option<String>,
@@ -51,21 +70,21 @@ struct Shape {
 
 /// The Diagram view of a .vsdx (or .vsdm, .vstx, .vssx …) file.
 pub fn diagram(data: &[u8]) -> Result<String> {
-    Ok(render_pages(&read_vsdx(data)?, true))
+    Ok(render(&read_vsdx(data)?, true))
 }
 
 /// The text of the shapes, page by page.
 pub fn diagram_text(data: &[u8]) -> Result<String> {
-    Ok(render_pages(&read_vsdx(data)?, false))
+    Ok(render(&read_vsdx(data)?, false))
 }
 
 /// The Diagram view of a binary .vsd (or .vss, .vst) file, through LibreOffice.
 pub fn legacy_diagram(ext: &str, data: &[u8]) -> Result<String> {
-    Ok(render_pages(&read_odg(&converted(ext, data)?)?, true))
+    Ok(render(&Drawing { pages: read_odg(&converted(ext, data)?)?, masters: Vec::new() }, true))
 }
 
 pub fn legacy_text(ext: &str, data: &[u8]) -> Result<String> {
-    Ok(render_pages(&read_odg(&converted(ext, data)?)?, false))
+    Ok(render(&Drawing { pages: read_odg(&converted(ext, data)?)?, masters: Vec::new() }, false))
 }
 
 /// The file converted to an OpenDocument drawing. A conversion takes seconds, and
@@ -89,9 +108,8 @@ fn converted(ext: &str, data: &[u8]) -> Result<Vec<u8>> {
 
 // ---- .vsdx ----
 
-fn read_vsdx(data: &[u8]) -> Result<Vec<Page>> {
+fn read_vsdx(data: &[u8]) -> Result<Drawing> {
     let mut zip = Zip::open(data)?;
-    let masters = read_masters(&mut zip)?;
     let rels = |zip: &mut Zip, part: &str| -> HashMap<String, String> {
         let (dir, file) = part.rsplit_once('/').unwrap_or(("", part));
         let mut out = HashMap::new();
@@ -106,6 +124,18 @@ fn read_vsdx(data: &[u8]) -> Result<Vec<Page>> {
         }
         out
     };
+    let master_rels = rels(&mut zip, "visio/masters/masters.xml");
+    let mut masters = read_masters(&mut zip, &master_rels)?;
+    let names: HashMap<String, String> = masters.iter().map(|(id, m)| (id.clone(), m.name.clone())).collect();
+    for master in masters.values_mut() {
+        if let Some(part) = master.part.clone()
+            && let Some(xml) = zip.read(&part)
+        {
+            let media = rels(&mut zip, &part);
+            let mut images = |target: &str| zip_media(&mut zip, target);
+            master.shapes = read_page(&xml, &names, &media, &mut images)?;
+        }
+    }
     let index =
         zip.read("visio/pages/pages.xml").ok_or_else(|| Error::Unsupported("no pages in this Visio file".into()))?;
     let page_rels = rels(&mut zip, "visio/pages/pages.xml");
@@ -149,11 +179,44 @@ fn read_vsdx(data: &[u8]) -> Result<Vec<Page>> {
         {
             let media = rels(&mut zip, &part);
             let mut images = |target: &str| zip_media(&mut zip, target);
-            page.shapes = read_page(&xml, &masters, &media, &mut images)?;
+            page.shapes = read_page(&xml, &names, &media, &mut images)?;
+            for shape in &mut page.shapes {
+                inherit(shape, None, &masters);
+            }
         }
         out.push(page);
     }
-    Ok(out)
+    let mut masters: Vec<Master> = masters.into_values().collect();
+    masters.sort_by_key(|m| (m.id.parse::<u64>().unwrap_or(u64::MAX), m.id.clone()));
+    let masters = masters.into_iter().map(|m| (m.name, m.shapes)).collect();
+    Ok(Drawing { pages: out, masters })
+}
+
+/// Gives shapes without text of their own the text of their master shape: the
+/// master's (first) shape for a shape placed from a stencil, and the master shape
+/// it names for a shape inside such a group.
+fn inherit(shape: &mut Shape, group_master: Option<&str>, masters: &HashMap<String, Master>) {
+    let master = shape.master_id.as_deref().or(group_master);
+    if shape.text.is_empty()
+        && let Some(m) = master.and_then(|id| masters.get(id))
+    {
+        let source = match &shape.master_shape {
+            Some(id) => find_ref(&m.shapes, id),
+            None if shape.master_id.is_some() => m.shapes.first(),
+            None => None,
+        };
+        if let Some(source) = source.filter(|s| !s.text.is_empty()) {
+            shape.text = source.text.clone();
+            shape.inherited_text = true;
+        }
+    }
+    for child in &mut shape.children {
+        inherit(child, master, masters);
+    }
+}
+
+fn find_ref<'a>(shapes: &'a [Shape], id: &str) -> Option<&'a Shape> {
+    shapes.iter().find_map(|s| if s.id == id { Some(s) } else { find_ref(&s.children, id) })
 }
 
 /// `../media/image1.png` relative to `visio/pages` is `visio/media/image1.png`.
@@ -180,16 +243,35 @@ fn zip_media(zip: &mut Zip, part: &str) -> Option<String> {
     Some(format!("{name}, {} bytes, crc {:08x}", data.len(), crc32fast::hash(&data)))
 }
 
-fn read_masters(zip: &mut Zip) -> Result<HashMap<String, String>> {
+struct Master {
+    id: String,
+    name: String,
+    /// The part with the master's shapes.
+    part: Option<String>,
+    shapes: Vec<Shape>,
+}
+
+fn read_masters(zip: &mut Zip, rels: &HashMap<String, String>) -> Result<HashMap<String, Master>> {
     let mut masters = HashMap::new();
+    let mut current: Option<String> = None;
     if let Some(xml) = zip.read("visio/masters/masters.xml") {
-        walk_xml(&xml, |ev| {
-            if let Ev::Start("Master", e) = ev
-                && let Some(id) = attr(e, "ID")
-            {
-                let name = attr(e, "Name").or_else(|| attr(e, "NameU")).unwrap_or_else(|| format!("#{id}"));
-                masters.insert(id, name);
+        walk_xml(&xml, |ev| match ev {
+            Ev::Start("Master", e) => {
+                current = attr(e, "ID");
+                if let Some(id) = &current {
+                    let name = attr(e, "Name").or_else(|| attr(e, "NameU")).unwrap_or_else(|| format!("#{id}"));
+                    masters.insert(id.clone(), Master { id: id.clone(), name, part: None, shapes: Vec::new() });
+                }
             }
+            Ev::Start("Rel", e) => {
+                if let (Some(id), Some(rel)) = (&current, attr(e, "id"))
+                    && let Some(master) = masters.get_mut(id)
+                {
+                    master.part = rels.get(&rel).cloned();
+                }
+            }
+            Ev::End("Master") => current = None,
+            _ => {}
         })?;
     }
     Ok(masters)
@@ -211,37 +293,72 @@ fn read_page(
     // Sections and rows inside the current shape; data rows collect label and value.
     let mut sections: Vec<String> = Vec::new();
     let mut row: Option<(String, Option<String>, Option<String>)> = None;
+    // Geometry rows of the current section: `LineTo 1, 0`.
+    let mut path: Vec<String> = Vec::new();
+    let mut point: Option<(String, Vec<(String, String)>)> = None;
+    // What is not shown, per shape on the stack.
+    let mut hidden: Vec<crc32fast::Hasher> = Vec::new();
     let mut in_text = false;
     let mut connects: Vec<(String, String, String)> = Vec::new();
     walk_xml(xml, |ev| match ev {
         Ev::Start("Shape", e) => {
             let id = attr(e, "ID").unwrap_or_default();
-            let master = attr(e, "Master").map(|m| masters.get(&m).cloned().unwrap_or_else(|| format!("#{m}")));
+            let master_id = attr(e, "Master");
+            let master = master_id.as_ref().map(|m| masters.get(m).cloned().unwrap_or_else(|| format!("#{m}")));
             stack.push(Shape {
                 id,
                 kind: attr(e, "Type").unwrap_or_else(|| "Shape".into()),
                 name: attr(e, "Name").or_else(|| attr(e, "NameU")).unwrap_or_default(),
                 master,
+                master_id,
+                master_shape: attr(e, "MasterShape"),
                 ..Default::default()
             });
+            hidden.push(crc32fast::Hasher::new());
         }
         Ev::End("Shape") => {
             if let Some(mut shape) = stack.pop() {
                 shape.text = shape.text.trim_end().to_string();
+                let hash = hidden.pop().map(|h| h.finalize());
+                shape.other = hash.filter(|&h| h != crc32fast::Hasher::new().finalize());
                 match stack.last_mut() {
                     Some(parent) => parent.children.push(shape),
                     None => top.push(shape),
                 }
             }
         }
-        Ev::Start("Section", e) => sections.push(attr(e, "N").unwrap_or_default()),
+        Ev::Start("Section", e) => {
+            let name = attr(e, "N").unwrap_or_default();
+            if let Some(h) = hidden.last_mut().filter(|_| !matches!(name.as_str(), "Property" | "User" | "Geometry")) {
+                h.update(format!("[{name}]").as_bytes());
+            }
+            sections.push(name);
+        }
         Ev::End("Section") => {
-            sections.pop();
+            if sections.pop().as_deref() == Some("Geometry")
+                && let Some(shape) = stack.last_mut()
+                && !path.is_empty()
+            {
+                shape.geometry.push(std::mem::take(&mut path).join("; "));
+            }
         }
         Ev::Start("Row", e) => {
             row = Some((attr(e, "N").or_else(|| attr(e, "IX")).unwrap_or_default(), None, None));
+            if sections.last().map(String::as_str) == Some("Geometry") {
+                point = Some((attr(e, "T").unwrap_or_else(|| "Row".into()), Vec::new()));
+            }
+            if let Some(h) = hidden.last_mut() {
+                h.update(format!("<{}>", attr(e, "T").or_else(|| attr(e, "N")).unwrap_or_default()).as_bytes());
+            }
         }
         Ev::End("Row") => {
+            if let Some((kind, cells)) = point.take() {
+                let values: Vec<String> = cells
+                    .iter()
+                    .map(|(n, v)| if n.len() == 1 { number(v) } else { format!("{n} {}", number(v)) })
+                    .collect();
+                path.push(if values.is_empty() { kind } else { format!("{kind} {}", values.join(", ")) });
+            }
             if let (Some((name, label, value)), Some(shape)) = (row.take(), stack.last_mut()) {
                 match sections.last().map(String::as_str) {
                     Some("Property") => {
@@ -256,16 +373,23 @@ fn read_page(
         Ev::Start("Cell", e) => {
             let (Some(n), Some(shape)) = (attr(e, "N"), stack.last_mut()) else { return };
             let v = attr(e, "V").unwrap_or_default();
+            let section = sections.last().map(String::as_str);
             if sections.is_empty() {
                 if CELLS.contains(&n.as_str()) || MORE_CELLS.contains(&n.as_str()) {
                     shape.cells.insert(n, v);
+                } else if let Some(h) = hidden.last_mut() {
+                    h.update(format!("{n}={v};").as_bytes());
                 }
-            } else if let Some((_, label, value)) = row.as_mut() {
+            } else if let Some((_, cells)) = point.as_mut() {
+                cells.push((n, v));
+            } else if let (Some((_, label, value)), Some("Property" | "User")) = (row.as_mut(), section) {
                 match n.as_str() {
                     "Label" => *label = Some(v),
                     "Value" => *value = Some(v),
                     _ => {}
                 }
+            } else if let Some(h) = hidden.last_mut() {
+                h.update(format!("{n}={v};").as_bytes());
             }
         }
         Ev::Start("Text", _) if !stack.is_empty() && sections.is_empty() => in_text = true,
@@ -375,7 +499,24 @@ fn read_odg(data: &[u8]) -> Result<Vec<Page>> {
             if let Some(t) = attr(e, "transform").filter(|t| t.contains("rotate")) {
                 shape.cells.insert("Angle".into(), t);
             }
+            for outline in ["points", "d"] {
+                if let Some(v) = attr(e, outline) {
+                    shape.geometry.push(v);
+                }
+            }
             stack.push(shape);
+        }
+        Ev::Start("enhanced-geometry", e) => {
+            if let Some(shape) = stack.last_mut() {
+                let kind = attr(e, "type").filter(|t| t != "non-primitive");
+                let path = attr(e, "enhanced-path");
+                let modifiers = attr(e, "modifiers");
+                let parts: Vec<String> =
+                    [kind, path, modifiers.map(|m| format!("modifiers {m}"))].into_iter().flatten().collect();
+                if !parts.is_empty() {
+                    shape.geometry.push(parts.join(" · "));
+                }
+            }
         }
         Ev::End(kind) if SHAPES.contains(&kind) => {
             if let Some(mut shape) = stack.pop() {
@@ -437,6 +578,22 @@ fn odg_kind(element: &str) -> &'static str {
 }
 
 // ---- output ----
+
+fn render(drawing: &Drawing, details: bool) -> String {
+    let mut out = render_pages(&drawing.pages, details);
+    // Shapes placed from a master take what they do not set themselves from it.
+    if details {
+        for (name, shapes) in &drawing.masters {
+            let _ = writeln!(out, "=== Master: {name} ===");
+            let mut names = HashMap::new();
+            collect_names(shapes, &mut names);
+            for shape in shapes {
+                shape_lines(shape, 0, &names, &mut out);
+            }
+        }
+    }
+    out
+}
 
 fn render_pages(pages: &[Page], details: bool) -> String {
     let mut out = String::new();
@@ -516,8 +673,9 @@ fn shape_lines(shape: &Shape, depth: usize, names: &HashMap<String, String>, out
     }
     let _ = writeln!(out, "{head}");
     let pad = "  ".repeat(depth + 1);
+    let text = if shape.inherited_text { "text (master)" } else { "text" };
     for line in shape.text.lines() {
-        let _ = writeln!(out, "{pad}text: {line}");
+        let _ = writeln!(out, "{pad}{text}: {line}");
     }
     let cell = |n: &str| shape.cells.get(n).map(|v| number(v));
     if let (Some(x), Some(y)) = (cell("PinX"), cell("PinY")) {
@@ -545,8 +703,14 @@ fn shape_lines(shape: &Shape, depth: usize, names: &HashMap<String, String>, out
     for (label, value) in &shape.data {
         let _ = writeln!(out, "{pad}data: {label} = {value}");
     }
+    for outline in &shape.geometry {
+        let _ = writeln!(out, "{pad}geometry: {outline}");
+    }
     if let Some(image) = &shape.image {
         let _ = writeln!(out, "{pad}image: {image}");
+    }
+    if let Some(other) = shape.other {
+        let _ = writeln!(out, "{pad}other settings: crc {other:08x}");
     }
     for child in &shape.children {
         shape_lines(child, depth + 1, names, out);
@@ -585,6 +749,52 @@ fn number(v: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A drawing with one shape placed from a master, the shape with one outline.
+    fn drawing(master_text: &str, line_x: &str) -> Vec<u8> {
+        use std::io::Write;
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let opts = zip::write::SimpleFileOptions::default();
+        let rel =
+            |target: &str| format!(r#"<Relationships><Relationship Id="rId1" Target="{target}"/></Relationships>"#);
+        let parts = [
+            ("visio/pages/pages.xml", r#"<Pages><Page ID="0" Name="P"><Rel r:id="rId1"/></Page></Pages>"#.to_string()),
+            ("visio/pages/_rels/pages.xml.rels", rel("page1.xml")),
+            (
+                "visio/pages/page1.xml",
+                format!(
+                    r#"<PageContents><Shapes><Shape ID="1" Type="Shape" Master="0"><Cell N="PinX" V="1"/><Section N="Geometry" IX="0"><Row T="MoveTo" IX="1"><Cell N="X" V="0"/><Cell N="Y" V="0"/></Row><Row T="LineTo" IX="2"><Cell N="X" V="{line_x}"/><Cell N="Y" V="0"/></Row></Section></Shape></Shapes></PageContents>"#
+                ),
+            ),
+            (
+                "visio/masters/masters.xml",
+                r#"<Masters><Master ID="0" Name="Box"><Rel r:id="rId1"/></Master></Masters>"#.to_string(),
+            ),
+            ("visio/masters/_rels/masters.xml.rels", rel("master1.xml")),
+            (
+                "visio/masters/master1.xml",
+                format!(
+                    r#"<MasterContents><Shapes><Shape ID="5" Type="Shape"><Text>{master_text}</Text></Shape></Shapes></MasterContents>"#
+                ),
+            ),
+        ];
+        for (name, text) in parts {
+            w.start_file(name, opts).unwrap();
+            w.write_all(text.as_bytes()).unwrap();
+        }
+        w.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn masters_and_outlines() {
+        let base = diagram(&drawing("Original master", "1")).unwrap();
+        assert!(base.contains("Shape 1 · master Box\n  text (master): Original master\n"), "{base}");
+        assert!(base.contains("geometry: MoveTo 0, 0; LineTo 1, 0\n"), "{base}");
+        assert!(base.contains("=== Master: Box ===\nShape 5\n  text: Original master\n"), "{base}");
+        assert_ne!(base, diagram(&drawing("Changed master", "1")).unwrap());
+        assert_ne!(base, diagram(&drawing("Original master", "2")).unwrap());
+        assert_eq!(diagram_text(&drawing("Original master", "1")).unwrap(), "=== Page: P ===\nOriginal master\n");
+    }
 
     #[test]
     fn numbers() {

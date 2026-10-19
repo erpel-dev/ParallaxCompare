@@ -122,7 +122,8 @@ impl SourceSpec {
     pub fn parse(text: &str) -> SourceSpec {
         let text = expand_home(text.trim());
         let text = text.as_str();
-        if !text.contains('!') && Path::new(text).exists() {
+        // An existing path is that path, also with a `!` in a name.
+        if Path::new(text).exists() {
             return SourceSpec::Local { path: text.to_string() };
         }
         // A remote repository: `url@rev:path`, or a link to a file or folder on GitHub & co.
@@ -169,8 +170,8 @@ impl SourceSpec {
     /// the top: a file system root, or the root of a Git revision or worktree.
     pub fn parent(&self) -> Option<SourceSpec> {
         match self {
-            SourceSpec::Local { path } => match path.split_once('!') {
-                Some((outer, inner)) => {
+            SourceSpec::Local { path } => match split_archive_path(path) {
+                (outer, Some(inner)) => {
                     let inner = normalize(inner)?;
                     if inner.is_empty() {
                         return local_parent(outer);
@@ -179,7 +180,7 @@ impl SourceSpec {
                     let path = if dir.is_empty() { outer.to_string() } else { format!("{outer}!/{dir}") };
                     Some(SourceSpec::Local { path })
                 }
-                None => local_parent(path),
+                (_, None) => local_parent(path),
             },
             SourceSpec::GitRev { repo, rev, subpath } => {
                 let subpath = normalize(subpath)?;
@@ -196,7 +197,7 @@ impl SourceSpec {
     /// The file or folder on disk, when the source is one (not inside an archive or a Git revision).
     pub fn disk_path(&self) -> Option<PathBuf> {
         match self {
-            SourceSpec::Local { path } if !path.contains('!') => Some(PathBuf::from(path)),
+            SourceSpec::Local { path } if split_archive_path(path).1.is_none() => Some(PathBuf::from(path)),
             SourceSpec::GitWorktree { repo } => Some(PathBuf::from(repo)),
             _ => None,
         }
@@ -205,7 +206,7 @@ impl SourceSpec {
     /// The file on disk that holds the source: the archive for a path inside one.
     pub fn container_path(&self) -> Option<PathBuf> {
         match self {
-            SourceSpec::Local { path } => Some(PathBuf::from(path.split('!').next().unwrap_or(path))),
+            SourceSpec::Local { path } => Some(PathBuf::from(split_archive_path(path).0)),
             _ => self.disk_path(),
         }
     }
@@ -301,10 +302,7 @@ impl SourceSpec {
 }
 
 fn open_local(spec: &SourceSpec, path: &str, opts: SourceOptions) -> Result<Source> {
-    let (outer, inner) = match path.split_once('!') {
-        Some((outer, inner)) => (outer, Some(inner)),
-        None => (path, None),
-    };
+    let (outer, inner) = split_archive_path(path);
     let outer_path = PathBuf::from(outer);
     let meta = std::fs::metadata(&outer_path).map_err(|e| Error::io(outer, e))?;
     let (dir, mut root) = if meta.is_dir() {
@@ -392,9 +390,6 @@ pub struct GitLocation {
 /// start with the last part, folders ending in `/`. After `repo@`, the
 /// repository's branches and tags. At most `limit`.
 pub fn complete(text: &str, limit: usize) -> Vec<String> {
-    if text.contains('!') {
-        return Vec::new();
-    }
     if let Some(at) = text.rfind('@') {
         let (repo, rev) = (&text[..at], &text[at + 1..]);
         if !repo.is_empty() && !Path::new(text).exists() && Path::new(repo).is_dir() && !rev.contains(':') {
@@ -412,7 +407,8 @@ pub fn complete(text: &str, limit: usize) -> Vec<String> {
     }
     let cut = text.rfind(['/', '\\']).map(|i| i + 1).unwrap_or(0);
     let (dir, prefix) = text.split_at(cut);
-    if dir.is_empty() {
+    // Inside an archive: no completions (a folder named with a `!` has them).
+    if dir.is_empty() || (dir.contains('!') && !Path::new(dir).is_dir()) {
         return Vec::new();
     }
     let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
@@ -439,7 +435,7 @@ pub fn complete(text: &str, limit: usize) -> Vec<String> {
 /// `path` (a local path, possibly `a.zip!/dir`) joined with `rel`: the first file on
 /// disk along the way is an archive, and the rest of `rel` is inside it.
 fn local_child(path: &str, rel: &str) -> String {
-    if path.contains('!') {
+    if split_archive_path(path).1.is_some() {
         return format!("{}/{rel}", path.trim_end_matches(['/', '\\']));
     }
     let mut disk = PathBuf::from(path);
@@ -451,6 +447,24 @@ fn local_child(path: &str, rel: &str) -> String {
         disk.push(part);
     }
     disk.display().to_string()
+}
+
+/// Splits a local path at the `!` after an archive: `a.zip!/dir` is `dir` inside
+/// `a.zip`. A path that exists, or a `!` after a part that is no file, is a plain
+/// name (`hello!world.txt`, `dir!/x`); when nothing exists, the first `!` splits.
+pub fn split_archive_path(path: &str) -> (&str, Option<&str>) {
+    if !path.contains('!') || Path::new(path).exists() {
+        return (path, None);
+    }
+    for (i, _) in path.match_indices('!') {
+        if Path::new(&path[..i]).is_file() {
+            return (&path[..i], Some(&path[i + 1..]));
+        }
+    }
+    match path.split_once('!') {
+        Some((outer, inner)) => (outer, Some(inner)),
+        None => (path, None),
+    }
 }
 
 /// For a folder inside a Git worktree: the tracked files below it, relative to it.

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 
+use crate::compare::Filter;
 use crate::progress::Progress;
 use crate::source::Source;
 use crate::vfs::local::{make_symlink, replace_file, same_file};
@@ -17,10 +18,12 @@ use crate::{Error, Result};
 /// Copies each of `paths` from `from` to the same path in `to`, recursively for
 /// folders, and returns the number of files copied. Archives are copied as files;
 /// existing files are overwritten. All writes into one archive are one rewrite of it.
+/// Inside folders, only the entries `filter` keeps are copied, as the comparison
+/// showed them; `paths` themselves always are.
 ///
 /// Cancelling through `progress` stops a copy into folders after the current
 /// files, and a copy into an archive before the archive is replaced.
-pub fn copy(from: &Source, to: &Source, paths: &[String], progress: &Progress) -> Result<u64> {
+pub fn copy(from: &Source, to: &Source, paths: &[String], filter: &Filter, progress: &Progress) -> Result<u64> {
     let mut copied = 0;
     let mut into_archives = Vec::new();
     for rel in paths {
@@ -29,16 +32,27 @@ pub fn copy(from: &Source, to: &Source, paths: &[String], progress: &Progress) -
             if !to.vfs.writable() {
                 return Err(Error::Unsupported(format!("{} is read-only", to.info.display)));
             }
-            into_archives.extend(collect_changes(from, to, rel, entry, progress)?);
+            into_archives.extend(collect_changes(from, to, rel, entry, filter, progress)?);
             continue;
         };
+        // A folder copied into itself would copy its own copies, without end.
+        if entry.kind == EntryKind::Dir
+            && let Some(source) = from.vfs.local_path(&from.path(rel))
+            && inside(&target, &source)
+        {
+            return Err(Error::Unsupported(format!(
+                "{} cannot be copied into itself ({})",
+                source.display(),
+                target.display()
+            )));
+        }
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).map_err(|e| Error::io(parent.display().to_string(), e))?;
         }
         if entry.kind != EntryKind::Dir {
             progress.expect(1);
         }
-        let result = copy_entry(from, &entry, rel, &target, progress);
+        let result = copy_entry(from, &entry, rel, &target, filter, progress);
         // Also after a partial copy: whatever was written is on disk now.
         to.vfs.changed(&to.path(rel));
         copied += result?;
@@ -73,13 +87,20 @@ pub fn copy_file_as(from: &Source, to: &Source, src: &str, dst: &str, progress: 
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).map_err(|e| Error::io(parent.display().to_string(), e))?;
     }
-    let result = copy_entry(from, &entry, src, &target, progress);
+    let result = copy_entry(from, &entry, src, &target, &Filter::none(), progress);
     to.vfs.changed(&to.path(dst));
     result
 }
 
 /// The writes that copy `rel` with everything below it; file contents are read in parallel.
-fn collect_changes(from: &Source, to: &Source, rel: &str, entry: Entry, progress: &Progress) -> Result<Vec<Change>> {
+fn collect_changes(
+    from: &Source,
+    to: &Source,
+    rel: &str,
+    entry: Entry,
+    filter: &Filter,
+    progress: &Progress,
+) -> Result<Vec<Change>> {
     let mut found = vec![(rel.to_string(), entry)];
     let mut i = 0;
     while i < found.len() {
@@ -87,7 +108,10 @@ fn collect_changes(from: &Source, to: &Source, rel: &str, entry: Entry, progress
         if found[i].1.kind == EntryKind::Dir {
             let dir = found[i].0.clone();
             for child in from.vfs.list(&from.path(&dir))? {
-                found.push((join(&dir, &child.name), child));
+                let rel = join(&dir, &child.name);
+                if filter.keeps(&rel, &child) {
+                    found.push((rel, child));
+                }
             }
         }
         i += 1;
@@ -109,16 +133,24 @@ fn collect_changes(from: &Source, to: &Source, rel: &str, entry: Entry, progress
 }
 
 /// Copies one entry to `target`; the children of a folder in parallel.
-fn copy_entry(from: &Source, entry: &Entry, rel: &str, target: &Path, progress: &Progress) -> Result<u64> {
+fn copy_entry(
+    from: &Source,
+    entry: &Entry,
+    rel: &str,
+    target: &Path,
+    filter: &Filter,
+    progress: &Progress,
+) -> Result<u64> {
     let io_err = |e| Error::io(target.display().to_string(), e);
     progress.check()?;
     if entry.kind == EntryKind::Dir {
         fs::create_dir_all(target).map_err(io_err)?;
-        let children = from.vfs.list(&from.path(rel))?;
+        let mut children = from.vfs.list(&from.path(rel))?;
+        children.retain(|c| filter.keeps(&join(rel, &c.name), c));
         progress.expect(children.iter().filter(|c| c.kind != EntryKind::Dir).count() as u64);
         return children
             .par_iter()
-            .map(|child| copy_entry(from, child, &join(rel, &child.name), &target.join(&child.name), progress))
+            .map(|child| copy_entry(from, child, &join(rel, &child.name), &target.join(&child.name), filter, progress))
             .try_reduce(|| 0, |a, b| Ok(a + b));
     }
     let source_path = from.vfs.local_path(&from.path(rel));
@@ -145,6 +177,26 @@ fn copy_entry(from: &Source, entry: &Entry, rel: &str, target: &Path, progress: 
     }
     progress.advance(1)?;
     Ok(1)
+}
+
+/// Whether `path` is `folder` or inside it, also through symlinks. The parts of
+/// `path` that do not exist yet are taken as written.
+fn inside(path: &Path, folder: &Path) -> bool {
+    let Ok(folder) = fs::canonicalize(folder) else { return false };
+    let mut existing = path.to_path_buf();
+    let mut rest = Vec::new();
+    while fs::symlink_metadata(&existing).is_err() {
+        match (existing.file_name(), existing.parent()) {
+            (Some(name), Some(parent)) => {
+                rest.push(name.to_owned());
+                existing = parent.to_path_buf();
+            }
+            _ => return false,
+        }
+    }
+    let Ok(mut resolved) = fs::canonicalize(&existing) else { return false };
+    resolved.extend(rest.iter().rev());
+    resolved.starts_with(&folder)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

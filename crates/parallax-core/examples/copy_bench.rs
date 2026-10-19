@@ -5,7 +5,7 @@
 
 use std::time::Instant;
 
-use parallax_core::compare::{self, CompareOptions, Control};
+use parallax_core::compare::{self, CompareOptions, Control, Filter};
 use parallax_core::ops;
 use parallax_core::source::{SourceOptions, SourceSpec, open_pair};
 
@@ -37,13 +37,13 @@ fn main() -> anyhow::Result<()> {
         Ok(format!("({} files, {} left only)", s.files, s.left_only))
     })?;
     time("copy file", &mut || {
-        Ok(format!("({} copied)", ops::copy(&l, &r, std::slice::from_ref(file), &Default::default())?))
+        Ok(format!("({} copied)", ops::copy(&l, &r, std::slice::from_ref(file), &Filter::none(), &Default::default())?))
     })?;
     time("  refresh file", &mut || {
         Ok(format!("({:?})", compare::compare_path(&l, &r, file, &opts, &Control::default())?.root.status))
     })?;
     time("copy folder", &mut || {
-        Ok(format!("({} copied)", ops::copy(&l, &r, std::slice::from_ref(dir), &Default::default())?))
+        Ok(format!("({} copied)", ops::copy(&l, &r, std::slice::from_ref(dir), &Filter::none(), &Default::default())?))
     })?;
     time("  refresh folder", &mut || {
         Ok(format!("({:?})", compare::compare_path(&l, &r, dir, &opts, &Control::default())?.root.status))
@@ -53,7 +53,7 @@ fn main() -> anyhow::Result<()> {
     let (l, r) = open_pair(&spec(archive), &spec(&all.path().display().to_string()), SourceOptions::default(), false)?;
     time("copy everything, fresh session", &mut || {
         let all: Vec<String> = l.vfs.list(&l.path(""))?.into_iter().map(|e| e.name).collect();
-        Ok(format!("({} copied)", ops::copy(&l, &r, &all, &Default::default())?))
+        Ok(format!("({} copied)", ops::copy(&l, &r, &all, &Filter::none(), &Default::default())?))
     })?;
     time("  refresh everything", &mut || {
         let s = compare::compare(&l, &r, &opts, &Control::default())?.summary;

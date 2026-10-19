@@ -12,7 +12,7 @@ use parallax_core::source::{Source, SourceOptions, SourceSpec, open_pair};
 use parallax_core::vfs::EntryKind;
 
 fn copy(from: &Source, to: &Source, path: &str) -> parallax_core::Result<u64> {
-    ops::copy(from, to, &[path.to_string()], &Progress::default())
+    ops::copy(from, to, &[path.to_string()], &parallax_core::compare::Filter::none(), &Progress::default())
 }
 
 fn delete(source: &Source, path: &str) -> parallax_core::Result<()> {
@@ -281,6 +281,54 @@ fn copy_between_sides() {
     assert!(!b.path().join("dir").exists());
 }
 
+/// A `!` in a file or folder name is part of the name; only after an archive does it
+/// lead inside it.
+#[test]
+fn exclamation_marks_in_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("x!y");
+    write(&base, &[("hello!world.txt", "a"), ("other.txt", "b")]);
+    fs::write(base.join("p.zip"), zip_bytes(&[("in/f.txt", "z")])).unwrap();
+    let file = base.join("hello!world.txt").display().to_string();
+    assert_eq!(SourceSpec::parse(&file), SourceSpec::Local { path: file.clone() });
+    let inner = format!("{}!/in", base.join("p.zip").display());
+    let (l, r) =
+        open_pair(&SourceSpec::parse(&file), &SourceSpec::parse(&inner), SourceOptions::default(), false).unwrap();
+    assert_eq!(l.vfs.read(&l.path("")).unwrap().to_vec(), b"a");
+    assert!(r.stat("f.txt").is_ok());
+    assert_eq!(SourceSpec::parse(&file).disk_path().unwrap().display().to_string(), file);
+    assert_eq!(SourceSpec::parse(&inner).container_path().unwrap(), base.join("p.zip"));
+}
+
+/// A folder copied with file patterns active writes only what the comparison showed.
+#[test]
+fn copy_with_patterns() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    write(a.path(), &[("pkg/visible.txt", "same"), ("pkg/hidden.bin", "left"), ("pkg/.git/x", "left")]);
+    write(b.path(), &[("pkg/visible.txt", "same"), ("pkg/hidden.bin", "right")]);
+    let open = |p: &Path| SourceSpec::parse(&p.display().to_string());
+    let (l, r) = open_pair(&open(a.path()), &open(b.path()), SourceOptions::default(), false).unwrap();
+    let opts = CompareOptions { includes: vec!["*.txt".into()], ..Default::default() };
+    let filter = compare::Filter::new(&opts).unwrap();
+    ops::copy(&l, &r, &["pkg".to_string()], &filter, &Progress::default()).unwrap();
+    assert_eq!(fs::read_to_string(b.path().join("pkg/hidden.bin")).unwrap(), "right");
+    assert!(!b.path().join("pkg/.git").exists());
+}
+
+/// A folder is never copied into itself.
+#[test]
+fn copy_into_own_subfolder() {
+    let a = tempfile::tempdir().unwrap();
+    write(a.path(), &[("folder/file.txt", "x")]);
+    let open = |p: &Path| SourceSpec::parse(&p.display().to_string());
+    // The right side is the left's own subfolder: left/folder → left/folder/folder.
+    let (l, r) = open_pair(&open(a.path()), &open(&a.path().join("folder")), SourceOptions::default(), false).unwrap();
+    let err = copy(&l, &r, "folder").unwrap_err();
+    assert!(err.to_string().contains("into itself"), "{err}");
+    assert!(!a.path().join("folder/folder").exists());
+}
+
 /// Files that moved to another folder: compared and copied across paths, also into a zip.
 #[test]
 fn compare_and_copy_across_folders() {
@@ -539,6 +587,42 @@ fn archive_bytes(kind: &str, files: &[(&str, &str)]) -> Vec<u8> {
     }
 }
 
+/// A tar hard link has the content of the file it names from the archive root.
+#[test]
+fn tar_hard_links() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut tar = tar::Builder::new(Vec::new());
+    let data = b"actual shared file data\n";
+    let mut header = tar::Header::new_gnu();
+    header.set_size(data.len() as u64);
+    header.set_mode(0o644);
+    tar.append_data(&mut header, "original.txt", &data[..]).unwrap();
+    let mut link = tar::Header::new_gnu();
+    link.set_entry_type(tar::EntryType::Link);
+    link.set_size(0);
+    tar.append_link(&mut link, "nested/alias.txt", "original.txt").unwrap();
+    fs::write(dir.path().join("links.tar"), tar.into_inner().unwrap()).unwrap();
+    write(
+        &dir.path().join("plain"),
+        &[("original.txt", "actual shared file data\n"), ("nested/alias.txt", "actual shared file data\n")],
+    );
+    let (l, r) = open_pair(
+        &SourceSpec::parse(&dir.path().join("links.tar").display().to_string()),
+        &SourceSpec::parse(&dir.path().join("plain").display().to_string()),
+        SourceOptions::default(),
+        false,
+    )
+    .unwrap();
+    let list =
+        compare::flatten(&compare::compare(&l, &r, &CompareOptions::default(), &Control::default()).unwrap().root);
+    assert!(list.iter().all(|(_, s)| *s == Status::Same), "{list:?}");
+    // Copied out, the link is a file with that content.
+    copy(&l, &r, "nested").unwrap();
+    let alias = dir.path().join("plain/nested/alias.txt");
+    assert!(!fs::symlink_metadata(&alias).unwrap().file_type().is_symlink());
+    assert_eq!(fs::read(&alias).unwrap(), data);
+}
+
 #[test]
 fn copy_into_and_delete_from_archives() {
     for kind in ["zip", "7z", "7z-non-solid", "tar", "tar.gz", "tar.bz2", "tar.xz", "tar.zst"] {
@@ -703,13 +787,16 @@ fn cancelled_copy_into_an_archive_leaves_it_unchanged() {
     let progress = Progress::default();
     progress.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
     let paths = ["b.txt".to_string(), "c".to_string()];
-    assert!(matches!(ops::copy(&r, &l, &paths, &progress), Err(parallax_core::Error::Cancelled)));
+    assert!(matches!(
+        ops::copy(&r, &l, &paths, &compare::Filter::none(), &progress),
+        Err(parallax_core::Error::Cancelled)
+    ));
     assert_eq!(fs::read(&zip).unwrap(), before);
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2, "no temporary file left");
 
     // Not cancelled: both paths go in, with one rewrite counted by the progress.
     let progress = Progress::default();
-    assert_eq!(ops::copy(&r, &l, &paths, &progress).unwrap(), 2);
+    assert_eq!(ops::copy(&r, &l, &paths, &compare::Filter::none(), &progress).unwrap(), 2);
     let list = statuses(&zip.display().to_string(), &folder.display().to_string(), &CompareOptions::default());
     assert_eq!(status_of(&list, "c/d.txt"), Status::Same);
     let done = progress.done.load(std::sync::atomic::Ordering::Relaxed);

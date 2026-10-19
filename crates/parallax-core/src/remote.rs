@@ -105,12 +105,12 @@ fn web_link(text: &str, refs: &dyn Fn(&str) -> Vec<String>) -> Option<SourceSpec
     match parts.get(2).copied() {
         // The repository's main page.
         None => Some(SourceSpec::GitRev { repo, rev: "HEAD".into(), subpath: String::new() }),
-        // GitHub (also Enterprise): blob, tree, raw.
-        Some("blob" | "tree" | "raw") if parts.len() > 3 => Some(with_ref(repo, &parts[3..], refs)),
-        // Gitea, Forgejo, Codeberg: src/branch|tag|commit/<ref>/<path>.
+        // Gitea, Forgejo, Codeberg: src|raw/branch|tag|commit/<ref>/<path>.
         Some("src" | "raw") if matches!(parts.get(3), Some(&("branch" | "tag" | "commit"))) && parts.len() > 4 => {
             Some(with_ref(repo, &parts[4..], refs))
         }
+        // GitHub (also Enterprise): blob, tree, raw.
+        Some("blob" | "tree" | "raw") if parts.len() > 3 => Some(with_ref(repo, &parts[3..], refs)),
         // Bitbucket: src/<ref>/<path>.
         Some("src") if parts.len() > 3 => Some(with_ref(repo, &parts[3..], refs)),
         _ => None,
@@ -177,6 +177,8 @@ pub fn display(url: &str) -> String {
 /// Fetches `rev` of the repository at `url` into the cache and returns the local
 /// bare repository and the fetched commit id.
 pub fn fetch(url: &str, rev: &str) -> Result<(PathBuf, String)> {
+    plain_arg("repository", url)?;
+    plain_arg("revision", rev)?;
     // One fetch at a time: fetches into one cache repository would collide.
     static FETCHING: Mutex<()> = Mutex::new(());
     let _one = FETCHING.lock();
@@ -190,11 +192,13 @@ pub fn fetch(url: &str, rev: &str) -> Result<(PathBuf, String)> {
     if full_id && git(&["cat-file", "-e", &format!("{rev}^{{commit}}")], Some(&dir)).is_ok() {
         return Ok((dir, rev.to_string()));
     }
-    git(&["fetch", "--quiet", "--depth", "1", "--no-tags", url, rev], Some(&dir)).map_err(|e| match e {
-        Error::Unsupported(msg) if !full_id && rev.len() < 40 && rev.chars().all(|c| c.is_ascii_hexdigit()) => {
-            Error::Unsupported(format!("{msg} (abbreviated commit ids cannot be fetched; use the full id)"))
+    git(&["fetch", "--quiet", "--depth", "1", "--no-tags", "--end-of-options", url, rev], Some(&dir)).map_err(|e| {
+        match e {
+            Error::Unsupported(msg) if !full_id && rev.len() < 40 && rev.chars().all(|c| c.is_ascii_hexdigit()) => {
+                Error::Unsupported(format!("{msg} (abbreviated commit ids cannot be fetched; use the full id)"))
+            }
+            e => e,
         }
-        e => e,
     })?;
     let commit = git(&["rev-parse", "FETCH_HEAD^{commit}"], Some(&dir))?;
     Ok((dir, commit.trim().to_string()))
@@ -202,7 +206,8 @@ pub fn fetch(url: &str, rev: &str) -> Result<(PathBuf, String)> {
 
 /// The branch and tag names of the repository at `url`.
 pub fn ls_remote(url: &str) -> Result<Vec<String>> {
-    let out = git(&["ls-remote", "--heads", "--tags", url], None)?;
+    plain_arg("repository", url)?;
+    let out = git(&["ls-remote", "--heads", "--tags", "--end-of-options", url], None)?;
     Ok(out
         .lines()
         .filter_map(|l| l.split('\t').nth(1))
@@ -215,7 +220,8 @@ pub fn ls_remote(url: &str) -> Result<Vec<String>> {
 /// which branch its HEAD is.
 pub fn ref_list(url: &str) -> Result<crate::vfs::git::RefList> {
     use crate::vfs::git::{RefInfo, RefList};
-    let out = git(&["ls-remote", "--symref", url], None)?;
+    plain_arg("repository", url)?;
+    let out = git(&["ls-remote", "--symref", "--end-of-options", url], None)?;
     let mut list =
         RefList { head: None, branches: Vec::new(), remotes: Vec::new(), tags: Vec::new(), recent_commits: Vec::new() };
     for line in out.lines() {
@@ -241,27 +247,71 @@ pub fn ref_list(url: &str) -> Result<crate::vfs::git::RefList> {
     Ok(list)
 }
 
+/// A repository or revision from the user must not be read by Git as an option
+/// (`@--upload-pack=…` would run a program).
+fn plain_arg(what: &str, value: &str) -> Result<()> {
+    if value.is_empty() || value.starts_with('-') || value.chars().any(char::is_control) {
+        return Err(Error::Unsupported(format!("not a valid {what}: {value:?}")));
+    }
+    Ok(())
+}
+
 /// Runs `git` and returns its output; never asks for a password in a terminal.
+/// A server that does not answer is given up on: a lookup of the refs after
+/// 30 seconds, a fetch after 10 minutes.
 fn git(args: &[&str], dir: Option<&std::path::Path>) -> Result<String> {
+    use std::io::Read;
+    use std::process::Stdio;
+    let command = args.first().copied().unwrap_or_default();
+    let limit = std::time::Duration::from_secs(match command {
+        "ls-remote" => 30,
+        "fetch" => 600,
+        _ => 120,
+    });
     let mut cmd = Command::new("git");
     if let Some(dir) = dir {
         cmd.arg("-C").arg(dir);
     }
-    cmd.args(args).env("GIT_TERMINAL_PROMPT", "0").stdin(std::process::Stdio::null());
+    cmd.args(args).env("GIT_TERMINAL_PROMPT", "0").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         // No console window flashing up from the desktop app.
         cmd.creation_flags(0x0800_0000);
     }
-    let out = cmd.output().map_err(|e| {
+    let mut child = cmd.spawn().map_err(|e| {
         Error::Unsupported(format!("comparing a remote repository needs Git installed (`git` could not be run: {e})"))
     })?;
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    // Read both pipes while waiting, so a long ref list cannot fill one and stall Git.
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut buf);
+            }
+            buf
+        })
+    };
+    let stdout = drain(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let stderr = drain(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|e| Error::io("git", e))? {
+            break status;
+        }
+        if started.elapsed() > limit {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(Error::Unsupported(format!("git {command}: no answer after {} s", limit.as_secs())));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let (out, err) = (stdout.join().unwrap_or_default(), stderr.join().unwrap_or_default());
+    if status.success() {
+        Ok(String::from_utf8_lossy(&out).into_owned())
     } else {
-        let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        Err(Error::Unsupported(format!("git {}: {msg}", args.first().copied().unwrap_or_default())))
+        let msg = String::from_utf8_lossy(&err).trim().to_string();
+        Err(Error::Unsupported(format!("git {command}: {msg}")))
     }
 }
 
@@ -346,6 +396,16 @@ mod tests {
             parse_with("https://codeberg.org/o/r/src/branch/main/docs/x.md", &refs),
             rev("https://codeberg.org/o/r", "main", "docs/x.md")
         );
+        let cb = "https://codeberg.org/o/r";
+        assert_eq!(
+            parse_with("https://codeberg.org/o/r/raw/branch/main/src/lib.rs", &refs),
+            rev(cb, "main", "src/lib.rs")
+        );
+        assert_eq!(parse_with("https://codeberg.org/o/r/raw/tag/v1.0/a.txt", &refs), rev(cb, "v1.0", "a.txt"));
+        assert_eq!(
+            parse_with("https://codeberg.org/o/r/raw/commit/0123abcd/a.txt", &refs),
+            rev(cb, "0123abcd", "a.txt")
+        );
         assert_eq!(
             parse_with("https://bitbucket.org/o/r/src/main/x.py", &refs),
             rev("https://bitbucket.org/o/r", "main", "x.py")
@@ -388,5 +448,11 @@ mod tests {
         let refs = ref_list(&url).unwrap();
         assert_eq!(refs.head.as_deref(), Some("main"));
         assert_eq!(refs.branches[0].name, "main");
+        // A revision that Git would read as an option runs nothing.
+        let marker = origin.path().join("ran");
+        let option = format!("--upload-pack=touch {}; git-upload-pack", marker.display());
+        assert!(fetch(&url, &option).is_err());
+        assert!(fetch(&url, "-q").is_err() && ls_remote("--help").is_err());
+        assert!(!marker.exists());
     }
 }

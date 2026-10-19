@@ -14,7 +14,7 @@
 
   // One scale for both sides, so they stay comparable.
   const fitScale = $derived.by(() => {
-    const shown = mode === "side" ? [image.left, image.right] : [image.left];
+    const shown = mode === "overlay" ? [image.left] : [image.left, image.right];
     const w = Math.max(0, ...shown.map((s) => s?.width ?? 0));
     const h = Math.max(0, ...shown.map((s) => s?.height ?? 0));
     if (!w || !h || !areaW || !areaH) return 1;
@@ -105,7 +105,8 @@
       <div class="meta">
         {mode === "blink" ? (blinkRight ? "Right" : "Left") : "Left, with the differing pixels of the right image highlighted"}
       </div>
-      <div class="stack" style={sizeOf(image.left)}>
+      <!-- Blink shows each image at its own size, at the one scale. -->
+      <div class="stack" style={sizeOf(mode === "blink" && blinkRight ? image.right : image.left)}>
         <img src={mode === "blink" && blinkRight ? image.right.url : image.left.url} alt="compared" class:dim={mode === "overlay"} />
         {#if mode === "overlay" && image.mask}<img class="mask strong" src={image.mask} alt="" />{/if}
       </div>

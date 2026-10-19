@@ -831,7 +831,7 @@ pub fn content_equal(name: &str, left: &[u8], right: &[u8]) -> Option<&'static s
         }
         Kind::Visio | Kind::LegacyVisio => {
             return (render(View::Diagram, name, left).ok()? == render(View::Diagram, name, right).ok()?)
-                .then_some("same pages, shapes, text, data and connections");
+                .then_some("same pages, shapes and masters, only the file layout differs");
         }
         Kind::Raster => image_diff::pixels_equal(left, right)?,
         Kind::Media => return media::same_media(&extension(name), left, right),
@@ -1454,7 +1454,10 @@ mod tests {
         // Saved again with other compression: same drawing.
         let stored = vsdx("Start", false);
         assert_ne!(v1, stored);
-        assert_eq!(content_equal("flow.vsdx", &v1, &stored), Some("same pages, shapes, text, data and connections"));
+        assert_eq!(
+            content_equal("flow.vsdx", &v1, &stored),
+            Some("same pages, shapes and masters, only the file layout differs")
+        );
         assert_eq!(content_equal("flow.vsdx", &v1, &vsdx("Begin", true)), None);
         assert!(has_content_rule("flow.vsdx") && has_content_rule("old.VSD"));
     }

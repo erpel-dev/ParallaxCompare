@@ -215,6 +215,33 @@ impl Excludes {
     }
 }
 
+/// Which entries a comparison shows, by its exclude and include patterns, so that
+/// operations on a folder touch only what was compared.
+pub struct Filter {
+    excludes: Excludes,
+    includes: Includes,
+}
+
+impl Filter {
+    pub fn new(opts: &CompareOptions) -> Result<Self> {
+        Ok(Filter { excludes: Excludes::new(&opts.excludes)?, includes: Includes::new(&opts.includes)? })
+    }
+
+    /// Everything.
+    pub fn none() -> Self {
+        Filter {
+            excludes: Excludes::new(&[]).expect("no patterns"),
+            includes: Includes::new(&[]).expect("no patterns"),
+        }
+    }
+
+    /// Whether the entry at `rel` takes part: not excluded, and a folder or a file the
+    /// include patterns cover. An archive is copied whole, so it needs to be covered.
+    pub fn keeps(&self, rel: &str, entry: &Entry) -> bool {
+        !self.excludes.matches(rel, &entry.name) && (entry.kind == EntryKind::Dir || self.includes.covers(rel))
+    }
+}
+
 /// Cancellation and progress shared with the caller.
 #[derive(Debug, Default)]
 pub struct Control {

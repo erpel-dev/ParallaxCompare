@@ -278,7 +278,24 @@ fn open_tar(data: Data, format: ArchiveFormat, index: &mut Index) -> Result<Back
                 index.add_file(&path, EntryKind::File, buf.len() as u64, mtime, None);
                 contents.insert(path, Arc::new(buf));
             }
-            tar::EntryType::Symlink | tar::EntryType::Link => {
+            tar::EntryType::Link => {
+                // A hard link names an earlier entry from the archive root: the same file.
+                let target = entry.link_name().ok().flatten().and_then(|t| normalize(&t.to_string_lossy()));
+                match target.as_ref().and_then(|t| contents.get(t)).cloned() {
+                    Some(buf) => {
+                        index.add_file(&path, EntryKind::File, buf.len() as u64, mtime, None);
+                        contents.insert(path, buf);
+                    }
+                    None => {
+                        // No such file before it: kept as a link that points at that path.
+                        let depth = path.matches('/').count();
+                        let buf = format!("{}{}", "../".repeat(depth), target.unwrap_or_default()).into_bytes();
+                        index.add_file(&path, EntryKind::Symlink, buf.len() as u64, mtime, None);
+                        contents.insert(path, Arc::new(buf));
+                    }
+                }
+            }
+            tar::EntryType::Symlink => {
                 // Links are compared by their target path.
                 let target = entry.link_name().ok().flatten().map(|t| t.to_string_lossy().into_owned());
                 let buf = target.unwrap_or_default().into_bytes();

@@ -77,7 +77,9 @@ pub fn same_cells(left: &[u8], right: &[u8]) -> Option<bool> {
     let l: Notebook<IgnoredAny> = parse(left).ok()?;
     let r: Notebook<IgnoredAny> = parse(right).ok()?;
     let (lc, rc) = (l.cells(), r.cells());
-    Some(lc.len() == rc.len() && lc.iter().zip(rc).all(|(a, b)| a.cell_type == b.cell_type && a.source() == b.source()))
+    Some(
+        lc.len() == rc.len() && lc.iter().zip(&rc).all(|(a, b)| a.cell_type == b.cell_type && a.source() == b.source()),
+    )
 }
 
 fn parse<'de, O: Deserialize<'de> + Default>(data: &'de [u8]) -> Result<Notebook<O>> {
@@ -162,8 +164,13 @@ struct Notebook<O> {
 }
 
 impl<O> Notebook<O> {
-    fn cells(&self) -> &[Cell<O>] {
-        if self.cells.is_empty() { self.worksheets.first().map_or(&[], |w| &w.cells) } else { &self.cells }
+    /// The cells in order, those of all nbformat 3 worksheets one after the other.
+    fn cells(&self) -> Vec<&Cell<O>> {
+        if self.cells.is_empty() {
+            self.worksheets.iter().flat_map(|w| &w.cells).collect()
+        } else {
+            self.cells.iter().collect()
+        }
     }
 }
 
@@ -501,6 +508,18 @@ mod tests {
             {"cell_type": "code", "source": "", "outputs": [{"output_type": "display_data", "data": {"application/json": {"a": [1, 2]}, "text/plain": 7}}]}]}"#;
         let v = render(odd, true).unwrap();
         assert!(v.contains("--- display ---\n7\n[application/json 11 B, crc "), "{v}");
+    }
+
+    #[test]
+    fn all_nbformat3_worksheets() {
+        let nb = |code: &str| {
+            format!(
+                r#"{{"nbformat": 3, "nbformat_minor": 0, "worksheets": [{{"cells": [{{"cell_type": "code", "input": ["shared\n"], "outputs": []}}]}}, {{"cells": [{{"cell_type": "code", "input": ["{code}\n"], "outputs": []}}]}}]}}"#
+            )
+        };
+        let (a, b) = (nb("x=1"), nb("x=999"));
+        assert_eq!(same_cells(a.as_bytes(), b.as_bytes()), Some(false));
+        assert!(render(b.as_bytes(), true).unwrap().contains("x=999"));
     }
 
     #[test]
