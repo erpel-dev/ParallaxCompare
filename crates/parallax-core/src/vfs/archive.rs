@@ -32,7 +32,7 @@ pub enum ArchiveFormat {
 pub fn detect_format(name: &str) -> Option<ArchiveFormat> {
     let lower = name.to_ascii_lowercase();
     let ends = |exts: &[&str]| exts.iter().any(|e| lower.ends_with(e));
-    Some(if ends(&[".zip", ".jar", ".war", ".ear", ".apk", ".nupkg", ".vsix", ".whl", ".aar", ".xpi"]) {
+    Some(if ends(&[".zip", ".jar", ".war", ".ear", ".apk", ".nupkg", ".vsix", ".whl", ".aar", ".xpi", ".pdx"]) {
         ArchiveFormat::Zip
     } else if ends(&[".7z"]) {
         ArchiveFormat::SevenZ

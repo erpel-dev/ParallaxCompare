@@ -4225,6 +4225,7 @@ dependencies = [
  "toml 1.1.8+spec-1.1.0",
  "trash",
  "two-face",
+ "url",
  "wasmparser",
  "x509-parser",
  "yaml-rust2",

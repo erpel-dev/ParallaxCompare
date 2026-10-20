@@ -1,0 +1,52 @@
+* Exported with other spacing and order
+KONSERVIERUNG_FORMAT 2.0
+MODULKOPF "Dataset" "Engine"
+
+GRUPPENKENNLINIE KL_Limit 3
+  EINHEIT_W "Nm"
+  SSTX "AX_Speed"
+  WERT 100 150 125
+END
+
+STUETZSTELLENVERTEILUNG AX_Speed 3
+  EINHEIT_X "rpm"
+  ST/X 1000.0
+  ST/X 2000 3000
+END
+
+KENNFELD KF_Fuel 3 2
+  EINHEIT_W "mg"
+  EINHEIT_Y "%"
+  EINHEIT_X "rpm"
+  ST/X 1000.0
+  ST/X 2000 3000
+  ST/Y 25
+  WERT 1 2 3
+  ST/Y 75
+  WERT 4 5 6
+END
+
+KENNLINIE KL_Advance 3
+  EINHEIT_W "deg"
+  EINHEIT_X "rpm"
+  ST/X 1000.0
+  ST/X 2000 3000
+  WERT 5 10.5 18
+END
+
+FESTWERTEBLOCK KA_Offsets 3
+  EINHEIT_W "V"
+  WERT 0.125 2.5e-1 0.375
+END
+
+TEXTSTRING T_Variant
+  LANGNAME "Vehicle variant"
+  TEXT "EU6 diesel"
+END
+
+FESTWERT K_IdleSpeed
+  EINHEIT_W "rpm"
+  LANGNAME "Idle speed"
+  WERT +8.000e2
+END
+

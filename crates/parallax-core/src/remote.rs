@@ -204,6 +204,13 @@ pub fn fetch(url: &str, rev: &str) -> Result<(PathBuf, String)> {
     Ok((dir, commit.trim().to_string()))
 }
 
+/// Keep an opened PR snapshot reachable when Git later runs cache maintenance.
+pub(crate) fn pin_commit(dir: &std::path::Path, commit: &str) -> Result<()> {
+    plain_arg("commit", commit)?;
+    git(&["update-ref", &format!("refs/parallax/commits/{commit}"), commit], Some(dir))?;
+    Ok(())
+}
+
 /// The branch and tag names of the repository at `url`.
 pub fn ls_remote(url: &str) -> Result<Vec<String>> {
     plain_arg("repository", url)?;
@@ -260,8 +267,6 @@ fn plain_arg(what: &str, value: &str) -> Result<()> {
 /// A server that does not answer is given up on: a lookup of the refs after
 /// 30 seconds, a fetch after 10 minutes.
 fn git(args: &[&str], dir: Option<&std::path::Path>) -> Result<String> {
-    use std::io::Read;
-    use std::process::Stdio;
     let command = args.first().copied().unwrap_or_default();
     let limit = std::time::Duration::from_secs(match command {
         "ls-remote" => 30,
@@ -272,47 +277,8 @@ fn git(args: &[&str], dir: Option<&std::path::Path>) -> Result<String> {
     if let Some(dir) = dir {
         cmd.arg("-C").arg(dir);
     }
-    cmd.args(args).env("GIT_TERMINAL_PROMPT", "0").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // No console window flashing up from the desktop app.
-        cmd.creation_flags(0x0800_0000);
-    }
-    let mut child = cmd.spawn().map_err(|e| {
-        Error::Unsupported(format!("comparing a remote repository needs Git installed (`git` could not be run: {e})"))
-    })?;
-    // Read both pipes while waiting, so a long ref list cannot fill one and stall Git.
-    let drain = |pipe: Option<Box<dyn Read + Send>>| {
-        std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            if let Some(mut pipe) = pipe {
-                let _ = pipe.read_to_end(&mut buf);
-            }
-            buf
-        })
-    };
-    let stdout = drain(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
-    let stderr = drain(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
-    let started = std::time::Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait().map_err(|e| Error::io("git", e))? {
-            break status;
-        }
-        if started.elapsed() > limit {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(Error::Unsupported(format!("git {command}: no answer after {} s", limit.as_secs())));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    };
-    let (out, err) = (stdout.join().unwrap_or_default(), stderr.join().unwrap_or_default());
-    if status.success() {
-        Ok(String::from_utf8_lossy(&out).into_owned())
-    } else {
-        let msg = String::from_utf8_lossy(&err).trim().to_string();
-        Err(Error::Unsupported(format!("git {command}: {msg}")))
-    }
+    cmd.args(args).env("GIT_TERMINAL_PROMPT", "0");
+    crate::process::run(&mut cmd, "git", &format!("git {command}"), limit)
 }
 
 /// Where fetched repositories are kept: `PARALLAX_CACHE`, else the user's cache folder.

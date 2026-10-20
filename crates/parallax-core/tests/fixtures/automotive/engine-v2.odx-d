@@ -1,0 +1,119 @@
+<?xml version='1.0' encoding='utf-8'?>
+<ODX xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" MODEL-VERSION="2.2.0">
+  <DIAG-LAYER-CONTAINER ID="DLC.Engine">
+    <SHORT-NAME>Engine</SHORT-NAME>
+    <LONG-NAME>Engine diagnostic definitions</LONG-NAME>
+    <BASE-VARIANTS>
+      <BASE-VARIANT ID="BV.Engine">
+        <SHORT-NAME>EngineBase</SHORT-NAME>
+        <DIAG-DATA-DICTIONARY-SPEC>
+          <DATA-OBJECT-PROPS>
+            <DATA-OBJECT-PROP ID="DOP.SerialNumber">
+              <SHORT-NAME>SerialNumber</SHORT-NAME>
+              <DIAG-CODED-TYPE BASE-DATA-TYPE="A_ASCIISTRING" xsi:type="STANDARD-LENGTH-TYPE">
+                <BIT-LENGTH>160</BIT-LENGTH>
+              </DIAG-CODED-TYPE>
+              <PHYSICAL-TYPE BASE-DATA-TYPE="A_ASCIISTRING" />
+              <COMPU-METHOD>
+                <CATEGORY>IDENTICAL</CATEGORY>
+              </COMPU-METHOD>
+            </DATA-OBJECT-PROP>
+          </DATA-OBJECT-PROPS>
+        </DIAG-DATA-DICTIONARY-SPEC>
+        <DIAG-COMMS>
+          <DIAG-SERVICE ID="Service.ReadSerialNumber" SEMANTIC="IDENTIFICATION">
+            <SHORT-NAME>ReadSerialNumber</SHORT-NAME>
+            <REQUEST-REF ID-REF="Request.ReadSerialNumber" />
+            <POS-RESPONSE-REFS>
+              <POS-RESPONSE-REF ID-REF="Response.ReadSerialNumber" />
+            </POS-RESPONSE-REFS>
+          </DIAG-SERVICE>
+          <DIAG-SERVICE ID="Service.TesterPresent" SEMANTIC="SESSION">
+            <SHORT-NAME>TesterPresent</SHORT-NAME>
+            <REQUEST-REF ID-REF="Request.TesterPresent" />
+            <POS-RESPONSE-REFS>
+              <POS-RESPONSE-REF ID-REF="Response.TesterPresent" />
+            </POS-RESPONSE-REFS>
+          </DIAG-SERVICE>
+        </DIAG-COMMS>
+        <REQUESTS>
+          <REQUEST ID="Request.ReadSerialNumber">
+            <SHORT-NAME>ReadSerialNumber</SHORT-NAME>
+            <PARAMS>
+              <PARAM xsi:type="CODED-CONST">
+                <SHORT-NAME>SID</SHORT-NAME>
+                <BYTE-POSITION>0</BYTE-POSITION>
+                <DIAG-CODED-TYPE BASE-DATA-TYPE="A_UINT32" xsi:type="STANDARD-LENGTH-TYPE">
+                  <BIT-LENGTH>8</BIT-LENGTH>
+                </DIAG-CODED-TYPE>
+                <CODED-VALUE>34</CODED-VALUE>
+              </PARAM>
+              <PARAM xsi:type="CODED-CONST">
+                <SHORT-NAME>DID</SHORT-NAME>
+                <BYTE-POSITION>1</BYTE-POSITION>
+                <DIAG-CODED-TYPE BASE-DATA-TYPE="A_UINT32" xsi:type="STANDARD-LENGTH-TYPE">
+                  <BIT-LENGTH>16</BIT-LENGTH>
+                </DIAG-CODED-TYPE>
+                <CODED-VALUE>61841</CODED-VALUE>
+              </PARAM>
+            </PARAMS>
+          </REQUEST>
+          <REQUEST ID="Request.TesterPresent">
+            <SHORT-NAME>TesterPresent</SHORT-NAME>
+            <PARAMS>
+              <PARAM xsi:type="CODED-CONST">
+                <SHORT-NAME>SID</SHORT-NAME>
+                <BYTE-POSITION>0</BYTE-POSITION>
+                <DIAG-CODED-TYPE BASE-DATA-TYPE="A_UINT32" xsi:type="STANDARD-LENGTH-TYPE">
+                  <BIT-LENGTH>8</BIT-LENGTH>
+                </DIAG-CODED-TYPE>
+                <CODED-VALUE>62</CODED-VALUE>
+              </PARAM>
+            </PARAMS>
+          </REQUEST>
+        </REQUESTS>
+        <POS-RESPONSES>
+          <POS-RESPONSE ID="Response.ReadSerialNumber">
+            <SHORT-NAME>ReadSerialNumberPositive</SHORT-NAME>
+            <PARAMS>
+              <PARAM xsi:type="CODED-CONST">
+                <SHORT-NAME>SID</SHORT-NAME>
+                <BYTE-POSITION>0</BYTE-POSITION>
+                <DIAG-CODED-TYPE BASE-DATA-TYPE="A_UINT32" xsi:type="STANDARD-LENGTH-TYPE">
+                  <BIT-LENGTH>8</BIT-LENGTH>
+                </DIAG-CODED-TYPE>
+                <CODED-VALUE>98</CODED-VALUE>
+              </PARAM>
+              <PARAM xsi:type="CODED-CONST">
+                <SHORT-NAME>DID</SHORT-NAME>
+                <BYTE-POSITION>1</BYTE-POSITION>
+                <DIAG-CODED-TYPE BASE-DATA-TYPE="A_UINT32" xsi:type="STANDARD-LENGTH-TYPE">
+                  <BIT-LENGTH>16</BIT-LENGTH>
+                </DIAG-CODED-TYPE>
+                <CODED-VALUE>61840</CODED-VALUE>
+              </PARAM>
+              <PARAM xsi:type="VALUE">
+                <SHORT-NAME>SerialNumber</SHORT-NAME>
+                <BYTE-POSITION>3</BYTE-POSITION>
+                <DOP-REF ID-REF="DOP.SerialNumber" />
+              </PARAM>
+            </PARAMS>
+          </POS-RESPONSE>
+          <POS-RESPONSE ID="Response.TesterPresent">
+            <SHORT-NAME>TesterPresentPositive</SHORT-NAME>
+            <PARAMS>
+              <PARAM xsi:type="CODED-CONST">
+                <SHORT-NAME>SID</SHORT-NAME>
+                <BYTE-POSITION>0</BYTE-POSITION>
+                <DIAG-CODED-TYPE BASE-DATA-TYPE="A_UINT32" xsi:type="STANDARD-LENGTH-TYPE">
+                  <BIT-LENGTH>8</BIT-LENGTH>
+                </DIAG-CODED-TYPE>
+                <CODED-VALUE>126</CODED-VALUE>
+              </PARAM>
+            </PARAMS>
+          </POS-RESPONSE>
+        </POS-RESPONSES>
+      </BASE-VARIANT>
+    </BASE-VARIANTS>
+  </DIAG-LAYER-CONTAINER>
+</ODX>

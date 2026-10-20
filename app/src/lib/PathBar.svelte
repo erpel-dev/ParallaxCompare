@@ -7,6 +7,8 @@
     spec: () => Promise<SourceSpec>;
     /** Compares against `spec` instead; resolves to false when that failed. */
     apply: (spec: SourceSpec) => Promise<boolean>;
+    /** A PR URL supplies both sides and replaces the whole comparison. */
+    openPullRequest: (url: string) => Promise<boolean>;
     /** The comparison is of two files, so the side must stay a file. */
     file: boolean;
   }
@@ -15,7 +17,7 @@
 <script lang="ts">
   import { tick } from "svelte";
   import { open } from "@tauri-apps/plugin-dialog";
-  import { api, sourceText, type FileHistory, type SourceInfo } from "./api";
+  import { api, isPullRequestUrl, sourceText, type FileHistory, type SourceInfo } from "./api";
   import type { Command } from "./commands";
   import { formatTime } from "./format";
   import PathInput from "./PathInput.svelte";
@@ -95,16 +97,29 @@
   }
 
   async function commit() {
+    if (busy) return;
     const typed = text.trim();
     if (!typed || (original && typed === sourceText(original))) {
       editing = false;
       return;
     }
-    let spec = await api.parseSource(typed);
-    // A worktree side stays a worktree when only its folder is retyped.
-    if (original?.type === "gitWorktree" && spec.type === "local") spec = { type: "gitWorktree", repo: spec.path };
-    if (await apply(spec)) editing = false;
-    else input?.focus();
+    busy = true;
+    try {
+      if (isPullRequestUrl(typed)) {
+        if (await edit!.openPullRequest(typed)) editing = false;
+        else input?.focus();
+      } else {
+        let spec = await api.parseSource(typed);
+        // A worktree side stays a worktree when only its folder is retyped.
+        if (original?.type === "gitWorktree" && spec.type === "local") spec = { type: "gitWorktree", repo: spec.path };
+        if (await apply(spec)) editing = false;
+        else input?.focus();
+      }
+    } catch (e) {
+      notify(String(e));
+    } finally {
+      busy = false;
+    }
   }
 
   /**

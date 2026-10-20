@@ -54,8 +54,8 @@ const EXTENSION_ALIASES: &[(&str, &str)] = &[("psgi", "Perl"), ("pyw", "Python")
 
 /// XML dialects that the bundled XML grammar does not list.
 const XML_EXTENSIONS: &[&str] = &[
-    "arxml", "odx", "odx-d", "odx-c", "odx-v", "odx-f", "odx-e", "odx-cs", "odx-m", "cdd", "cdfx", "fibex", "xdm",
-    "epc", "ecuc", "svg", "xsd", "xsl", "xslt", "xaml", "plist", "resx", "nuspec", "props", "targets", "csproj",
+    "arxml", "odx", "odx-d", "odx-c", "odx-v", "odx-f", "odx-fd", "odx-e", "odx-cs", "odx-m", "cdd", "cdfx", "fibex",
+    "xdm", "epc", "ecuc", "svg", "xsd", "xsl", "xslt", "xaml", "plist", "resx", "nuspec", "props", "targets", "csproj",
     "vcxproj", "xlf", "wsdl", "kml", "gpx", "xmi", "uml", "aird", "launch", "mwe", "oaw", "xml",
 ];
 

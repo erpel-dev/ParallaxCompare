@@ -24,7 +24,7 @@
 
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
-  import { api, type RefList } from "./api";
+  import { api, isPullRequestUrl, type RefList } from "./api";
   import PathInput from "./PathInput.svelte";
 
   let {
@@ -59,7 +59,7 @@
   let refsFor = "";
   $effect(() => {
     const path = value.path.trim();
-    if (value.kind !== "gitRev" || !path || path === refsFor) return;
+    if (value.kind !== "gitRev" || !path || isPullRequestUrl(path) || path === refsFor) return;
     const timer = setTimeout(async () => {
       refsFor = path;
       try {

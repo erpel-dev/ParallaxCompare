@@ -34,6 +34,7 @@ parking_lot = "0.12"
 thiserror = "2"
 serde.workspace = true
 serde_json = { workspace = true, features = ["preserve_order"] }
+url = "2"
 quick-xml = "0.42"
 object = { version = "0.40", default-features = false, features = ["read", "std", "compression"] }
 gimli = { version = "0.34", default-features = false, features = ["read", "std"] }

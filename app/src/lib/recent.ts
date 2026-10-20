@@ -1,6 +1,6 @@
 // Recently compared paths and comparisons, newest first, kept in this browser profile.
 
-import type { SourceOptions, SourceSpec } from "./api";
+import type { PullRequestInfo, SourceOptions, SourceSpec } from "./api";
 
 const KEY = "parallax.recentPaths";
 const MAX = 30;
@@ -31,6 +31,7 @@ export interface SavedComparison {
   right: SourceSpec;
   options: SourceOptions;
   mergeBase: boolean;
+  pullRequest?: PullRequestInfo;
   /** Pinned comparisons stay at the top and are never pushed out. */
   pinned?: boolean;
   /** When it was last opened, milliseconds since the epoch. */

@@ -15,6 +15,7 @@ mod class;
 mod conan;
 mod data;
 mod dbc;
+mod dcm;
 mod doc;
 mod dotnet;
 mod dwarf;
@@ -31,6 +32,7 @@ mod mdf;
 mod media;
 mod needs;
 mod notebook;
+mod odx;
 mod office;
 mod onnx;
 mod parquet;
@@ -125,6 +127,8 @@ pub enum View {
     Measurement,
     /// CDFX calibration data: every instance's values, one per line, sorted by name.
     Calibration,
+    /// ODX diagnostic layers, services, messages, data types and references.
+    Diagnostics,
     /// Raster images: format, colour, EXIF, XMP, IPTC, ICC profile and text chunks.
     ImageMetadata,
     /// Audio and video files: container, duration, tracks, tags, chapters, attachments.
@@ -207,6 +211,7 @@ impl View {
             View::DebugSymbols => "Debug symbols",
             View::Measurement => "Measurement summary",
             View::Calibration => "Calibration values",
+            View::Diagnostics => "ODX diagnostics",
             View::ImageMetadata => "Image metadata",
             View::MediaSummary => "Media summary",
             View::Dependencies => "Dependencies",
@@ -266,6 +271,8 @@ enum Kind {
     LinkMap,
     Mdf,
     Cdfx,
+    Dcm,
+    Odx,
     /// HEIF and AVIF images: metadata only, the pixels are not decoded.
     Heif,
     Media,
@@ -412,6 +419,12 @@ fn kind_of(name: &str, data: &[u8]) -> Kind {
     if matches!(ext.as_str(), "cdfx" | "cdf") && cdfx::is_cdfx(data) {
         return Kind::Cdfx;
     }
+    if ext == "dcm" && dcm::is_dcm(data) {
+        return Kind::Dcm;
+    }
+    if odx::is_name(name) {
+        return Kind::Odx;
+    }
     if cert::is_pem(&ext, data) {
         return Kind::Pem;
     }
@@ -523,6 +536,8 @@ pub fn views_for(name: &str, data: &[u8]) -> Vec<View> {
         Kind::LinkMap => vec![View::MemoryMap, View::Text],
         Kind::Mdf => vec![View::Measurement],
         Kind::Cdfx => vec![View::Calibration, View::Text, View::PrettyXml],
+        Kind::Dcm => vec![View::Calibration, View::Text],
+        Kind::Odx => vec![View::Diagnostics, View::Text, View::PrettyXml],
         Kind::Notebook => vec![View::Notebook, View::NotebookCode, View::Text],
         Kind::Lockfile => vec![View::Dependencies, View::Text],
         Kind::Yaml => vec![View::Text, View::NormalizedYaml],
@@ -631,7 +646,9 @@ pub fn render(view: View, name: &str, data: &[u8]) -> Result<String> {
         View::MemoryMap => linkmap::memory_map(&text::decode(data).text),
         View::DebugSymbols => dwarf::debug_symbols(data),
         View::Measurement => mdf::summary(data),
+        View::Calibration if kind_of(name, data) == Kind::Dcm => dcm::values(&text::decode(data).text),
         View::Calibration => cdfx::values(&text::decode(data).text),
+        View::Diagnostics => odx::diagnostics(&text::decode(data).text),
         View::ImageMetadata => image_meta::metadata(data),
         View::MediaSummary => media::summary(&extension(name), data),
         View::Dependencies => lockfile::dependencies(name, data),
@@ -721,7 +738,8 @@ const MAX_SOURCE_COMPARE: usize = 16 * 1024 * 1024;
 
 /// Whether [`content_equal`] can apply to a file, judged by its name alone.
 pub fn has_content_rule(name: &str) -> bool {
-    lockfile::format_of(name).is_some()
+    odx::is_name(name)
+        || lockfile::format_of(name).is_some()
         || name.rsplit(['/', '\\']).next().is_some_and(|f| {
             ["needs.json", "conanfile.txt", "conaninfo.txt", "conanbuildinfo.txt", "conanmanifest.txt"]
                 .iter()
@@ -775,6 +793,7 @@ pub fn has_content_rule(name: &str) -> bool {
                 | "db"
                 | "db3"
                 | "dbc"
+                | "dcm"
                 | "der"
                 | "dll"
                 | "docm"
@@ -872,6 +891,20 @@ pub fn content_equal(name: &str, left: &[u8], right: &[u8]) -> Option<&'static s
         Kind::Cdfx => {
             return cdfx::same_values(&text::decode(left).text, &text::decode(right).text)?
                 .then_some("same values, only order or formatting differ");
+        }
+        Kind::Dcm | Kind::Odx => {
+            let (l, r) = (text::decode(left), text::decode(right));
+            // Damaged encodings must not become equal through replacement characters.
+            if l.encode().ok()?.as_slice() != left || r.encode().ok()?.as_slice() != right {
+                return None;
+            }
+            return if kl == Kind::Dcm {
+                dcm::same_values(&l.text, &r.text)?
+                    .then_some("same calibration objects, only order, comments or number formatting differ")
+            } else {
+                (odx::diagnostics(&l.text).ok()? == odx::diagnostics(&r.text).ok()?)
+                    .then_some("same diagnostic definitions, only XML layout or definition order differ")
+            };
         }
         Kind::Lockfile => {
             return lockfile::same_packages(name, left, right)?
@@ -982,6 +1015,57 @@ mod tests {
         assert_eq!(views_for("notes.txt", b"hello"), vec![View::Text, View::Hex]);
         let pair = views_for_pair(Some(("a.xml", b"<a/>")), Some(("a.xml", b"\x00")));
         assert_eq!(pair, vec![View::Hex]);
+    }
+
+    #[test]
+    fn automotive_calibration_and_diagnostics_views() {
+        let dcm = include_bytes!("../../tests/fixtures/automotive/engine-v1.dcm");
+        let dcm_format = include_bytes!("../../tests/fixtures/automotive/engine-v1-reformatted.dcm");
+        let dcm_changed = include_bytes!("../../tests/fixtures/automotive/engine-v2.dcm");
+        let odx = include_bytes!("../../tests/fixtures/automotive/engine-v1.odx-d");
+        let odx_format = include_bytes!("../../tests/fixtures/automotive/engine-v1-reformatted.odx-d");
+        let odx_changed = include_bytes!("../../tests/fixtures/automotive/engine-v2.odx-d");
+        assert_eq!(views_for("engine.DCM", dcm), vec![View::Calibration, View::Text, View::Hex]);
+        assert_eq!(views_for("scan.dcm", b"DICM\0\0"), vec![View::Hex]);
+        assert_eq!(views_for("notes.dcm", b"unrelated text"), vec![View::Text, View::Hex]);
+        assert!(content_equal("engine.dcm", dcm, dcm_format).is_some());
+        assert!(content_equal("engine.dcm", dcm, dcm_changed).is_none());
+        for name in [
+            "engine.odx",
+            "engine.ODX-D",
+            "ecu.odx-c",
+            "ecu.odx-cs",
+            "ecu.odx-f",
+            "ecu.odx-fd",
+            "ecu.odx-e",
+            "ecu.odx-v",
+            "ecu.odx-m",
+        ] {
+            assert_eq!(views_for(name, odx), vec![View::Diagnostics, View::Text, View::PrettyXml, View::Hex]);
+            assert!(has_content_rule(name));
+            assert!(content_equal(name, odx, odx_format).is_some());
+            assert!(content_equal(name, odx, odx_changed).is_none());
+        }
+        assert_eq!(
+            similar_view("engine.odx", odx, odx_format, &views_for("engine.odx", odx)).unwrap().0,
+            View::Diagnostics
+        );
+        assert!(content_equal("engine.odx", b"<ODX>", b"<ODX>").is_none());
+        assert!(has_content_rule("engine.dcm"));
+        assert!(!can_write_back(View::Calibration));
+        assert!(!can_write_back(View::Diagnostics));
+
+        // UTF-16 exports have the same view and content as their UTF-8 counterpart.
+        for (name, bytes, view) in
+            [("engine.dcm", dcm.as_slice(), View::Calibration), ("engine.odx", odx.as_slice(), View::Diagnostics)]
+        {
+            let text = std::str::from_utf8(bytes).unwrap().replace("encoding='utf-8'", "encoding='utf-16'");
+            let utf16: Vec<u8> =
+                [0xff, 0xfe].into_iter().chain(text.encode_utf16().flat_map(u16::to_le_bytes)).collect();
+            assert_eq!(views_for(name, &utf16)[0], view);
+            assert_eq!(render(view, name, bytes).unwrap(), render(view, name, &utf16).unwrap());
+            assert!(content_equal(name, bytes, &utf16).is_some());
+        }
     }
 
     macro_rules! fixture {

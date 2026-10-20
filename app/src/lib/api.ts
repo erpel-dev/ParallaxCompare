@@ -6,6 +6,27 @@ export type SourceSpec =
   | { type: "gitRev"; repo: string; rev: string; subpath?: string }
   | { type: "gitWorktree"; repo: string };
 
+export interface PullRequestInfo {
+  url: string;
+  number: number;
+  title: string;
+}
+
+export interface PullRequestComparison extends PullRequestInfo {
+  left: SourceSpec;
+  right: SourceSpec;
+}
+
+/** Only recognizes the URL shape. The backend validates and resolves it on submit. */
+export function isPullRequestUrl(text: string): boolean {
+  try {
+    const url = new URL(text.trim());
+    return ["https:", "http:"].includes(url.protocol) && /^\/[^/]+\/[^/]+\/pull(?:\/|$)/.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
 /** A source as text, the form the CLI and the path bars read: `repo@rev:sub` for Git. */
 export function sourceText(spec: SourceSpec): string {
   switch (spec.type) {
@@ -195,6 +216,7 @@ export type View =
   | "debugSymbols"
   | "measurement"
   | "calibration"
+  | "diagnostics"
   | "imageMetadata"
   | "mediaSummary"
   | "dependencies"
@@ -341,6 +363,7 @@ export const api = {
   inspectPath: (path: string) => invoke<PathInfo>("inspect_path", { path }),
   gitRefs: (repo: string) => invoke<RefList>("git_refs", { repo }),
   parseSource: (text: string) => invoke<SourceSpec>("parse_source", { text }),
+  resolvePullRequest: (url: string) => invoke<PullRequestComparison>("resolve_pull_request", { url }),
   sideSource: (id: number, left: boolean, rel: string) => invoke<SourceSpec>("side_source", { id, left, rel }),
   completePath: (text: string) => invoke<string[]>("complete_path", { text }),
   sourceParent: (spec: SourceSpec) => invoke<SourceSpec | null>("source_parent", { spec }),

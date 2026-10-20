@@ -7,7 +7,7 @@
   import NewCompare from "./lib/NewCompare.svelte";
   import type { SideEdit } from "./lib/PathBar.svelte";
   import TextView from "./lib/TextView.svelte";
-  import { api, sourceName, sourceText, type SessionInfo, type SourceOptions, type SourceSpec } from "./lib/api";
+  import { api, isPullRequestUrl, sourceName, sourceText, type PullRequestInfo, type SessionInfo, type SourceOptions, type SourceSpec } from "./lib/api";
   import type { NavActions } from "./lib/Nav.svelte";
   import type { Command } from "./lib/commands";
   import Palette from "./lib/Palette.svelte";
@@ -22,6 +22,7 @@
     right: SourceSpec;
     options: SourceOptions;
     mergeBase: boolean;
+    pullRequest?: PullRequestInfo;
   }
 
   /** What every comparison tab keeps besides its session. */
@@ -148,7 +149,11 @@
 
   function sessionTab(session: SessionInfo, request: Request, shared: Shared = {}): SessionTab {
     const key = nextKey++;
-    const title = titleFor(session);
+    if (request.pullRequest) {
+      session.left.rev = "Merge base";
+      session.right.rev = `PR #${request.pullRequest.number} head`;
+    }
+    const title = request.pullRequest ? `PR #${request.pullRequest.number}: ${request.pullRequest.title}` : titleFor(session);
     const tab: SessionTab = session.isFile
       ? { key, kind: "text", title, session, path: "", request, ...shared }
       : { key, kind: "folder", title, session, request, ...shared };
@@ -167,6 +172,7 @@
 
   function remember(request: Request) {
     rememberPaths(sourceText(request.left), sourceText(request.right));
+    if (request.pullRequest) rememberPaths(request.pullRequest.url);
     rememberComparison($state.snapshot(request));
     clearErrors();
   }
@@ -206,7 +212,7 @@
    * comparison, its sides are that file on each side.
    */
   async function requestOf(tab: SessionTab, changes: Partial<Record<SideName, SourceSpec>> = {}): Promise<Request> {
-    if (tab.request) return { ...tab.request, ...changes };
+    if (tab.request) return { ...tab.request, ...changes, pullRequest: Object.keys(changes).length ? undefined : tab.request.pullRequest };
     const side = (s: SideName) => (changes[s] ? Promise.resolve(changes[s]) : sideSpec(tab, s));
     const [left, right] = await Promise.all([side("left"), side("right")]);
     const options = parentOf(tab)?.request.options ?? { expandArchives: true, respectGitignore: true };
@@ -274,9 +280,27 @@
   }
 
   function sideEdits(tab: SessionTab): [SideEdit, SideEdit] {
+    const openPullRequest = async (url: string): Promise<boolean> => {
+      try {
+        const pr = await api.resolvePullRequest(url);
+        const { title, number } = pr;
+        return replace(tab, {
+          left: pr.left, right: pr.right,
+          options: tab.request?.options ?? parentOf(tab)?.request.options ?? { expandArchives: true, respectGitignore: true },
+          mergeBase: false, pullRequest: { url: pr.url, title, number },
+        });
+      } catch (e) {
+        notify(String(e));
+        return false;
+      }
+    };
     const make = (side: SideName): SideEdit => ({
       spec: () => sideSpec(tab, side),
-      apply: (spec) => changeSides(tab, { [side]: spec }),
+      apply: (spec) => {
+        const text = spec.type === "local" ? spec.path : spec.repo;
+        return isPullRequestUrl(text) ? openPullRequest(text) : changeSides(tab, { [side]: spec });
+      },
+      openPullRequest,
       file: tab.kind === "text",
     });
     return [make("left"), make("right")];
@@ -285,7 +309,7 @@
   async function swap(tab: SessionTab) {
     try {
       const r = await requestOf(tab);
-      await replace(tab, { ...r, left: r.right, right: r.left });
+      await replace(tab, { ...r, left: r.right, right: r.left, pullRequest: undefined });
     } catch (e) {
       notify(String(e));
     }
@@ -540,7 +564,7 @@
         {#if tab.kind === "new"}
           <NewCompare
             bind:this={pickers[tab.key]}
-            onCompare={(left, right, options, mergeBase) => start({ left, right, options, mergeBase }, tab.key)}
+            onCompare={(left, right, options, mergeBase, pullRequest) => start({ left, right, options, mergeBase, pullRequest }, tab.key)}
           />
         {:else if tab.kind === "folder"}
           <FolderView

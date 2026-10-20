@@ -15,6 +15,7 @@ fn main() {
             commands::inspect_path,
             commands::git_refs,
             commands::parse_source,
+            commands::resolve_pull_request,
             commands::side_source,
             commands::complete_path,
             commands::source_parent,

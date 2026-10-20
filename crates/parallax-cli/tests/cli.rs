@@ -41,6 +41,32 @@ fn hunk_headers_follow_unified_diff() {
     assert!(out.contains("@@ -4,1 +3,0 @@\n-4\n"), "{out}");
 }
 
+#[test]
+fn dcm_odx_and_pdx_content_comparisons() {
+    let fixture = |name: &str| {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../parallax-core/tests/fixtures/automotive").join(name)
+    };
+    for (ext, formatted_suffix, expected) in [
+        ("dcm", "reformatted", "Value: 850"),
+        ("odx-d", "reformatted", "BIT-LENGTH"),
+        ("pdx", "repacked", "diagnostics/engine.odx-d"),
+    ] {
+        let (left, same, changed) = (
+            fixture(&format!("engine-v1.{ext}")),
+            fixture(&format!("engine-v1-{formatted_suffix}.{ext}")),
+            fixture(&format!("engine-v2.{ext}")),
+        );
+        let (code, out) = parallax(&[left.to_str().unwrap(), same.to_str().unwrap()]);
+        assert_eq!(code, 0, "{ext}: {out}");
+        let (code, out) = parallax(&[left.to_str().unwrap(), changed.to_str().unwrap()]);
+        assert_eq!(code, 1, "{ext}: {out}");
+        assert!(out.contains(expected), "{ext}: {out}");
+        if ext != "pdx" {
+            assert_eq!(parallax(&[left.to_str().unwrap(), same.to_str().unwrap(), "--raw"]).0, 1);
+        }
+    }
+}
+
 /// Entries that could not be read make the exit status 2, also with --json, after
 /// the result is printed.
 #[test]

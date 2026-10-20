@@ -191,6 +191,11 @@ pub async fn parse_source(text: String) -> CmdResult<SourceSpec> {
     blocking(move || Ok(SourceSpec::parse(&text))).await
 }
 
+#[tauri::command]
+pub async fn resolve_pull_request(url: String) -> CmdResult<parallax_core::pull_request::PullRequestComparison> {
+    blocking(move || parallax_core::pull_request::resolve(&url).map_err(err)).await
+}
+
 /// The source of the entry at `rel` on one side of a comparison, so a file opened
 /// from a folder comparison can be compared on its own.
 #[tauri::command]

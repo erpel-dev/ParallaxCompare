@@ -1,6 +1,6 @@
 <script lang="ts">
   import SidePicker, { toSpec, type PickerValue } from "./SidePicker.svelte";
-  import { api, sourceName, sourceText, type SourceOptions, type SourceSpec } from "./api";
+  import { api, isPullRequestUrl, sourceName, sourceText, type PullRequestInfo, type SourceOptions, type SourceSpec } from "./api";
   import {
     comparisonKey,
     forgetComparison,
@@ -11,7 +11,7 @@
 
   let {
     onCompare,
-  }: { onCompare: (left: SourceSpec, right: SourceSpec, options: SourceOptions, mergeBase: boolean) => void } =
+  }: { onCompare: (left: SourceSpec, right: SourceSpec, options: SourceOptions, mergeBase: boolean, pullRequest?: PullRequestInfo) => void | Promise<void> } =
     $props();
 
   const STORAGE_KEY = "parallax.newCompare";
@@ -37,9 +37,12 @@
   let right = $state(initial.right);
   let options = $state(initial.options);
   let mergeBase = $state(initial.mergeBase);
+  let busy = $state(false);
+  let error = $state("");
 
   const bothGit = $derived(left.kind === "gitRev" && right.kind === "gitRev");
-  const ready = $derived(left.path.trim() !== "" && right.path.trim() !== "");
+  const pullRequests = $derived([...new Set([left.path, right.path].map((p) => p.trim()).filter(isPullRequestUrl))]);
+  const ready = $derived(pullRequests.length > 0 || (left.path.trim() !== "" && right.path.trim() !== ""));
 
   function swap() {
     [left, right] = [right, left];
@@ -53,7 +56,7 @@
   let recent = $state(recentComparisons());
 
   const title = (c: SavedComparison, depth: number) =>
-    `${sourceName(c.left, depth)} ↔ ${sourceName(c.right, depth)}${c.mergeBase ? " (merge-base)" : ""}`;
+    c.pullRequest ? `PR #${c.pullRequest.number}: ${c.pullRequest.title}` : `${sourceName(c.left, depth)} ↔ ${sourceName(c.right, depth)}${c.mergeBase ? " (merge-base)" : ""}`;
 
   /** Titles for the recent list, naming parent folders where two would otherwise read the same. */
   const titles = $derived.by(() => {
@@ -94,6 +97,13 @@
 
   /** Puts a recent comparison into the form, to change it before comparing. */
   async function edit(c: SavedComparison) {
+    if (c.pullRequest) {
+      left = { kind: "folder", path: c.pullRequest.url, rev: "", subpath: "" };
+      right = { kind: "folder", path: "", rev: "", subpath: "" };
+      options = { ...c.options };
+      mergeBase = false;
+      return;
+    }
     left = await pickerFor(c.left);
     right = await pickerFor(c.right);
     options = { ...c.options };
@@ -118,13 +128,28 @@
   }
 
   async function submit() {
-    if (!ready) return;
+    if (!ready || busy) return;
+    error = "";
+    busy = true;
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ left, right, options, mergeBase }));
-    } catch {
-      // Remembering the last comparison is a convenience only.
+      if (pullRequests.length > 1) throw new Error("Paste one pull request URL; it supplies both comparison sides.");
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({ left, right, options, mergeBase }));
+      } catch {
+        // Remembering the last comparison is a convenience only.
+      }
+      if (pullRequests.length) {
+        const pr = await api.resolvePullRequest(pullRequests[0]);
+        const { url, title, number } = pr;
+        await onCompare(pr.left, pr.right, { ...options }, false, { url, title, number });
+      } else {
+        await onCompare(await toSpec(left), await toSpec(right), { ...options }, bothGit && mergeBase);
+      }
+    } catch (e) {
+      error = String(e);
+    } finally {
+      busy = false;
     }
-    onCompare(await toSpec(left), await toSpec(right), { ...options }, bothGit && mergeBase);
   }
 </script>
 
@@ -137,24 +162,30 @@
     }}
   >
     <header>New comparison</header>
-    <div class="sides">
-      <SidePicker title="Left" bind:value={left} onEnter={submit} />
-      <button type="button" class="swap" title="Swap sides" onclick={swap}>⇄</button>
-      <SidePicker title="Right" bind:value={right} onEnter={submit} />
-    </div>
-    <div class="opts">
-      <label title="Replace the left revision by its merge-base with the right one: shows only what the right side changed since it branched off">
-        <input type="checkbox" bind:checked={mergeBase} disabled={!bothGit} /> Compare against merge-base
-      </label>
-      <label><input type="checkbox" bind:checked={options.expandArchives} /> Expand archives (zip, 7z, tar.*, jar …)</label>
-      <label><input type="checkbox" bind:checked={options.respectGitignore} /> Respect .gitignore</label>
-    </div>
-    <footer>
-      <span class="tip">
-        Paths also accept <code>release.7z!/bin</code>, <code>~/src/repo@v1.4:src</code> and links to files or folders on GitHub, GitLab, Bitbucket or Gitea.
-      </span>
-      <button type="submit" class="primary" disabled={!ready}>Compare</button>
-    </footer>
+    <fieldset disabled={busy}>
+      <div class="sides">
+        <SidePicker title="Left" bind:value={left} onEnter={submit} />
+        <button type="button" class="swap" title="Swap sides" onclick={swap}>⇄</button>
+        <SidePicker title="Right" bind:value={right} onEnter={submit} />
+      </div>
+      <div class="opts">
+        <label title="Replace the left revision by its merge-base with the right one: shows only what the right side changed since it branched off">
+          <input type="checkbox" bind:checked={mergeBase} disabled={!bothGit || pullRequests.length > 0} /> Compare against merge-base
+        </label>
+        <label><input type="checkbox" bind:checked={options.expandArchives} /> Expand archives (zip, 7z, tar.*, jar …)</label>
+        <label><input type="checkbox" bind:checked={options.respectGitignore} /> Respect .gitignore</label>
+      </div>
+      {#if pullRequests.length}
+        <p class="pr-hint" role="status">{busy ? "Opening pull request…" : "Pull request: merge base on the left, PR head on the right. Both sides are read-only; the other path is ignored."}</p>
+      {/if}
+      {#if error}<p class="form-error" role="alert">{error}</p>{/if}
+      <footer>
+        <span class="tip">
+          Paste a GitHub pull request URL in either path, including Enterprise hosts. Paths also accept <code>release.7z!/bin</code>, <code>~/src/repo@v1.4:src</code> and repository file links.
+        </span>
+        <button type="submit" class="primary" disabled={!ready || busy}>{busy ? "Opening…" : "Compare"}</button>
+      </footer>
+    </fieldset>
   </form>
 
   {#if recent.length}
@@ -164,7 +195,7 @@
         <div class="entry">
           <button
             class="open"
-            onclick={() => onCompare(c.left, c.right, { ...c.options }, c.mergeBase)}
+            onclick={() => onCompare(c.left, c.right, { ...c.options }, c.mergeBase, c.pullRequest)}
             title="Compare again with the same options"
           >
             <span class="names">{titles[i]}</span>
@@ -193,6 +224,24 @@
     border: 1px solid var(--line);
     border-radius: 8px;
     box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  }
+  fieldset {
+    border: 0;
+    padding: 0;
+    margin: 0;
+    min-width: 0;
+  }
+  .pr-hint, .form-error {
+    margin: 0;
+    padding: 0 14px 12px;
+  }
+  .pr-hint {
+    color: var(--dim);
+  }
+  .form-error {
+    color: var(--error, #e36c6c);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
   header {
     padding: 10px 14px;

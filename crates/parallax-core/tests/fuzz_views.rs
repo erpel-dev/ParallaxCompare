@@ -99,6 +99,8 @@ fn views_survive_broken_source() {
         "conanfile.txt",
         "a.a2l",
         "a.dbc",
+        "a.dcm",
+        "a.odx-d",
         "Cargo.lock",
         "a.ipynb",
         "a.xml",
@@ -119,6 +121,30 @@ fn views_survive_broken_source() {
             let _ = convert::content_equal(name, a.as_bytes(), a.as_bytes());
         }
         let _ = round;
+    }
+}
+
+#[test]
+fn automotive_descriptions_survive_damaged_exports() {
+    let cases: [(&str, &[u8], convert::View); 2] = [
+        ("engine.dcm", include_bytes!("fixtures/automotive/engine-v1.dcm"), convert::View::Calibration),
+        ("engine.odx-d", include_bytes!("fixtures/automotive/engine-v1.odx-d"), convert::View::Diagnostics),
+    ];
+    let mut random = Random(91);
+    for (name, original, view) in cases {
+        for _ in 0..150 {
+            let mut changed = original.to_vec();
+            for _ in 0..1 + random.next() % 8 {
+                // Keep the DCM signature, so the changed data still exercises its parser.
+                let at = 40 + random.next() % (changed.len() - 40);
+                changed[at] = b' ' + (random.next() % 95) as u8;
+            }
+            let _ = convert::render(view, name, &changed);
+            let _ = convert::content_equal(name, original, &changed);
+        }
+        for end in (0..original.len()).step_by(37) {
+            let _ = convert::render(view, name, &original[..end]);
+        }
     }
 }
 

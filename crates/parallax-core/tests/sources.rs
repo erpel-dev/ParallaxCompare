@@ -49,6 +49,49 @@ fn zip_raw(files: &[(&str, &[u8])]) -> Vec<u8> {
     buf.into_inner()
 }
 
+#[test]
+fn pdx_packages_compare_diagnostics_and_keep_auxiliary_files() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let v1 = include_bytes!("fixtures/automotive/engine-v1.pdx");
+    let repacked = include_bytes!("fixtures/automotive/engine-v1-repacked.pdx");
+    let changed = include_bytes!("fixtures/automotive/engine-v2.pdx");
+    assert_eq!(
+        parallax_core::vfs::archive::detect_format("ENGINE.PDX"),
+        Some(parallax_core::vfs::archive::ArchiveFormat::Zip)
+    );
+    let left = a.path().join("engine.pdx");
+    let right = b.path().join("engine.pdx");
+    fs::write(&left, v1).unwrap();
+    fs::write(&right, repacked).unwrap();
+    let opts = CompareOptions::default();
+    let result = statuses(left.to_str().unwrap(), right.to_str().unwrap(), &opts);
+    assert_eq!(status_of(&result, "diagnostics/engine.odx-d"), Status::Similar);
+    assert_eq!(status_of(&result, "flash/payload.bin"), Status::Same);
+    let inner = SourceSpec::parse(&format!("{}!/diagnostics/engine.odx-d", left.display()));
+    let source = inner.open(SourceOptions::default()).unwrap();
+    assert!(source.is_file().unwrap());
+    let data = source.vfs.read(&source.path("")).unwrap();
+    let view = parallax_core::convert::views_for("engine.odx-d", &data)[0];
+    assert_eq!(view, parallax_core::convert::View::Diagnostics);
+
+    fs::write(&right, changed).unwrap();
+    let result = statuses(left.to_str().unwrap(), right.to_str().unwrap(), &opts);
+    assert_eq!(status_of(&result, "diagnostics/engine.odx-d"), Status::Different);
+    // A PDX is still an ordinary browsable archive; non-ODX payloads are compared too.
+    fs::write(
+        &right,
+        zip_raw(&[
+            ("index.xml", b"<CATALOG/>"),
+            ("diagnostics/engine.odx-d", include_bytes!("fixtures/automotive/engine-v1.odx-d")),
+            ("flash/payload.bin", &[0, 1, 2, 99]),
+        ]),
+    )
+    .unwrap();
+    let result = statuses(left.to_str().unwrap(), right.to_str().unwrap(), &opts);
+    assert_eq!(status_of(&result, "flash/payload.bin"), Status::Different);
+}
+
 fn statuses(left: &str, right: &str, opts: &CompareOptions) -> Vec<(String, Status)> {
     let (l, r) = open_pair(&SourceSpec::parse(left), &SourceSpec::parse(right), SourceOptions::default(), false)
         .expect("sources open");
