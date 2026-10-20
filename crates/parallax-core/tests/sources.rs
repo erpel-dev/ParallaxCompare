@@ -99,6 +99,72 @@ fn statuses(left: &str, right: &str, opts: &CompareOptions) -> Vec<(String, Stat
     compare::flatten(&result.root)
 }
 
+#[test]
+fn flatbuffers_sidecars_work_in_folders_archives_and_git_revisions() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("left");
+    let b = dir.path().join("right");
+    fs::create_dir(&a).unwrap();
+    fs::create_dir(&b).unwrap();
+    let original = include_bytes!("fixtures/score/data-v1.bin");
+    let repacked = include_bytes!("fixtures/score/data-repacked.bin");
+    let changed = include_bytes!("fixtures/score/data-v2.bin");
+    let schema = include_bytes!("fixtures/score/config.bfbs");
+    for (folder, data) in [(&a, original.as_slice()), (&b, repacked.as_slice())] {
+        fs::write(folder.join("config.bin"), data).unwrap();
+        fs::write(folder.join("config.bfbs"), schema).unwrap();
+    }
+    let opts = CompareOptions::default();
+    assert_eq!(status_of(&statuses(a.to_str().unwrap(), b.to_str().unwrap(), &opts), "config.bin"), Status::Similar);
+    let bytes_only = CompareOptions { compare_contents: false, ..Default::default() };
+    assert_eq!(
+        status_of(&statuses(a.to_str().unwrap(), b.to_str().unwrap(), &bytes_only), "config.bin"),
+        Status::Different
+    );
+    fs::write(b.join("config.bin"), changed).unwrap();
+    assert_eq!(status_of(&statuses(a.to_str().unwrap(), b.to_str().unwrap(), &opts), "config.bin"), Status::Different);
+
+    let zip = |data: &[u8]| {
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        let mut zip = zip::ZipWriter::new(&mut cursor);
+        for (name, data) in [("nested/config.bin", data), ("nested/config.bfbs", schema.as_slice())] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(data).unwrap();
+        }
+        zip.finish().unwrap();
+        cursor.into_inner()
+    };
+    let azip = dir.path().join("left.zip");
+    let bzip = dir.path().join("right.zip");
+    fs::write(&azip, zip(original)).unwrap();
+    fs::write(&bzip, zip(repacked)).unwrap();
+    assert_eq!(
+        status_of(&statuses(azip.to_str().unwrap(), bzip.to_str().unwrap(), &opts), "nested/config.bin"),
+        Status::Similar
+    );
+    let source =
+        SourceSpec::parse(&format!("{}!/nested/config.bin", azip.display())).open(SourceOptions::default()).unwrap();
+    let data = source.vfs.read(&source.root).unwrap();
+    let views = parallax_core::convert::views_for_source(&source, "", "config.bin", &data, None);
+    assert_eq!(views[0], parallax_core::convert::View::FlatbufferData);
+    assert!(
+        parallax_core::convert::render_source(views[0], &source, "", "config.bin", &data, None)
+            .unwrap()
+            .contains("9007199254740993")
+    );
+
+    git(&a, &["init", "-q", "-b", "main"]);
+    git(&a, &["add", "."]);
+    git(&a, &["commit", "-q", "-m", "Original buffer"]);
+    fs::write(a.join("config.bin"), repacked).unwrap();
+    git(&a, &["add", "."]);
+    git(&a, &["commit", "-q", "-m", "Repack buffer"]);
+    assert_eq!(
+        status_of(&statuses(&format!("{}@HEAD~1", a.display()), &format!("{}@HEAD", a.display()), &opts), "config.bin"),
+        Status::Similar
+    );
+}
+
 fn status_of(list: &[(String, Status)], path: &str) -> Status {
     list.iter().find(|(p, _)| p == path).unwrap_or_else(|| panic!("{path} missing in {list:?}")).1
 }

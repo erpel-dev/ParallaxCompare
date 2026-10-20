@@ -813,6 +813,7 @@ pub async fn open_file_diff(
     options: DiffOptions,
     syntax: Option<String>,
     view: Option<View>,
+    flatbuffer_schemas: Option<[Option<String>; 2]>,
 ) -> CmdResult<FileDiffInfo> {
     check_paths(std::slice::from_ref(&path))?;
     let session = state.session(id)?;
@@ -826,17 +827,21 @@ pub async fn open_file_diff(
         } else {
             path.clone()
         };
-        let views = convert::views_for_pair(
-            left_data.as_deref().map(|d| (name.as_str(), d)),
-            right_data.as_deref().map(|d| (name.as_str(), d)),
-        );
+        let schemas = flatbuffer_schemas.unwrap_or_default();
+        let lviews = left_data.as_deref().map(|d| convert::views_for_source(&session.left, &path, &name, d, schemas[0].as_deref()));
+        let rviews = right_data.as_deref().map(|d| convert::views_for_source(&session.right, &path, &name, d, schemas[1].as_deref()));
+        let views = match (lviews, rviews) {
+            (Some(l), Some(r)) => l.into_iter().filter(|v| r.contains(v)).collect::<Vec<_>>(),
+            (Some(v), None) | (None, Some(v)) => v,
+            _ => vec![View::Text],
+        };
         let mut chosen = view.filter(|v| views.contains(v)).unwrap_or(views[0]);
         // Summary views of large files (models, media) read only headers: comparing all
         // bytes would read gigabytes of weights just to say whether the files are equal.
         let unread = matches!((&left_data, &right_data), (Some(l), Some(r)) if l.len() == r.len())
             && left_data.as_deref().map_or(0, <[u8]>::len) > FULL_COMPARE_LIMIT
             && !matches!(chosen, View::Text | View::Hex | View::Image);
-        let identical = !unread && left_data.is_some() && left_data.as_deref() == right_data.as_deref();
+        let identical = chosen != View::FlatbufferData && !unread && left_data.is_some() && left_data.as_deref() == right_data.as_deref();
         let mut note = None;
         // ≈ similar files open in the view where they are equal, and say why.
         if view.is_none()
@@ -889,17 +894,18 @@ pub async fn open_file_diff(
         // the other, so the two sides run at the same time.
         // A converter that panics on damaged input fails like one that returns an error,
         // on either side, and falls back below.
-        let render = |data: &Option<Data>, view: View| -> Option<Result<String, String>> {
+        let render = |data: &Option<Data>, view: View, side: usize| -> Option<Result<String, String>> {
             data.as_ref().map(|d| {
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| convert::render(view, &name, d).map_err(err)))
+                let source = if side == 0 { &session.left } else { &session.right };
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| convert::render_source(view, source, &path, &name, d, schemas[side].as_deref()).map_err(err)))
                     .unwrap_or_else(|_| Err("the file could not be read (internal error)".into()))
             })
         };
         let (mut left_text, mut right_text) = (None, None);
         if !matches!(chosen, View::Image | View::Text) {
             (left_text, right_text) = std::thread::scope(|s| {
-                let l = s.spawn(|| render(&left_data, chosen));
-                let r = render(&right_data, chosen);
+                let l = s.spawn(|| render(&left_data, chosen, 0));
+                let r = render(&right_data, chosen, 1);
                 (l.join().unwrap_or_else(|_| Some(Err("the file could not be read (internal error)".into()))), r)
             });
             // Either side failing falls back, whichever it is.
@@ -909,7 +915,7 @@ pub async fn open_file_diff(
                 note = Some(format!("{} is not available: {e}. Showing {}.", chosen.label(), fallback.label()));
                 chosen = fallback;
                 (left_text, right_text) = if fallback == View::Hex {
-                    (render(&left_data, fallback), render(&right_data, fallback))
+                    (render(&left_data, fallback, 0), render(&right_data, fallback, 1))
                 } else {
                     (None, None)
                 };
@@ -972,7 +978,8 @@ pub async fn open_file_diff(
             View::Text => syntax
                 .or_else(|| highlight::detect_syntax(&name, first_line.unwrap_or_default()).map(|s| s.name.clone())),
             View::PrettyXml | View::AndroidXml => Some("XML".into()),
-            View::PrettyJson => Some("JSON".into()),
+            View::PrettyJson | View::ScoreConfiguration | View::FlatbufferData => Some("JSON".into()),
+            View::Definitions => highlight::detect_syntax(&name, "").map(|s| s.name.clone()),
             View::NormalizedYaml => Some("YAML".into()),
             View::NormalizedToml => Some("TOML".into()),
             View::ReflowedText => syntax.or_else(|| Some("reStructuredText".into())),

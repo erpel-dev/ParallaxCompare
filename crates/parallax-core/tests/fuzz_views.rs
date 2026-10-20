@@ -159,6 +159,38 @@ fn legacy_word_documents_render() {
     }
 }
 
+#[test]
+fn score_config_and_definition_mutations_do_not_panic() {
+    let cases: &[(&str, &[u8], convert::View)] = &[
+        (
+            "mw_com_config.json",
+            include_bytes!("fixtures/score/communication-v1.json"),
+            convert::View::ScoreConfiguration,
+        ),
+        ("requirements.trlc", include_bytes!("fixtures/score/requirements-v1.trlc"), convert::View::Definitions),
+        ("model.rsl", include_bytes!("fixtures/score/definitions-v1.rsl"), convert::View::Definitions),
+        ("config.fbs", include_bytes!("fixtures/score/config.fbs"), convert::View::Definitions),
+        ("service.proto", include_bytes!("fixtures/score/definitions-v1.proto"), convert::View::Definitions),
+        ("service.fidl", include_bytes!("fixtures/score/definitions-v1.fidl"), convert::View::Definitions),
+        ("deploy.fdepl", include_bytes!("fixtures/score/definitions-v1.fdepl"), convert::View::Definitions),
+    ];
+    let mut random = Random(98);
+    for &(name, data, view) in cases {
+        for _ in 0..100 {
+            let mut changed = data.to_vec();
+            for _ in 0..4 {
+                let at = random.next() % changed.len();
+                changed[at] = random.next() as u8;
+            }
+            let _ = convert::render(view, name, &changed);
+            let _ = convert::content_equal(name, data, &changed);
+        }
+        for end in (0..data.len()).step_by(13) {
+            let _ = convert::render(view, name, &data[..end]);
+        }
+    }
+}
+
 /// Binary Visio drawings with bytes changed inside their VisioDocument stream
 /// (so that the compound file around it stays readable) render or fail, never
 /// panic. Bytes before 0x40 stay: with a broken header the reader gives up.

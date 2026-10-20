@@ -67,6 +67,36 @@ fn dcm_odx_and_pdx_content_comparisons() {
     }
 }
 
+#[test]
+fn score_configurations_definitions_and_flatbuffers() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../parallax-core/tests/fixtures/score");
+    for prefix in ["communication", "launch", "logging", "parameters"] {
+        let a = dir.join(format!("{prefix}-v1.json"));
+        let b = dir.join(format!("{prefix}-reordered.json"));
+        let c = dir.join(format!("{prefix}-v2.json"));
+        assert_eq!(parallax(&[a.to_str().unwrap(), b.to_str().unwrap()]).0, 0, "{prefix}");
+        assert_eq!(parallax(&[a.to_str().unwrap(), c.to_str().unwrap()]).0, 1, "{prefix}");
+        assert_eq!(parallax(&[a.to_str().unwrap(), b.to_str().unwrap(), "--raw"]).0, 1, "{prefix}");
+    }
+    for ext in ["proto", "fidl", "fdepl", "rsl"] {
+        let a = dir.join(format!("definitions-v1.{ext}"));
+        let b = dir.join(format!("definitions-formatted.{ext}"));
+        let c = dir.join(format!("definitions-v2.{ext}"));
+        assert_eq!(parallax(&[a.to_str().unwrap(), b.to_str().unwrap()]).0, 0, "{ext}");
+        assert_eq!(parallax(&[a.to_str().unwrap(), c.to_str().unwrap()]).0, 1, "{ext}");
+    }
+    let schema = dir.join("config.bfbs");
+    let a = dir.join("data-v1.bin");
+    for (name, expected) in
+        [("data-repacked.bin", 0), ("data-size-prefixed.bin", 0), ("data-v2.bin", 1), ("data-unknown.bin", 2)]
+    {
+        let b = dir.join(name);
+        let (code, text) = parallax(&[a.to_str().unwrap(), b.to_str().unwrap(), "--schema", schema.to_str().unwrap()]);
+        assert_eq!(code, expected, "{name}: {text}");
+    }
+    assert_eq!(parallax(&[a.to_str().unwrap(), dir.join("data-repacked.bin").to_str().unwrap(), "--raw"]).0, 1);
+}
+
 /// Entries that could not be read make the exit status 2, also with --json, after
 /// the result is printed.
 #[test]

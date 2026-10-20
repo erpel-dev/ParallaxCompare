@@ -1,0 +1,3 @@
+package vehicle
+typeCollection Types { struct Speed { Int64 value String unit } }
+interface Engine { version { major 1 minor 0 } method Read { in { UInt32 channel String unit } out { Types.Speed speed } } }

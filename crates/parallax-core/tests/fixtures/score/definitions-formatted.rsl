@@ -1,0 +1,10 @@
+package ScoreReq
+abstract type Requirement {
+   description    String
+   version    Integer
+}
+tuple ReqId {
+ item Requirement
+ separator @
+   version    Integer
+}

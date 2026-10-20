@@ -1,0 +1,37 @@
+%YAML 1.2
+---
+name: Configuration definitions
+file_extensions: [fbs, fidl, fdepl, trlc, rsl]
+scope: source.config-definitions
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.config-definitions
+    - match: '/\*'
+      scope: punctuation.definition.comment.begin.config-definitions
+      push:
+        - meta_scope: comment.block.config-definitions
+        - match: '\*/'
+          pop: true
+    - match: '"""'
+      push:
+        - meta_scope: string.quoted.triple.config-definitions
+        - match: '\\.'
+          scope: constant.character.escape.config-definitions
+        - match: '"""'
+          pop: true
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.config-definitions
+        - match: '\\.'
+          scope: constant.character.escape.config-definitions
+        - match: '"'
+          pop: true
+    - match: '\b(namespace|package|import|include|root_type|file_identifier|file_extension|attribute|table|struct|enum|union|interface|typeCollection|method|broadcast|in|out|version|major|minor|define|for|provider|instance|type|tuple|abstract|extends|optional|separator|checks|warning|error|fatal|if|then|else|and|or|not|implies|forall|exists)\b'
+      scope: keyword.control.config-definitions
+    - match: '\b(bool|byte|ubyte|short|ushort|int|uint|long|ulong|float|double|string|String|Integer|Decimal|Boolean|UInt8|UInt16|UInt32|UInt64|Int8|Int16|Int32|Int64|Float|Double)\b'
+      scope: storage.type.config-definitions
+    - match: '\b(true|false|null)\b'
+      scope: constant.language.config-definitions
+    - match: '\b(0[xX][0-9a-fA-F]+|[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?)\b'
+      scope: constant.numeric.config-definitions

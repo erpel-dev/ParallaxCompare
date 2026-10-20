@@ -35,6 +35,7 @@ thiserror = "2"
 serde.workspace = true
 serde_json = { workspace = true, features = ["preserve_order"] }
 url = "2"
+tempfile = "3"
 quick-xml = "0.42"
 object = { version = "0.40", default-features = false, features = ["read", "std", "compression"] }
 gimli = { version = "0.34", default-features = false, features = ["read", "std"] }
@@ -59,7 +60,6 @@ hmac = "0.12"
 mail-parser = { version = "0.11", features = ["full_encoding"] }
 cfb = "0.7"
 calamine = { version = "0.37", default-features = false }
-tempfile = "3"
 
 [dev-dependencies]
 sevenz-rust2 = { version = "0.24", default-features = false, features = ["compress", "util"] }

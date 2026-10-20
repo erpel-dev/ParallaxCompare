@@ -97,7 +97,7 @@ pub fn same_values(left: &str, right: &str) -> Option<bool> {
 }
 
 /// Exact decimal normalization: do not round calibration integers through f64.
-fn number(s: &str) -> Option<String> {
+pub(super) fn number(s: &str) -> Option<String> {
     let (negative, s) =
         if let Some(s) = s.strip_prefix('-') { (true, s) } else { (false, s.strip_prefix('+').unwrap_or(s)) };
     let (mantissa, exponent) =

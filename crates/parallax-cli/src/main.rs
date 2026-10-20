@@ -28,6 +28,18 @@ struct Cli {
     left: String,
     right: String,
 
+    /// FlatBuffers .fbs or .bfbs schema for both files (same-name sidecars are automatic).
+    #[arg(long, value_name = "SCHEMA", conflicts_with = "raw")]
+    schema: Option<String>,
+
+    /// FlatBuffers schema for the left file, overriding --schema.
+    #[arg(long, value_name = "SCHEMA", conflicts_with = "raw")]
+    left_schema: Option<String>,
+
+    /// FlatBuffers schema for the right file, overriding --schema.
+    #[arg(long, value_name = "SCHEMA", conflicts_with = "raw")]
+    right_schema: Option<String>,
+
     /// Compare a Git revision on the left against its merge-base with the right revision
     #[arg(long)]
     merge_base: bool,
@@ -140,6 +152,13 @@ fn run(cli: &Cli) -> Result<bool> {
     let source_opts = SourceOptions { expand_archives: !cli.no_archives, respect_gitignore: !cli.no_gitignore };
     let (left, right) =
         open_pair(&SourceSpec::parse(&cli.left), &SourceSpec::parse(&cli.right), source_opts, cli.merge_base)?;
+    if (cli.schema.is_some() || cli.left_schema.is_some() || cli.right_schema.is_some())
+        && (!left.is_file()? || !right.is_file()?)
+    {
+        anyhow::bail!(
+            "--schema, --left-schema and --right-schema apply to file comparisons; use same-name .fbs/.bfbs sidecars inside folder comparisons"
+        );
+    }
     let paint = Paint(match cli.color {
         ColorMode::Always => true,
         ColorMode::Never => false,
@@ -240,7 +259,13 @@ fn compare_files(cli: &Cli, left: &Source, right: &Source, paint: &Paint) -> Res
     let left_data = left.vfs.read(&left.root).with_context(|| format!("reading {}", left.root))?;
     let right_data = right.vfs.read(&right.root).with_context(|| format!("reading {}", right.root))?;
     let mut out = std::io::stdout().lock();
-    if *left_data == *right_data {
+    let schemas =
+        [cli.left_schema.as_deref().or(cli.schema.as_deref()), cli.right_schema.as_deref().or(cli.schema.as_deref())];
+    if *left_data == *right_data
+        && schemas.iter().all(Option::is_none)
+        && !convert::flatbuffers::has_schema(left, "")
+        && !convert::flatbuffers::has_schema(right, "")
+    {
         return Ok(true);
     }
     // Documents, executables, firmware and images are compared through their content view.
@@ -248,7 +273,9 @@ fn compare_files(cli: &Cli, left: &Source, right: &Source, paint: &Paint) -> Res
     let view = if cli.raw {
         View::Text
     } else {
-        convert::views_for_pair(Some((name, &left_data)), Some((name, &right_data)))[0]
+        let l = convert::views_for_source(left, "", name, &left_data, schemas[0]);
+        let r = convert::views_for_source(right, "", name, &right_data, schemas[1]);
+        l.into_iter().find(|v| r.contains(v)).unwrap_or(View::Hex)
     };
     if view == View::Image {
         let d = convert::image_diff(name, Some(&left_data), Some(&right_data))?;
@@ -266,8 +293,14 @@ fn compare_files(cli: &Cli, left: &Source, right: &Source, paint: &Paint) -> Res
     let (a, b) = if view == View::Text {
         (text::decode(&left_data), text::decode(&right_data))
     } else {
-        let render = |data: &[u8]| convert::render(view, name, data).with_context(|| format!("{} view", view.label()));
-        (text::decode(render(&left_data)?.as_bytes()), text::decode(render(&right_data)?.as_bytes()))
+        let render = |source: &Source, data: &[u8], schema| {
+            convert::render_source(view, source, "", name, data, schema)
+                .with_context(|| format!("{} view", view.label()))
+        };
+        (
+            text::decode(render(left, &left_data, schemas[0])?.as_bytes()),
+            text::decode(render(right, &right_data, schemas[1])?.as_bytes()),
+        )
     };
     if view != View::Text && !cli.json {
         writeln!(out, "Comparing as: {}", view.label())?;

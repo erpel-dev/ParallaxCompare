@@ -16,11 +16,13 @@ mod conan;
 mod data;
 mod dbc;
 mod dcm;
+mod definitions;
 mod doc;
 mod dotnet;
 mod dwarf;
 mod ecuc;
 mod email;
+pub mod flatbuffers;
 mod ftl;
 pub mod gguf;
 mod image_diff;
@@ -43,6 +45,7 @@ mod python;
 mod rst;
 mod rust;
 mod safetensors;
+mod score;
 mod sqlite;
 mod table;
 mod visio;
@@ -129,6 +132,12 @@ pub enum View {
     Calibration,
     /// ODX diagnostic layers, services, messages, data types and references.
     Diagnostics,
+    /// S-CORE runtime configuration, aligned by named object identity.
+    ScoreConfiguration,
+    /// Configuration schemas, requirements and automotive IDL declarations.
+    Definitions,
+    /// Binary FlatBuffers decoded with a matching source-side or selected schema.
+    FlatbufferData,
     /// Raster images: format, colour, EXIF, XMP, IPTC, ICC profile and text chunks.
     ImageMetadata,
     /// Audio and video files: container, duration, tracks, tags, chapters, attachments.
@@ -212,6 +221,9 @@ impl View {
             View::Measurement => "Measurement summary",
             View::Calibration => "Calibration values",
             View::Diagnostics => "ODX diagnostics",
+            View::ScoreConfiguration => "S-CORE configuration",
+            View::Definitions => "Definitions",
+            View::FlatbufferData => "FlatBuffers data",
             View::ImageMetadata => "Image metadata",
             View::MediaSummary => "Media summary",
             View::Dependencies => "Dependencies",
@@ -242,6 +254,8 @@ const LONG_LINE: usize = 2_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
+    ScoreConfiguration,
+    Definitions,
     Pdf,
     Ooxml,
     Odf,
@@ -315,6 +329,9 @@ fn extension(name: &str) -> String {
 
 fn kind_of(name: &str, data: &[u8]) -> Kind {
     let ext = extension(name);
+    if definitions::Format::of(name).is_some() {
+        return Kind::Definitions;
+    }
     let starts = |magic: &[u8]| data.starts_with(magic);
     let first_char = data.iter().find(|b| !b.is_ascii_whitespace()).copied();
     if starts(b"%PDF-") {
@@ -476,6 +493,9 @@ fn kind_of(name: &str, data: &[u8]) -> Kind {
     if crate::highlight::is_xml_name(name) || data.starts_with(b"<?xml") {
         return Kind::Xml;
     }
+    if ext == "json" && score::is_config(name, data) {
+        return Kind::ScoreConfiguration;
+    }
     if ext == "json" || (matches!(first_char, Some(b'{' | b'[')) && ext.is_empty()) {
         return Kind::Json;
     }
@@ -500,6 +520,8 @@ fn xpand_kind(ext: &str, data: &[u8]) -> Option<Kind> {
 pub fn views_for(name: &str, data: &[u8]) -> Vec<View> {
     let longest_line = || data.split(|&b| b == b'\n').map(<[u8]>::len).max().unwrap_or(0);
     let mut views = match kind_of(name, data) {
+        Kind::ScoreConfiguration => vec![View::ScoreConfiguration, View::Text, View::PrettyJson],
+        Kind::Definitions => vec![View::Definitions, View::Text],
         Kind::Pdf | Kind::Ooxml | Kind::Odf => vec![View::Document],
         Kind::LegacyOffice if office::has_native_reader(&extension(name)) => vec![View::Document],
         Kind::Visio => vec![View::Diagram, View::Document],
@@ -598,6 +620,11 @@ pub fn views_for_pair(left: Option<(&str, &[u8])>, right: Option<(&str, &[u8])>)
 /// Renders a file as text for a text-based view.
 pub fn render(view: View, name: &str, data: &[u8]) -> Result<String> {
     match view {
+        View::FlatbufferData => {
+            Err(Error::Unsupported("FlatBuffers data needs a matching .fbs or .bfbs schema".into()))
+        }
+        View::ScoreConfiguration => score::configuration(name, data),
+        View::Definitions => definitions::outline(name, data),
         View::Text => Ok(text::decode(data).text),
         View::Document => match kind_of(name, data) {
             Kind::Pdf => office::pdf_text(data),
@@ -682,6 +709,35 @@ pub fn render(view: View, name: &str, data: &[u8]) -> Result<String> {
     }
 }
 
+/// Source-aware views can discover FlatBuffers schemas in the same filesystem,
+/// archive or Git revision as the compared file.
+pub fn views_for_source(
+    source: &crate::source::Source,
+    rel: &str,
+    name: &str,
+    data: &[u8],
+    schema: Option<&str>,
+) -> Vec<View> {
+    let mut views = views_for(name, data);
+    if schema.is_some() || flatbuffers::has_schema(source, rel) {
+        views.insert(0, View::FlatbufferData);
+    } else if flatbuffers::is_candidate(name) {
+        views.push(View::FlatbufferData);
+    }
+    views
+}
+
+pub fn render_source(
+    view: View,
+    source: &crate::source::Source,
+    rel: &str,
+    name: &str,
+    data: &[u8],
+    schema: Option<&str>,
+) -> Result<String> {
+    if view == View::FlatbufferData { flatbuffers::data(source, rel, data, schema) } else { render(view, name, data) }
+}
+
 /// For files that differ in bytes but are ≈ similar: the first of `views` in which
 /// they look the same, and why they are similar. A file opened from a folder
 /// compare is shown in that view, so ≈ does not open on a page of differences.
@@ -736,7 +792,9 @@ const MAX_SOURCE_COMPARE: usize = 16 * 1024 * 1024;
 
 /// Whether [`content_equal`] can apply to a file, judged by its name alone.
 pub fn has_content_rule(name: &str) -> bool {
-    odx::is_name(name)
+    definitions::Format::of(name).is_some()
+        || name.to_ascii_lowercase().ends_with(".json")
+        || odx::is_name(name)
         || lockfile::format_of(name).is_some()
         || name.rsplit(['/', '\\']).next().is_some_and(|f| {
             ["needs.json", "conanfile.txt", "conaninfo.txt", "conanbuildinfo.txt", "conanmanifest.txt"]
@@ -853,6 +911,14 @@ pub fn content_equal(name: &str, left: &[u8], right: &[u8]) -> Option<&'static s
         return None;
     }
     let equal = match kl {
+        Kind::ScoreConfiguration => {
+            return (score::configuration(name, left).ok()? == score::configuration(name, right).ok()?)
+                .then_some("same S-CORE configuration, only formatting or named collection order differ");
+        }
+        Kind::Definitions => {
+            return (definitions::outline(name, left).ok()? == definitions::outline(name, right).ok()?)
+                .then_some("same declarations, only formatting, comments or independent definition order differ");
+        }
         Kind::Pdf | Kind::Ooxml | Kind::Odf => {
             render(View::Document, name, left).ok()? == render(View::Document, name, right).ok()?
         }
@@ -1307,8 +1373,11 @@ mod tests {
         assert!(
             has_content_rule("out/graph.json")
                 && has_content_rule("conan-create.json")
-                && !has_content_rule("package.json")
+                && has_content_rule("package.json")
         );
+        // Any .json name can hold a S-CORE configuration, but ordinary package
+        // manifests do not acquire a semantic-equivalence rule.
+        assert_eq!(content_equal("package.json", br#"{"version":"1.0"}"#, br#"{ "version": "1.0" }"#), None);
 
         // conanfile.txt and profiles.
         let (c1, c2) = (fixture("conan/conanfile-v1.txt"), fixture("conan/conanfile-v2.txt"));

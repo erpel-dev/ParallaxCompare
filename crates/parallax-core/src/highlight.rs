@@ -35,6 +35,7 @@ const FAR_JUMP: usize = 3_000;
 const RESYNC_LINES: usize = 200;
 
 const CUSTOM_SYNTAXES: &[&str] = &[
+    include_str!("syntaxes/config-definitions.sublime-syntax"),
     include_str!("syntaxes/a2l.sublime-syntax"),
     include_str!("syntaxes/dbc.sublime-syntax"),
     include_str!("syntaxes/intel-hex.sublime-syntax"),

@@ -1,0 +1,19 @@
+include "types/common.fbs";
+namespace Demo;
+table Config {
+ /// @required
+ name:string (required);
+ speed:double = 10.5;
+ count:ulong = 9007199254740993;
+ mode:Mode = ON;
+ position:Point;
+ samples:[short];
+ points:[Point];
+ choice:Choice;
+ choices:[Choice];
+ optional_count:int = null;
+ enabled:bool = true;
+ greeting:string;
+}
+root_type Config;
+file_identifier "SCFG";

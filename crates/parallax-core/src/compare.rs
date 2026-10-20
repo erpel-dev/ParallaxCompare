@@ -616,7 +616,10 @@ impl<'a> Engine<'a> {
             return if l.size == r.size && a == b { SAME } else { DIFFERENT };
         }
         let eol = self.opts.ignore_line_endings;
-        let content = self.opts.compare_contents && convert::has_content_rule(&l.name);
+        let flatbuffers = self.opts.compare_contents
+            && convert::flatbuffers::has_schema(self.left, lrel)
+            && convert::flatbuffers::has_schema(self.right, rrel);
+        let content = self.opts.compare_contents && (convert::has_content_rule(&l.name) || flatbuffers);
         // Without content rules, differing ids or sizes settle it without reading.
         let must_read = eol || content;
         if let (Some(a), Some(b)) = (&l.quick_id, &r.quick_id)
@@ -699,6 +702,15 @@ impl<'a> Engine<'a> {
         }
         if content && let Some(reason) = convert::content_equal(&l.name, &left_data, &right_data) {
             return Ok((Status::Similar, Some(reason)));
+        }
+        if flatbuffers
+            && let (Ok(a), Ok(b)) = (
+                convert::flatbuffers::data(self.left, lrel, &left_data, None),
+                convert::flatbuffers::data(self.right, rrel, &right_data, None),
+            )
+            && a == b
+        {
+            return Ok((Status::Similar, Some("same FlatBuffers data and schema, only binary layout differs")));
         }
         DIFFERENT
     }

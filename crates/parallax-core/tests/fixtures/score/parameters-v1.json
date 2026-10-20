@@ -1,0 +1,23 @@
+{
+  "parameterSets": {
+    "Engine": {
+      "parameters": {
+        "Idle": {
+          "initValue": 800
+        },
+        "Map": {
+          "initValue": [
+            [
+              1,
+              2
+            ],
+            [
+              3,
+              4
+            ]
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,12 @@
+package Engine
+import ScoreReq
+ScoreReq.FeatReq UnicodeText {
+ description = "Grüße 🚙"
+ version = 2
+}
+ScoreReq.FeatReq SpeedLimit {
+ description = "Speed must stay below the configured limit."
+ safety = ScoreReq.Asil.B
+ version = 1
+ derived_from = [System.Limit@1, System.Driver@2]
+}

@@ -1,0 +1,66 @@
+{
+  "serviceTypes": [
+    {
+      "serviceTypeName": "Engine",
+      "version": {
+        "major": 1,
+        "minor": 0
+      },
+      "bindings": [
+        {
+          "binding": "SHM",
+          "serviceId": 12,
+          "events": [
+            {
+              "eventName": "Speed",
+              "eventId": 2
+            },
+            {
+              "eventName": "Torque",
+              "eventId": 3
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "serviceTypeName": "Brakes",
+      "version": {
+        "major": 1,
+        "minor": 0
+      },
+      "bindings": []
+    }
+  ],
+  "serviceInstances": [
+    {
+      "instanceSpecifier": "vehicle/engine",
+      "serviceTypeName": "Engine",
+      "version": {
+        "major": 1,
+        "minor": 0
+      },
+      "instances": [
+        {
+          "binding": "SHM",
+          "instanceId": 22,
+          "numberOfSampleSlots": 32
+        }
+      ]
+    },
+    {
+      "instanceSpecifier": "vehicle/brakes",
+      "instances": []
+    }
+  ],
+  "global": {
+    "applicationID": 42
+  },
+  "vendor": {
+    "ordered": [
+      1,
+      2,
+      3
+    ]
+  }
+}

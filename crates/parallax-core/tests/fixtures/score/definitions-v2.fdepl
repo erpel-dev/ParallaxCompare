@@ -1,0 +1,2 @@
+package vehicle
+define vehicle.Engine for provider EngineProvider { instance Engine { InstanceId = 42 SomeIpServiceID = 1235 } }

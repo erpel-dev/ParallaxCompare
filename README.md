@@ -31,6 +31,9 @@ The design rationale, the GUI mockups and a comparison with existing tools are i
 
 | Files | Default view | What it shows |
 |---|---|---|
+| S-CORE configuration `.json` | S-CORE configuration | Recognised communication, lifecycle, logging, parameter and FEO shapes: object keys sorted; known collections aligned by unique identities. Process arguments, dependencies, parameter matrices and unknown arrays keep their order. Numbers retain their exact decimal values |
+| `.fbs`, `.proto`, `.fidl`, `.fdepl`, `.trlc`, `.rsl` | Definitions | Readable declarations with comments and layout noise removed; TRLC objects and their attributes aligned by identity. Wire fields, enum values, method parameters, model fields and deployment overrides keep their order; FlatBuffers documentation annotations remain visible |
+| FlatBuffers `.bin`, `.fb`, `.flatbuffer`, `.flatbuffers` with a schema | FlatBuffers data | Tables, structs, vectors, unions, enums and defaults decoded through a matching `.fbs` or `.bfbs`. Packing differences compare equal; values and the wire-schema fingerprint remain visible. See [schema selection](#flatbuffers-schemas) |
 | `.docx` `.xlsx` `.pptx`, `.odt` `.ods` `.odp`, `.pdf` | Document text | Paragraphs (with headers, footers, footnotes, comments); one line per spreadsheet row, cells tab-separated, formulas as `{=…}`; slide text and notes; PDF text per page |
 | `.doc` `.xls` `.ppt` | Document text | Read directly in the same form as `.docx` `.xlsx` `.pptx`: Word 97–2003 text with tables, headers, footers, footnotes, endnotes, comments and text boxes; Excel 97–2003 sheets with values and formulas (formulas filled down a range show their values); PowerPoint 97–2003 slide text and notes. Word 6/95 files and anything the readers cannot handle have no text view; they still compare as bytes |
 | `.vsdx` `.vsdm` `.vstx` `.vssx`, `.vsd` `.vss` `.vst` | Diagram, Document text | Pages with each shape's text, position and size, outline, shape data, master and the shapes a connector joins, nested shapes indented, other settings as a checksum; then the masters with their shapes, and shapes without text of their own show their master's; the text view lists only the text. Re-saved drawings with the same content are ≈. `.vsd` files of Visio 2000 to 2010 are read directly; Visio 5 and older files have no diagram view |
@@ -84,6 +87,23 @@ The design rationale, the GUI mockups and a comparison with existing tools are i
 ![Intel HEX files compared as an address map](docs/screenshots/firmware-compare.png)
 
 ![Images compared pixel by pixel](docs/screenshots/image-compare.png)
+
+### FlatBuffers schemas
+
+For automatic decoding, put a schema with the same stem beside each binary: `config.bin` with `config.bfbs` or `config.fbs` (`.bfbs` takes precedence). Each side uses its own schema, including schemas and relative includes inside archives and Git revisions. In a file comparison, **Schemas** lets you choose a local schema for both sides or a different schema for each side.
+
+The CLI also accepts explicit local schemas:
+
+```sh
+parallax old.bin new.bin --schema config.bfbs
+parallax old.bin new.bin --left-schema old.fbs --right-schema new.fbs
+```
+
+Binary reflection schemas (`.bfbs`) are read directly. Text schemas (`.fbs`) need the FlatBuffers compiler **`flatc` on PATH**; tested with 24.3.25. Compilation runs in a temporary directory, preserves the source files and caches the result. No compiler is needed for the `.fbs` Definitions view. Schemas need a `root_type` to decode data. An ordinary buffer or a buffer with a size prefix is accepted; a file identifier is checked when the schema specifies one.
+
+These structured views are read-only; Text and Hex remain available. Missing tools, malformed buffers, missing includes, identifier mismatches and populated fields absent from the schema produce an error (the desktop app falls back to a raw view with the reason). Folder comparisons only report ≈ when decoding succeeds on both sides. FlatBuffers buffers have no general schema identity, so a matching schema is still your responsibility. Advanced 64-bit offsets/vectors and reflection schemas with vector/string defaults are currently rejected. Decoding is limited to 64 MiB of binary data and 16 MiB of schemas/includes.
+
+S-CORE JSON recognition follows the supported configuration shapes rather than treating every JSON file as a S-CORE configuration. Definitions views preserve tokens and meaningful order, but do not replace the TRLC, Franca, Protobuf or FlatBuffers validators.
 
 ## Writing to archives
 

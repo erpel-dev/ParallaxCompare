@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from "svelte";
   import { listen } from "@tauri-apps/api/event";
-  import { ask } from "@tauri-apps/plugin-dialog";
+  import { ask, open } from "@tauri-apps/plugin-dialog";
   import {
     api,
     defaultDiffOptions,
@@ -56,6 +56,7 @@
   let options = $state(defaultDiffOptions());
   let syntaxOverride = $state<string>("");
   let view = $state<View | null>(null);
+  let flatbufferSchemas = $state<[string | null, string | null]>([null, null]);
   let syntaxNames = $state<string[]>([]);
   // Raw: a diff can have hundreds of thousands of sections, and deep reactivity
   // would wrap every one of them. `info` is only ever replaced as a whole.
@@ -233,6 +234,24 @@
 
   $effect(() => onDirty?.(anyDirty));
 
+  async function pickFlatbufferSchema(side: 0 | 1 | null) {
+    if (anyDirty || loading) return;
+    try {
+      const selected = await open({
+        title: side === null ? "FlatBuffers schema for both files" : `FlatBuffers schema for the ${side === 0 ? "left" : "right"} file`,
+        multiple: false,
+        filters: [{ name: "FlatBuffers schema", extensions: ["fbs", "bfbs"] }],
+      });
+      if (typeof selected !== "string") return;
+      if (side === null) flatbufferSchemas = [selected, selected];
+      else flatbufferSchemas[side] = selected;
+      view = "flatbufferData";
+      await load();
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
   async function load(keepPosition = false) {
     const run = ++loads;
     loading = true;
@@ -240,7 +259,7 @@
     changedOnDisk = false;
     const top = viewport?.scrollTop ?? 0;
     try {
-      const opened = await api.openFileDiff(session.id, path, $state.snapshot(options), syntaxOverride || null, view);
+      const opened = await api.openFileDiff(session.id, path, $state.snapshot(options), syntaxOverride || null, view, $state.snapshot(flatbufferSchemas));
       // The tab was closed or loaded again meanwhile: nothing shows this diff.
       if (destroyed || run !== loads) {
         api.closeFileDiff(opened.id);
@@ -1330,6 +1349,16 @@
         {/each}
       </select>
       <span class="sep"></span>
+    {/if}
+    {#if info?.views.some((v) => v.id === "flatbufferData")}
+      <Dropdown label="Schemas">
+        <button disabled={anyDirty || loading} onclick={() => pickFlatbufferSchema(null)}>Schema for both files…</button>
+        <button disabled={anyDirty || loading} title={flatbufferSchemas[0] ?? "Automatic: same-name sidecar in the left source"} onclick={() => pickFlatbufferSchema(0)}>Left schema…</button>
+        <button disabled={anyDirty || loading} title={flatbufferSchemas[1] ?? "Automatic: same-name sidecar in the right source"} onclick={() => pickFlatbufferSchema(1)}>Right schema…</button>
+        <button disabled={anyDirty || loading} onclick={() => { flatbufferSchemas = [null, null]; view = null; load(); }}>Use automatic schemas</button>
+        <p class="dim">Left: {flatbufferSchemas[0] ?? "Automatic (.bfbs / .fbs sidecar)"}</p>
+        <p class="dim">Right: {flatbufferSchemas[1] ?? "Automatic (.bfbs / .fbs sidecar)"}</p>
+      </Dropdown>
     {/if}
 {#if info?.view !== "image"}
     <button onclick={() => next(-1)} disabled={!info?.sections.length} title="Previous difference (F7)">◀ Prev</button>

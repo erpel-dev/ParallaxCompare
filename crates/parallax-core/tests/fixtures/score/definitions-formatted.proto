@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package vehicle;
+
+message Speed {
+  uint64 value = 1;
+ repeated string sources = 2;
+
+}
+service Engine {
+  rpc Read (Speed) returns (Speed);
+
+}

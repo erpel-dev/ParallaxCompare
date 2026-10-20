@@ -1,0 +1,14 @@
+{
+  "appId": "ECU",
+  "logLevel": "kInfo",
+  "contextConfigs": [
+    {
+      "name": "Engine",
+      "logLevel": "kDebug"
+    },
+    {
+      "name": "Brakes",
+      "logLevel": "kError"
+    }
+  ]
+}

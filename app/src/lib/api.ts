@@ -225,6 +225,9 @@ export type View =
   | "measurement"
   | "calibration"
   | "diagnostics"
+  | "scoreConfiguration"
+  | "definitions"
+  | "flatbufferData"
   | "imageMetadata"
   | "mediaSummary"
   | "dependencies"
@@ -392,8 +395,8 @@ export const api = {
   cancelOp: (id: number) => invoke<void>("cancel_op", { id }),
   refreshPaths: (id: number, paths: string[], options: CompareOptions) =>
     invoke<(Node | null)[]>("refresh_paths", { id, paths, options }),
-  openFileDiff: (id: number, path: string, options: DiffOptions, syntax: string | null, view: View | null) =>
-    invoke<FileDiffInfo>("open_file_diff", { id, path, options, syntax, view }),
+  openFileDiff: (id: number, path: string, options: DiffOptions, syntax: string | null, view: View | null, flatbufferSchemas: [string | null, string | null] | null = null) =>
+    invoke<FileDiffInfo>("open_file_diff", { id, path, options, syntax, view, flatbufferSchemas }),
   fileRows: (id: number, start: number, count: number, theme: "dark" | "light") =>
     invoke<RowView[]>("file_rows", { id, start, count, theme }),
   searchDiff: (id: number, query: string, options: SearchOptions) =>

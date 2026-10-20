@@ -1,0 +1,5 @@
+namespace Demo;
+struct Point { coords:[float:2]; }
+enum Mode:ubyte { OFF=0, ON=1 }
+table Option { label:string; }
+union Choice { Option, Text:string, Location:Point }
