@@ -239,7 +239,7 @@ npm run tauri dev                # desktop app with hot reload
 npm run tauri build              # installers: MSI/NSIS on Windows, deb/rpm/AppImage on Linux
 ```
 
-CI runs formatting, clippy, the Svelte type check and all tests on Ubuntu and Windows. Pushing a `v*` tag builds installers and the CLI as a draft GitHub release.
+CI runs formatting, clippy, the Svelte type check and all tests on Ubuntu and Windows. Pushing a `v*` tag builds standalone Windows and Linux executables and publishes a GitHub release; `0.x` tags are prereleases.
 
 ## Architecture
 

@@ -62,7 +62,7 @@ for block in reversed(blocks):
     text = text.replace("WERT 800", "WERT +8.000e2").replace("0.250", "2.5e-1")
     text = text.replace("ST/X 1000 2000 3000", "ST/X 1000.0\n  ST/X 2000 3000")
     reformatted += text + "\n\n"
-(ROOT / "engine-v1-reformatted.dcm").write_text(reformatted)
+(ROOT / "engine-v1-reformatted.dcm").write_text(reformatted.rstrip() + "\n")
 (ROOT / "engine-v2.dcm").write_text(base.replace("WERT 800", "WERT 850").replace("WERT 4 5 6", "WERT 4 5 6.5"))
 
 
