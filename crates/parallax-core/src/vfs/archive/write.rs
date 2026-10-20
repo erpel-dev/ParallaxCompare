@@ -30,7 +30,7 @@ impl ArchiveFs {
         match &self.backend {
             Backend::Zip { archive, .. } => write_zip(archive, &edits, progress),
             Backend::SevenZ { data, archive, .. } => write_7z(data, archive, &edits, progress),
-            Backend::Tar { data, format, contents } => {
+            Backend::Tar { data, format, contents, .. } => {
                 progress.expect(contents.len() as u64);
                 write_tar(data, *format, &edits, progress)
             }
@@ -183,7 +183,9 @@ fn write_7z(data: &Data, archive: &sevenz_rust2::Archive, edits: &Edits, progres
                     // Read past it: the next file's data follows in the same stream.
                     io::copy(r, &mut io::sink())?;
                 } else {
-                    let mut buf = Vec::with_capacity(entry.size as usize);
+                    // A header cannot make this allocation large; see `entry_hint`.
+                    let hint = super::entry_hint(entry.size).map_err(std::io::Error::other)?;
+                    let mut buf = Vec::with_capacity(hint);
                     r.read_to_end(&mut buf)?;
                     kept.push(entry.clone());
                     readers.push(SourceReader::new(Counted::new(Cursor::new(buf), progress)));

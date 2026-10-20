@@ -30,6 +30,23 @@ fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
+/// Paths from the web view must name entries inside the compared trees; the web
+/// view runs with the app's rights, so this is the check that keeps a command from
+/// reaching a file the user never opened.
+fn check_paths(paths: &[String]) -> CmdResult<()> {
+    paths.iter().try_for_each(|path| parallax_core::vfs::check_rel(path).map_err(err))
+}
+
+/// The same for paths that are written to or deleted: `""` is the compared root,
+/// which is never the target of a copy or a delete.
+fn check_writable_paths(paths: &[String]) -> CmdResult<()> {
+    check_paths(paths)?;
+    if paths.iter().any(String::is_empty) {
+        return Err("The compared folder itself cannot be copied or deleted.".into());
+    }
+    Ok(())
+}
+
 /// Two sources given on the command line, e.g. when started as `git difftool`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -449,6 +466,7 @@ pub fn cancel_compare(state: State<'_, AppState>, id: u64) -> CmdResult<()> {
 /// Compares one subtree again: expands an identical Git folder or refreshes after a change.
 #[tauri::command]
 pub async fn expand(state: State<'_, AppState>, id: u64, path: String, options: CompareOptions) -> CmdResult<Node> {
+    check_paths(std::slice::from_ref(&path))?;
     let session = state.session(id)?;
     blocking(move || {
         compare::compare_path(&session.left, &session.right, &path, &options, &Control::default())
@@ -534,6 +552,7 @@ pub async fn copy_entries(
     to_right: bool,
     options: CompareOptions,
 ) -> CmdResult<OpResult> {
+    check_writable_paths(&paths)?;
     let session = state.session(id)?;
     let filter = compare::Filter::new(&options).map_err(err)?;
     run_op(app, id, session, paths, options, move |s, paths, progress| {
@@ -559,6 +578,8 @@ pub async fn compare_pairs(
     pairs: Vec<(String, String)>,
     options: CompareOptions,
 ) -> CmdResult<Vec<PairStatus>> {
+    let checked: Vec<String> = pairs.iter().flat_map(|(l, r)| [l.clone(), r.clone()]).collect();
+    check_paths(&checked)?;
     let session = state.session(id)?;
     blocking(move || {
         Ok(pairs
@@ -584,6 +605,7 @@ pub async fn copy_file_as(
     to_right: bool,
     options: CompareOptions,
 ) -> CmdResult<OpResult> {
+    check_writable_paths(&[from.clone(), to.clone()])?;
     let session = state.session(id)?;
     run_op(app, id, session, vec![to.clone()], options, move |s, _, progress| {
         let (src, dst) = if to_right { (&s.left, &s.right) } else { (&s.right, &s.left) };
@@ -603,6 +625,7 @@ pub async fn delete_entries(
     permanent: bool,
     options: CompareOptions,
 ) -> CmdResult<OpResult> {
+    check_writable_paths(&paths)?;
     let session = state.session(id)?;
     let removal = if permanent { Removal::Permanent } else { Removal::Trash };
     run_op(app, id, session, paths, options, move |s, paths, progress| {
@@ -625,6 +648,7 @@ pub async fn refresh_paths(
     paths: Vec<String>,
     options: CompareOptions,
 ) -> CmdResult<Vec<Option<Node>>> {
+    check_paths(&paths)?;
     let session = state.session(id)?;
     blocking(move || {
         for path in &paths {
@@ -790,6 +814,7 @@ pub async fn open_file_diff(
     syntax: Option<String>,
     view: Option<View>,
 ) -> CmdResult<FileDiffInfo> {
+    check_paths(std::slice::from_ref(&path))?;
     let session = state.session(id)?;
     let (info, file_diff) = blocking(move || {
         let (mut left_info, left_data) = load_side(&session.left, &path)?;
@@ -860,8 +885,8 @@ pub async fn open_file_diff(
             }
         }
 
-        // Converted text for both sides; LibreOffice conversions take seconds, so the
-        // two sides run at the same time.
+        // Converted text for both sides; a slow converter on one side need not hold up
+        // the other, so the two sides run at the same time.
         // A converter that panics on damaged input fails like one that returns an error,
         // on either side, and falls back below.
         let render = |data: &Option<Data>, view: View| -> Option<Result<String, String>> {

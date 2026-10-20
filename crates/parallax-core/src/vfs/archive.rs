@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use super::{Data, Entry, EntryKind, QuickId, Vfs, find_entry, join, normalize, root_entry, split_parent};
+use super::{Data, Entry, EntryKind, QuickId, Vfs, check_rel, find_entry, join, normalize, root_entry, split_parent};
 use crate::{Error, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,26 +69,44 @@ impl Index {
         index
     }
 
+    /// Creates `path` and every missing parent, from the root down. Iterative, so
+    /// that a member name with thousands of components cannot overflow the stack;
+    /// names deeper than [`MAX_DEPTH`] are not listed.
     fn ensure_dir(&mut self, path: &str, mtime: Option<i64>) {
         if self.known_dirs.contains(path) {
             return;
         }
-        let (parent, name) = split_parent(path);
-        self.ensure_dir(parent, None);
-        self.known_dirs.insert(path.to_string());
-        self.dirs.entry(path.to_string()).or_default();
-        self.dirs.get_mut(parent).expect("parent dir exists").push(Entry {
-            name: name.to_string(),
-            kind: EntryKind::Dir,
-            size: 0,
-            mtime,
-            quick_id: None,
-        });
+        let mut prefix = String::new();
+        for (depth, part) in path.split('/').enumerate() {
+            if depth >= MAX_DEPTH {
+                return;
+            }
+            let dir = join(&prefix, part);
+            if !self.known_dirs.contains(&dir) {
+                let (parent, name) = split_parent(&dir);
+                self.known_dirs.insert(dir.clone());
+                self.dirs.entry(dir.clone()).or_default();
+                // The parents do not inherit the mtime of the entry that needed them.
+                let entry = Entry {
+                    name: name.to_string(),
+                    kind: EntryKind::Dir,
+                    size: 0,
+                    mtime: if dir == path { mtime } else { None },
+                    quick_id: None,
+                };
+                self.dirs.get_mut(parent).expect("parent dir exists").push(entry);
+            }
+            prefix = dir;
+        }
     }
 
     fn add_file(&mut self, path: &str, kind: EntryKind, size: u64, mtime: Option<i64>, quick_id: Option<QuickId>) {
         let (parent, name) = split_parent(path);
         self.ensure_dir(parent, None);
+        if !self.known_dirs.contains(parent) {
+            // Deeper than MAX_DEPTH: not listed, and nothing to add it to.
+            return;
+        }
         let list = self.dirs.get_mut(parent).expect("parent dir exists");
         let entry = Entry { name: name.to_string(), kind, size, mtime, quick_id };
         // Later entries win, like extraction would behave.
@@ -113,6 +131,130 @@ type Extracted = Arc<HashMap<String, Arc<Vec<u8>>>>;
 /// encoder split them into independent chunks (7-Zip does for LZMA2).
 const MT_BLOCK_SIZE: u64 = 16 << 20;
 
+/// No entry of an archive is expanded beyond this. The size in a header is
+/// attacker-controlled, and neither memory nor a temporary file should follow it.
+const MAX_ENTRY: u64 = 2 << 30;
+
+/// No 7z block is decoded beyond this, since a solid block is held whole.
+const MAX_BLOCK: u64 = 4 << 30;
+
+/// How much is allocated up front: the rest is grown by reading, so that a crafted
+/// header cannot make the process ask for gigabytes before a byte is read.
+const READ_HINT: usize = 8 << 20;
+
+/// A compressed tar may expand to this multiple of its own size, within these
+/// bounds, before it is refused rather than written to the temporary file.
+const TAR_RATIO: u64 = 200;
+const TAR_MIN: u64 = 256 << 20;
+const TAR_MAX: u64 = 4 << 30;
+
+/// Directories that one archive member may create. Member names are unbounded, and
+/// creating the parents recursively would overflow the stack on a crafted one.
+const MAX_DEPTH: usize = 512;
+
+/// Refuses an entry bigger than [`MAX_ENTRY`] and returns the allocation hint.
+pub(super) fn entry_hint(size: u64) -> Result<usize> {
+    if size > MAX_ENTRY {
+        return Err(Error::Unsupported(format!(
+            "an entry of this archive expands to {} MiB, more than a comparison reads",
+            size >> 20
+        )));
+    }
+    Ok(size.min(READ_HINT as u64) as usize)
+}
+
+/// Reads the `size` bytes of an entry whose header says so.
+pub(super) fn read_entry(r: &mut dyn Read, size: u64) -> Result<Vec<u8>> {
+    let mut buf = Vec::with_capacity(entry_hint(size)?);
+    r.take(size).read_to_end(&mut buf).map_err(Error::archive)?;
+    Ok(buf)
+}
+
+/// A range of bytes: of the archive itself for an uncompressed tar, of the
+/// temporary file that holds the decompressed stream for a compressed one.
+#[derive(Debug, Clone, Copy)]
+struct Span {
+    at: u64,
+    len: u64,
+}
+
+/// Where an entry of a tar archive is.
+enum TarContent {
+    /// Inside the uncompressed archive, which stays memory-mapped.
+    Direct(Span),
+    /// Inside the decompressed stream, in the temporary file.
+    Spooled(Span),
+    /// Bytes that are not in the stream, such as a link's target path.
+    Bytes(Arc<Vec<u8>>),
+}
+
+impl TarContent {
+    fn len(&self) -> u64 {
+        match self {
+            TarContent::Direct(span) | TarContent::Spooled(span) => span.len,
+            TarContent::Bytes(bytes) => bytes.len() as u64,
+        }
+    }
+}
+
+/// The decompressed stream of a compressed tar, in a temporary file: a tar holds
+/// every entry, so keeping them in memory would let one archive take the machine.
+struct Spool {
+    file: Mutex<std::fs::File>,
+    len: u64,
+}
+
+impl Spool {
+    fn new() -> Result<Self> {
+        let file = tempfile::tempfile().map_err(|e| Error::io("a temporary file for the tar stream", e))?;
+        Ok(Spool { file: Mutex::new(file), len: 0 })
+    }
+
+    /// Appends `size` bytes of `r`, which the caller has already counted.
+    fn append(&mut self, r: &mut dyn Read, size: u64) -> Result<Span> {
+        use std::io::{Seek, SeekFrom};
+        let err = |e| Error::io("a temporary file for the tar stream", e);
+        let mut file = self.file.lock();
+        file.seek(SeekFrom::Start(self.len)).map_err(err)?;
+        let at = self.len;
+        let copied = std::io::copy(&mut r.take(size), &mut *file).map_err(err)?;
+        self.len += copied;
+        Ok(Span { at, len: copied })
+    }
+
+    fn read(&self, span: Span) -> Result<Vec<u8>> {
+        use std::io::{Seek, SeekFrom};
+        let err = |e| Error::io("a temporary file for the tar stream", e);
+        let mut buf = Vec::with_capacity(span.len.min(READ_HINT as u64) as usize);
+        let mut file = self.file.lock();
+        file.seek(SeekFrom::Start(span.at)).map_err(err)?;
+        file.by_ref().take(span.len).read_to_end(&mut buf).map_err(err)?;
+        if buf.len() as u64 != span.len {
+            return Err(Error::Unsupported("the tar archive is truncated".into()));
+        }
+        Ok(buf)
+    }
+}
+
+/// The bytes of a tar entry.
+fn tar_read(data: &Data, spool: Option<&Spool>, content: &TarContent) -> Result<Vec<u8>> {
+    let slice = |span: &Span| -> Result<Vec<u8>> {
+        let (at, len) = (usize::try_from(span.at), usize::try_from(span.len));
+        match (at, len) {
+            (Ok(at), Ok(len)) => data.get(at..at.saturating_add(len)).map(<[u8]>::to_vec),
+            _ => None,
+        }
+        .ok_or_else(|| Error::Unsupported("the tar archive is truncated".into()))
+    };
+    match content {
+        TarContent::Direct(span) => slice(span),
+        TarContent::Spooled(span) => {
+            spool.ok_or_else(|| Error::Unsupported("the tar stream is missing".into()))?.read(*span)
+        }
+        TarContent::Bytes(bytes) => Ok(bytes.to_vec()),
+    }
+}
+
 enum Backend {
     Zip {
         archive: zip::ZipArchive<Cursor<Data>>,
@@ -129,11 +271,14 @@ enum Backend {
         /// Per block: the decoded files of a solid block, `None` for a single-file block.
         solid: Vec<Option<Mutex<Option<Extracted>>>>,
     },
-    /// tar streams are decompressed once while indexing.
+    /// tar streams are decompressed once while indexing; the decompressed stream
+    /// is kept out of memory (see [`TarContent`]).
     Tar {
         data: Data,
         format: ArchiveFormat,
-        contents: HashMap<String, Arc<Vec<u8>>>,
+        contents: HashMap<String, TarContent>,
+        /// The decompressed stream of a compressed tar.
+        spool: Option<Spool>,
     },
 }
 
@@ -259,8 +404,14 @@ fn tar_reader(raw: &[u8], format: ArchiveFormat) -> Result<Box<dyn Read + '_>> {
 }
 
 fn open_tar(data: Data, format: ArchiveFormat, index: &mut Index) -> Result<Backend> {
+    let compressed = !matches!(format, ArchiveFormat::Tar);
+    // A compressed stream is written to the temporary file, so how far it may
+    // expand has to be bounded here; an uncompressed tar is read in place.
+    let limit = (data.len() as u64).saturating_mul(TAR_RATIO).clamp(TAR_MIN, TAR_MAX);
+    let mut expanded = 0u64;
+    let mut spool: Option<Spool> = None;
+    let mut contents: HashMap<String, TarContent> = HashMap::new();
     let mut archive = tar::Archive::new(tar_reader(&data, format)?);
-    let mut contents = HashMap::new();
     for entry in archive.entries().map_err(Error::archive)? {
         let mut entry = entry.map_err(Error::archive)?;
         let Some(path) = entry.path().ok().and_then(|p| normalize(&p.to_string_lossy())) else {
@@ -270,28 +421,40 @@ fn open_tar(data: Data, format: ArchiveFormat, index: &mut Index) -> Result<Back
             continue;
         }
         let mtime = entry.header().mtime().ok().map(|t| t as i64);
-        match entry.header().entry_type() {
-            tar::EntryType::Directory => index.ensure_dir(&path, mtime),
+        let kind = entry.header().entry_type();
+        let content = match kind {
+            tar::EntryType::Directory => {
+                index.ensure_dir(&path, mtime);
+                continue;
+            }
             tar::EntryType::Regular | tar::EntryType::Continuous | tar::EntryType::GNUSparse => {
-                let mut buf = Vec::with_capacity(entry.size() as usize);
-                entry.read_to_end(&mut buf).map_err(Error::archive)?;
-                index.add_file(&path, EntryKind::File, buf.len() as u64, mtime, None);
-                contents.insert(path, Arc::new(buf));
+                let size = entry.size();
+                entry_hint(size)?;
+                if !compressed && !kind.is_gnu_sparse() {
+                    // The entry is already in the archive: read it from there.
+                    TarContent::Direct(Span { at: entry.raw_file_position(), len: size })
+                } else {
+                    count(&mut expanded, size, limit)?;
+                    let spool = match &mut spool {
+                        Some(spool) => spool,
+                        None => spool.insert(Spool::new()?),
+                    };
+                    TarContent::Spooled(spool.append(&mut entry, size)?)
+                }
             }
             tar::EntryType::Link => {
                 // A hard link names an earlier entry from the archive root: the same file.
                 let target = entry.link_name().ok().flatten().and_then(|t| normalize(&t.to_string_lossy()));
-                match target.as_ref().and_then(|t| contents.get(t)).cloned() {
-                    Some(buf) => {
-                        index.add_file(&path, EntryKind::File, buf.len() as u64, mtime, None);
-                        contents.insert(path, buf);
-                    }
+                match target.as_ref().and_then(|t| contents.get(t)) {
+                    Some(TarContent::Bytes(bytes)) => TarContent::Bytes(bytes.clone()),
+                    Some(TarContent::Direct(span)) => TarContent::Direct(*span),
+                    Some(TarContent::Spooled(span)) => TarContent::Spooled(*span),
                     None => {
                         // No such file before it: kept as a link that points at that path.
                         let depth = path.matches('/').count();
                         let buf = format!("{}{}", "../".repeat(depth), target.unwrap_or_default()).into_bytes();
-                        index.add_file(&path, EntryKind::Symlink, buf.len() as u64, mtime, None);
-                        contents.insert(path, Arc::new(buf));
+                        count(&mut expanded, buf.len() as u64, limit)?;
+                        TarContent::Bytes(Arc::new(buf))
                     }
                 }
             }
@@ -299,14 +462,33 @@ fn open_tar(data: Data, format: ArchiveFormat, index: &mut Index) -> Result<Back
                 // Links are compared by their target path.
                 let target = entry.link_name().ok().flatten().map(|t| t.to_string_lossy().into_owned());
                 let buf = target.unwrap_or_default().into_bytes();
-                index.add_file(&path, EntryKind::Symlink, buf.len() as u64, mtime, None);
-                contents.insert(path, Arc::new(buf));
+                count(&mut expanded, buf.len() as u64, limit)?;
+                TarContent::Bytes(Arc::new(buf))
             }
-            _ => {}
-        }
+            _ => continue,
+        };
+        let size = content.len();
+        let entry_kind = match kind {
+            tar::EntryType::Symlink => EntryKind::Symlink,
+            _ => EntryKind::File,
+        };
+        index.add_file(&path, entry_kind, size, mtime, None);
+        contents.insert(path, content);
     }
     drop(archive);
-    Ok(Backend::Tar { data, format, contents })
+    Ok(Backend::Tar { data, format, contents, spool })
+}
+
+/// Counts what a compressed tar expands to, refusing to go past `limit`.
+fn count(expanded: &mut u64, size: u64, limit: u64) -> Result<()> {
+    *expanded = expanded.saturating_add(size);
+    if *expanded > limit {
+        return Err(Error::Unsupported(format!(
+            "the archive expands to more than {} MiB, which is more than a comparison reads",
+            limit >> 20
+        )));
+    }
+    Ok(())
 }
 
 /// Decodes all files of one 7z block.
@@ -315,7 +497,14 @@ fn decode_7z_block(
     archive: &sevenz_rust2::Archive,
     block: usize,
 ) -> Result<HashMap<String, Arc<Vec<u8>>>> {
-    let threads = if archive.blocks[block].get_unpack_size() >= MT_BLOCK_SIZE {
+    let unpacked = archive.blocks[block].get_unpack_size();
+    if unpacked > MAX_BLOCK {
+        return Err(Error::Unsupported(format!(
+            "a block of this archive expands to {} MiB, more than a comparison reads",
+            unpacked >> 20
+        )));
+    }
+    let threads = if unpacked >= MT_BLOCK_SIZE {
         std::thread::available_parallelism().map_or(1, |n| n.get() as u32)
     } else {
         // A decoder thread pool per small block costs more than the decoding.
@@ -327,8 +516,7 @@ fn decode_7z_block(
     sevenz_rust2::BlockDecoder::new(threads, block, archive, &password, &mut source)
         .for_each_entries(&mut |entry, r| {
             if !entry.is_directory {
-                let mut buf = Vec::with_capacity(entry.size as usize);
-                r.read_to_end(&mut buf)?;
+                let buf = read_entry(r, entry.size).map_err(std::io::Error::other)?;
                 if let Some(path) = normalize(&entry.name) {
                     files.insert(path, Arc::new(buf));
                 }
@@ -345,10 +533,12 @@ impl Vfs for ArchiveFs {
     }
 
     fn list(&self, dir: &str) -> Result<Vec<Entry>> {
+        check_rel(dir)?;
         self.index.dirs.get(dir).cloned().ok_or_else(|| Error::NotFound(join(&self.label, dir)))
     }
 
     fn stat(&self, path: &str) -> Result<Entry> {
+        check_rel(path)?;
         if path.is_empty() {
             return Ok(root_entry());
         }
@@ -384,6 +574,7 @@ impl Vfs for ArchiveFs {
     }
 
     fn read(&self, path: &str) -> Result<Data> {
+        check_rel(path)?;
         let not_found = || Error::NotFound(join(&self.label, path));
         match &self.backend {
             Backend::Zip { archive, index_of } => {
@@ -391,9 +582,8 @@ impl Vfs for ArchiveFs {
                 // Cloning shares the parsed central directory; it lets reads run in parallel.
                 let mut archive = archive.clone();
                 let mut file = archive.by_index(i).map_err(Error::archive)?;
-                let mut buf = Vec::with_capacity(file.size() as usize);
-                file.read_to_end(&mut buf).map_err(Error::archive)?;
-                Ok(Data::from_vec(buf))
+                let size = file.size();
+                Ok(Data::from_vec(read_entry(&mut file, size)?))
             }
             Backend::SevenZ { data, archive, index_of, solid } => {
                 let i = *index_of.get(path).ok_or_else(not_found)?;
@@ -418,7 +608,10 @@ impl Vfs for ArchiveFs {
                 };
                 files.get(path).cloned().map(Data::from_shared).ok_or_else(not_found)
             }
-            Backend::Tar { contents, .. } => contents.get(path).cloned().map(Data::from_shared).ok_or_else(not_found),
+            Backend::Tar { data, contents, spool, .. } => {
+                let content = contents.get(path).ok_or_else(not_found)?;
+                Ok(Data::from_vec(tar_read(data, spool.as_ref(), content)?))
+            }
         }
     }
 }

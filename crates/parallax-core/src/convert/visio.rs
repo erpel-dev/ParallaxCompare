@@ -1,7 +1,6 @@
 //! Microsoft Visio drawings: .vsdx and its siblings (drawing, template, stencil,
 //! with or without macros) are read directly, and so are the binary .vsd/.vss/.vst
-//! of Visio 2000–2010 (see `vsd`); older binary files go through LibreOffice,
-//! which converts them to an OpenDocument drawing.
+//! of Visio 2000–2010 (see `vsd`). Older binary files cannot be read.
 //!
 //! The **Diagram** view lists every page with its shapes: name, master, text,
 //! position and size, colours set on the shape, shape data, nested shapes of
@@ -13,8 +12,6 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
-
-use parking_lot::Mutex;
 
 use super::office::{Ev, Zip, attr, walk_xml};
 use crate::{Error, Result};
@@ -80,42 +77,17 @@ pub fn diagram_text(data: &[u8]) -> Result<String> {
 }
 
 /// The Diagram view of a binary .vsd (or .vss, .vst) file.
-pub fn legacy_diagram(ext: &str, data: &[u8]) -> Result<String> {
-    Ok(render(&read_legacy(ext, data)?, true))
+pub fn legacy_diagram(data: &[u8]) -> Result<String> {
+    Ok(render(&read_legacy(data)?, true))
 }
 
-pub fn legacy_text(ext: &str, data: &[u8]) -> Result<String> {
-    Ok(render(&read_legacy(ext, data)?, false))
+pub fn legacy_text(data: &[u8]) -> Result<String> {
+    Ok(render(&read_legacy(data)?, false))
 }
 
-/// Read natively where the version is known, else through LibreOffice if there is one.
-fn read_legacy(ext: &str, data: &[u8]) -> Result<Drawing> {
-    match super::vsd::read(data) {
-        Ok(drawing) => Ok(drawing),
-        Err(_) if super::office::soffice().is_some() => {
-            Ok(Drawing { pages: read_odg(&converted(ext, data)?)?, masters: Vec::new() })
-        }
-        Err(e) => Err(e),
-    }
-}
-
-/// The file converted to an OpenDocument drawing. A conversion takes seconds, and
-/// both views and the similar check need it, so the last few are kept.
-fn converted(ext: &str, data: &[u8]) -> Result<Vec<u8>> {
-    /// (CRC32 and length of the input, converted drawing)
-    type Entry = ((u32, usize), Vec<u8>);
-    static CACHE: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
-    let key = (crc32fast::hash(data), data.len());
-    if let Some((_, odg)) = CACHE.lock().iter().find(|(k, _)| *k == key) {
-        return Ok(odg.clone());
-    }
-    let odg = super::office::convert(ext, data, "odg")?;
-    let mut cache = CACHE.lock();
-    cache.push((key, odg.clone()));
-    if cache.len() > 8 {
-        cache.remove(0);
-    }
-    Ok(odg)
+/// Read natively; versions older than Visio 2000 are not read.
+fn read_legacy(data: &[u8]) -> Result<Drawing> {
+    super::vsd::read(data)
 }
 
 // ---- .vsdx ----
@@ -457,135 +429,6 @@ fn sort(shapes: &mut [Shape]) {
     shapes.sort_by_key(|s| (s.id.parse::<u64>().unwrap_or(u64::MAX), s.id.clone()));
     for shape in shapes {
         sort(&mut shape.children);
-    }
-}
-
-// ---- .vsd through LibreOffice (OpenDocument drawing) ----
-
-fn read_odg(data: &[u8]) -> Result<Vec<Page>> {
-    let mut zip = Zip::open(data)?;
-    let xml =
-        zip.read("content.xml").ok_or_else(|| Error::Unsupported("the converted drawing has no content".into()))?;
-    let mut pages: Vec<Page> = Vec::new();
-    let mut stack: Vec<Shape> = Vec::new();
-    let mut in_paragraph = false;
-    const SHAPES: [&str; 14] = [
-        "custom-shape",
-        "rect",
-        "ellipse",
-        "circle",
-        "frame",
-        "polygon",
-        "polyline",
-        "path",
-        "line",
-        "connector",
-        "g",
-        "measure",
-        "caption",
-        "regular-polygon",
-    ];
-    walk_xml(&xml, |ev| match ev {
-        Ev::Start("page", e) => {
-            pages.push(Page { name: attr(e, "name").unwrap_or_default(), ..Default::default() });
-        }
-        Ev::Start(kind, e) if SHAPES.contains(&kind) && !pages.is_empty() => {
-            let mut shape = Shape {
-                id: attr(e, "id").unwrap_or_default(),
-                kind: odg_kind(kind).into(),
-                name: attr(e, "name").unwrap_or_default(),
-                begin: attr(e, "start-shape"),
-                end: attr(e, "end-shape"),
-                ..Default::default()
-            };
-            for (cell, key) in [("x", "PinX"), ("y", "PinY"), ("width", "Width"), ("height", "Height")] {
-                if let Some(v) = attr(e, cell) {
-                    shape.cells.insert(key.into(), v);
-                }
-            }
-            for (cell, key) in [("x1", "BeginX"), ("y1", "BeginY"), ("x2", "EndX"), ("y2", "EndY")] {
-                if let Some(v) = attr(e, cell) {
-                    shape.cells.insert(key.into(), v);
-                }
-            }
-            if let Some(t) = attr(e, "transform").filter(|t| t.contains("rotate")) {
-                shape.cells.insert("Angle".into(), t);
-            }
-            for outline in ["points", "d"] {
-                if let Some(v) = attr(e, outline) {
-                    shape.geometry.push(v);
-                }
-            }
-            stack.push(shape);
-        }
-        Ev::Start("enhanced-geometry", e) => {
-            if let Some(shape) = stack.last_mut() {
-                let kind = attr(e, "type").filter(|t| t != "non-primitive");
-                let path = attr(e, "enhanced-path");
-                let modifiers = attr(e, "modifiers");
-                let parts: Vec<String> =
-                    [kind, path, modifiers.map(|m| format!("modifiers {m}"))].into_iter().flatten().collect();
-                if !parts.is_empty() {
-                    shape.geometry.push(parts.join(" · "));
-                }
-            }
-        }
-        Ev::End(kind) if SHAPES.contains(&kind) => {
-            if let Some(mut shape) = stack.pop() {
-                shape.text = shape.text.trim_end().to_string();
-                match (stack.last_mut(), pages.last_mut()) {
-                    (Some(parent), _) => parent.children.push(shape),
-                    (None, Some(page)) => page.shapes.push(shape),
-                    _ => {}
-                }
-            }
-        }
-        Ev::Start("image", e) => {
-            if let (Some(shape), Some(href)) = (stack.last_mut(), attr(e, "href")) {
-                shape.kind = "Image".into();
-                shape.image = zip_media(&mut zip, &href).or(Some(href));
-            }
-        }
-        Ev::Start("p" | "h", _) if !stack.is_empty() => in_paragraph = true,
-        Ev::End("p" | "h") if in_paragraph => {
-            in_paragraph = false;
-            if let Some(shape) = stack.last_mut() {
-                shape.text.push('\n');
-            }
-        }
-        Ev::Start("s", e) if in_paragraph => {
-            let n = attr(e, "c").and_then(|c| c.parse().ok()).unwrap_or(1usize);
-            if let Some(shape) = stack.last_mut() {
-                shape.text.push_str(&" ".repeat(n));
-            }
-        }
-        Ev::Start("tab", _) if in_paragraph => {
-            if let Some(shape) = stack.last_mut() {
-                shape.text.push('\t');
-            }
-        }
-        Ev::Start("line-break", _) if in_paragraph => {
-            if let Some(shape) = stack.last_mut() {
-                shape.text.push('\n');
-            }
-        }
-        Ev::Text(t) if in_paragraph => {
-            if let Some(shape) = stack.last_mut() {
-                shape.text.push_str(t);
-            }
-        }
-        _ => {}
-    })?;
-    Ok(pages)
-}
-
-fn odg_kind(element: &str) -> &'static str {
-    match element {
-        "connector" => "Connector",
-        "line" | "polyline" | "path" | "measure" => "Line",
-        "g" => "Group",
-        "frame" => "Frame",
-        _ => "Shape",
     }
 }
 

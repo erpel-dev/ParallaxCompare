@@ -211,6 +211,26 @@ pub fn normalize(path: &str) -> Option<String> {
     Some(parts.join("/"))
 }
 
+/// Checks a path that names an entry in a tree, rejecting what [`normalize`] would
+/// silently rewrite or that would leave the tree: `..`, a root or drive prefix, a
+/// leading separator. Paths from the UI and from file operations go through here,
+/// so that no command can name something outside the tree it was opened on.
+pub fn check_rel(path: &str) -> Result<()> {
+    use std::path::{Component, Path};
+    // A leading separator is never part of a path inside a tree (`""` is the root).
+    if path.starts_with('/') || path.starts_with('\\') {
+        return Err(crate::Error::InvalidSource(path.to_string()));
+    }
+    for part in path.split(['/', '\\']) {
+        let mut components = Path::new(part).components();
+        match (components.next(), components.next()) {
+            (None, _) | (Some(Component::Normal(_) | Component::CurDir), None) => {}
+            _ => return Err(crate::Error::InvalidSource(path.to_string())),
+        }
+    }
+    Ok(())
+}
+
 /// Looks up an entry in a tree index that maps each folder to its children.
 pub(crate) fn find_entry(dirs: &HashMap<String, Vec<Entry>>, path: &str) -> Result<Entry> {
     let (parent, name) = split_parent(path);
@@ -228,6 +248,19 @@ pub(crate) fn root_entry() -> Entry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn check_rel_rejects_what_leaves_the_tree() {
+        for ok in ["", "a", "a/b", "./a", "a/./b", "a b/c.txt"] {
+            assert!(check_rel(ok).is_ok(), "{ok:?} is a path inside the tree");
+        }
+        for bad in ["..", "../x", "a/../../x", "a/..", "..\\x", "/etc/passwd", "\\\\server\\share"] {
+            assert!(check_rel(bad).is_err(), "{bad:?} names something outside the tree");
+        }
+        // On Windows a drive is a path prefix that would replace the root.
+        #[cfg(windows)]
+        assert!(check_rel("C:\\Windows").is_err());
+    }
 
     #[test]
     fn normalize_rejects_traversal() {

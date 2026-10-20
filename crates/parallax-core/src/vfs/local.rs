@@ -42,10 +42,20 @@ impl LocalFs {
         &self.root
     }
 
-    fn abs(&self, path: &str) -> PathBuf {
+    /// The path of `rel` below the root, or `None` when `rel` names something
+    /// outside the tree. Every lookup and write goes through here, so a path that
+    /// escaped would have to get past `check_rel` first.
+    fn abs(&self, path: &str) -> Option<PathBuf> {
+        crate::vfs::check_rel(path).ok()?;
         let mut p = self.root.clone();
-        p.extend(path.split('/').filter(|p| !p.is_empty()));
-        p
+        p.extend(path.split('/').filter(|part| !part.is_empty() && *part != "."));
+        Some(p)
+    }
+
+    /// The path of an entry, with the error a lookup or a write returns when `rel`
+    /// names something outside the tree.
+    fn abs_checked(&self, path: &str) -> Result<PathBuf> {
+        self.abs(path).ok_or_else(|| Error::InvalidSource(path.to_string()))
     }
 }
 
@@ -188,7 +198,7 @@ impl Vfs for LocalFs {
         if let Some(snapshot) = &self.snapshot {
             return snapshot.read().get(dir).cloned().ok_or_else(|| Error::NotFound(dir.to_string()));
         }
-        let abs = self.abs(dir);
+        let abs = self.abs_checked(dir)?;
         let rd = fs::read_dir(&abs).map_err(|e| Error::io(abs.display().to_string(), e))?;
         let mut out = Vec::new();
         for dent in rd {
@@ -209,11 +219,12 @@ impl Vfs for LocalFs {
             return find_entry(&snapshot.read(), path);
         }
         let (_, name) = split_parent(path);
-        entry_from_path(&self.abs(path), name.to_string()).ok_or_else(|| Error::NotFound(path.to_string()))
+        let abs = self.abs_checked(path)?;
+        entry_from_path(&abs, name.to_string()).ok_or_else(|| Error::NotFound(path.to_string()))
     }
 
     fn read(&self, path: &str) -> Result<Data> {
-        let abs = self.abs(path);
+        let abs = self.abs_checked(path)?;
         let err = |e| Error::io(abs.display().to_string(), e);
         let kind = fs::symlink_metadata(&abs).map_err(err)?.file_type();
         if kind.is_symlink() {
@@ -238,7 +249,7 @@ impl Vfs for LocalFs {
     }
 
     fn local_path(&self, path: &str) -> Option<PathBuf> {
-        Some(self.abs(path))
+        self.abs(path)
     }
 
     fn writable(&self) -> bool {
@@ -250,7 +261,7 @@ impl Vfs for LocalFs {
         for change in changes {
             progress.check()?;
             let path = change.path().to_string();
-            let abs = self.abs(&path);
+            let abs = self.abs_checked(&path)?;
             let io_err = |e| Error::io(abs.display().to_string(), e);
             let result = match change {
                 Change::Put { kind: EntryKind::Dir, .. } => fs::create_dir_all(&abs).map_err(io_err),
@@ -294,15 +305,18 @@ impl Vfs for LocalFs {
             }
             dirs[parent].iter().any(|e| e.name == name)
         };
+        let (Some(parent_abs), Some(path_abs)) = (self.abs(parent), self.abs(path)) else {
+            return;
+        };
         // Listing the parent tells whether ignore rules hide `path`. An entry that was
         // already shown stays (Git-tracked files are shown even when ignored).
-        let entry = walk(&self.root, &self.abs(parent), Some(1))
+        let entry = walk(&self.root, &parent_abs, Some(1))
             .into_iter()
             .find(|(rel, _)| rel == path)
             .map(|(_, e)| e)
-            .or_else(|| was_listed.then(|| entry_from_path(&self.abs(path), name.to_string())).flatten());
+            .or_else(|| was_listed.then(|| entry_from_path(&path_abs, name.to_string())).flatten());
         let below = match &entry {
-            Some(e) if e.kind == EntryKind::Dir => walk(&self.root, &self.abs(path), None),
+            Some(e) if e.kind == EntryKind::Dir => walk(&self.root, &path_abs, None),
             _ => Vec::new(),
         };
 
@@ -402,6 +416,7 @@ pub(crate) fn make_symlink(link_to: &str, at: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::progress::Progress;
 
     /// Two writers at once each get their own temporary file: both succeed, and the
     /// file ends up as one of them wrote it, whole.
@@ -430,6 +445,43 @@ mod tests {
         }
         let left: Vec<_> = fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
         assert_eq!(left, ["target.txt"], "temporary files left behind");
+    }
+
+    /// Every lookup and write is confined to the root, also when the path contains
+    /// `..` or is absolute.
+    #[test]
+    fn paths_cannot_leave_the_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::write(root.join("sub/inside.txt"), b"in").unwrap();
+        fs::write(dir.path().join("outside.txt"), b"out").unwrap();
+        let vfs = LocalFs::new(&root);
+
+        assert_eq!(&*vfs.read("sub/inside.txt").unwrap(), b"in");
+        for path in ["../outside.txt", "sub/../../outside.txt", "/etc/passwd", ".."] {
+            assert!(matches!(vfs.read(path), Err(Error::InvalidSource(_))), "{path}");
+            assert!(matches!(vfs.stat(path), Err(Error::InvalidSource(_))), "{path}");
+            assert!(matches!(vfs.list(path), Err(Error::InvalidSource(_))), "{path}");
+            assert!(vfs.local_path(path).is_none(), "{path}");
+        }
+
+        let write = |path: &str| {
+            vfs.apply(
+                vec![Change::Put {
+                    path: path.to_string(),
+                    kind: EntryKind::File,
+                    data: Data::from_vec(b"written".to_vec()),
+                    mtime: None,
+                }],
+                &Progress::default(),
+            )
+        };
+        assert!(matches!(write("../outside.txt"), Err(Error::InvalidSource(_))));
+        assert!(write("sub/../../outside.txt").is_err());
+        assert_eq!(fs::read(dir.path().join("outside.txt")).unwrap(), b"out");
+        write("sub/new.txt").unwrap();
+        assert_eq!(fs::read(root.join("sub/new.txt")).unwrap(), b"written");
     }
 
     #[cfg(unix)]

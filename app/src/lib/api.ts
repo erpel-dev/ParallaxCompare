@@ -17,11 +17,19 @@ export interface PullRequestComparison extends PullRequestInfo {
   right: SourceSpec;
 }
 
-/** Only recognizes the URL shape. The backend validates and resolves it on submit. */
+/** Whether the text is a pull request URL `pull_request::PullRequestUrl` accepts. */
 export function isPullRequestUrl(text: string): boolean {
   try {
     const url = new URL(text.trim());
-    return ["https:", "http:"].includes(url.protocol) && /^\/[^/]+\/[^/]+\/pull(?:\/|$)/.test(url.pathname);
+    if (url.protocol !== "https:" || url.username || url.password) return false;
+    const parts = url.pathname.split("/").filter(Boolean);
+    const segment = (s: string | undefined) => !!s && /^[A-Za-z0-9._-]+$/.test(s) && s !== "." && s !== "..";
+    if (!segment(parts[0]) || !segment(parts[1]) || parts[2] !== "pull") return false;
+    const digits = parts[3] ?? "";
+    if (!/^\d+$/.test(digits)) return false;
+    const number = BigInt(digits);
+    return number > 0n && number <= 0xffffffffffffffffn &&
+      (parts.length === 4 || ["files", "commits", "checks", "changes", "overview"].includes(parts[4] ?? ""));
   } catch {
     return false;
   }

@@ -1,0 +1,826 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ParallaxCompare — Security Review (v0.0.9)</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --surface: #ffffff;
+    --text: #1b1f24;
+    --muted: #5b6672;
+    --line: #dfe3e8;
+    --accent: #2f6feb;
+    --crit: #b30021;
+    --high: #d9480f;
+    --med: #b07800;
+    --low: #4c6ef5;
+    --ok: #1f8a4c;
+    --code-bg: #f2f4f7;
+    --code-text: #24292f;
+    --radius: 10px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12161b;
+      --surface: #191f26;
+      --text: #e6e9ee;
+      --muted: #9aa6b2;
+      --line: #2b333d;
+      --accent: #6ea8fe;
+      --crit: #ff6b8a;
+      --high: #ff9a62;
+      --med: #e8c04a;
+      --low: #8fa9ff;
+      --ok: #5ddc9b;
+      --code-bg: #0e1216;
+      --code-text: #d8dee6;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  .page { max-width: 1080px; margin: 0 auto; padding: 40px 24px 96px; }
+  header.hero {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 32px 34px;
+    margin-bottom: 28px;
+  }
+  .eyebrow {
+    text-transform: uppercase;
+    letter-spacing: .12em;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--accent);
+    margin: 0 0 10px;
+  }
+  h1 { font-size: 30px; line-height: 1.2; margin: 0 0 12px; letter-spacing: -0.01em; }
+  h2 {
+    font-size: 21px; margin: 44px 0 14px; padding-bottom: 8px;
+    border-bottom: 1px solid var(--line); letter-spacing: -0.01em;
+  }
+  h3 { font-size: 16px; margin: 26px 0 8px; }
+  p { margin: 0 0 12px; }
+  .lede { color: var(--muted); font-size: 16px; margin: 0; }
+  .meta {
+    display: flex; flex-wrap: wrap; gap: 8px 26px;
+    margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--line);
+    font-size: 13px; color: var(--muted);
+  }
+  .meta b { color: var(--text); font-weight: 600; }
+  .status { margin: 18px 0 0; font-size: 13px; color: var(--muted); }
+  .status b { color: var(--text); }
+  code, pre, .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; }
+  code { background: var(--code-bg); padding: .12em .38em; border-radius: 5px; font-size: .9em; color: var(--code-text); }
+  pre {
+    background: var(--code-bg); color: var(--code-text); padding: 14px 16px;
+    border-radius: 8px; overflow-x: auto; font-size: 12.5px; line-height: 1.55;
+    border: 1px solid var(--line);
+  }
+  pre code { background: none; padding: 0; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 20px 0 4px; }
+  .card {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .card .n { font-size: 26px; font-weight: 700; line-height: 1.1; }
+  .card .l { font-size: 11.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); margin-top: 4px; }
+  .card.crit .n { color: var(--crit); }
+  .card.high .n { color: var(--high); }
+  .card.med .n { color: var(--med); }
+  .card.low .n { color: var(--low); }
+  .card.ok .n { color: var(--ok); }
+
+  .badge {
+    display: inline-block; padding: 2px 9px; border-radius: 999px;
+    font-size: 10.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+    white-space: nowrap; border: 1px solid transparent;
+  }
+  .b-crit { background: color-mix(in srgb, var(--crit) 16%, transparent); color: var(--crit); border-color: color-mix(in srgb, var(--crit) 40%, transparent); }
+  .b-high { background: color-mix(in srgb, var(--high) 15%, transparent); color: var(--high); border-color: color-mix(in srgb, var(--high) 38%, transparent); }
+  .b-med  { background: color-mix(in srgb, var(--med) 16%, transparent); color: var(--med); border-color: color-mix(in srgb, var(--med) 40%, transparent); }
+  .b-low  { background: color-mix(in srgb, var(--low) 14%, transparent); color: var(--low); border-color: color-mix(in srgb, var(--low) 36%, transparent); }
+  .b-ok   { background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--ok); border-color: color-mix(in srgb, var(--ok) 36%, transparent); }
+
+  table { width: 100%; border-collapse: collapse; margin: 16px 0 8px; font-size: 13.5px; background: var(--surface); }
+  .tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { background: color-mix(in srgb, var(--accent) 6%, var(--surface)); font-size: 11.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  tr:last-child td { border-bottom: none; }
+  td.id { font-weight: 700; color: var(--muted); width: 42px; }
+  table.findings { table-layout: fixed; }
+  table.findings th:nth-child(1), table.findings td:nth-child(1) { width: 40px; }
+  table.findings th:nth-child(2), table.findings td:nth-child(2) { width: 96px; }
+  table.findings th:nth-child(3), table.findings td:nth-child(3) { width: 104px; }
+  table.findings th:nth-child(4), table.findings td:nth-child(4) { width: 214px; }
+  table.findings th:nth-child(6), table.findings td:nth-child(6) { width: 54px; }
+  table.findings td:nth-child(4) { font-size: 12px; word-break: break-word; }
+  td .mono, td code { font-size: 12px; }
+
+  .finding {
+    background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--line);
+    border-radius: 8px; padding: 18px 20px; margin: 16px 0;
+  }
+  .finding.high { border-left-color: var(--high); }
+  .finding.med { border-left-color: var(--med); }
+  .finding.low { border-left-color: var(--low); }
+  .finding h3 { margin: 0 0 6px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  .finding .loc { font-size: 12.5px; color: var(--muted); margin: 0 0 12px; }
+  .finding dl { margin: 0; display: grid; grid-template-columns: 128px 1fr; gap: 6px 16px; font-size: 13.5px; }
+  .finding dt { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; padding-top: 2px; }
+  .finding dd { margin: 0; }
+  @media (max-width: 620px) {
+    .finding dl { grid-template-columns: 1fr; gap: 2px; }
+    .finding dt { margin-top: 8px; }
+  }
+
+  .callout {
+    border: 1px solid var(--line); border-radius: 8px; padding: 14px 18px; margin: 18px 0;
+    background: color-mix(in srgb, var(--accent) 5%, var(--surface));
+  }
+  .callout.warn { background: color-mix(in srgb, var(--high) 7%, var(--surface)); border-color: color-mix(in srgb, var(--high) 30%, var(--line)); }
+  .callout p:last-child { margin-bottom: 0; }
+
+  .flow {
+    display: grid; gap: 10px; margin: 18px 0 6px;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  }
+  .node {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
+    padding: 12px 14px; font-size: 12.5px;
+  }
+  .node .t { font-weight: 700; font-size: 12px; margin-bottom: 4px; }
+  .node.trust { border-color: color-mix(in srgb, var(--crit) 45%, var(--line)); }
+  .node.hostile { border-color: color-mix(in srgb, var(--high) 45%, var(--line)); }
+
+  ol, ul { margin: 0 0 12px; padding-left: 22px; }
+  li { margin-bottom: 6px; }
+  .steps { counter-reset: s; list-style: none; padding-left: 0; }
+  .steps > li { position: relative; padding-left: 36px; margin-bottom: 10px; }
+  .steps > li::before {
+    counter-increment: s; content: counter(s);
+    position: absolute; left: 0; top: 1px;
+    width: 23px; height: 23px; border-radius: 50%;
+    background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent);
+    font-size: 12px; font-weight: 700; display: grid; place-items: center;
+  }
+
+  footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12.5px; }
+  .tag { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="page">
+
+<header class="hero">
+  <p class="eyebrow">Security review · static analysis</p>
+  <h1>ParallaxCompare — attack surface and hardening report</h1>
+  <p class="lede">
+    A whole-codebase security review of the Rust comparison engine, its ~60 file-format parsers, the
+    Tauri IPC layer and the Svelte front end: where the trust boundaries are, how an attacker would
+    reach them, and what to fix first.
+  </p>
+  <div class="meta">
+    <span><b>Repository</b> erpel-dev/ParallaxCompare</span>
+    <span><b>Revision</b> 9f7d5cd (v0.0.9)</span>
+    <span><b>Date</b> 2026-10-20</span>
+    <span><b>Scope</b> crates/parallax-core, crates/parallax-cli, app/src-tauri, app/src, CI</span>
+    <span><b>Findings</b> 0 critical · 2 high · 5 medium · 7 low</span>
+  </div>
+  <p class="status">
+    <span class="badge b-ok">Remediated</span>
+    Findings 1–7 (the two High and the five Medium ones) were fixed on 2026-10-20; findings 8–13 are still open.
+  </p>
+</header>
+
+<h2>1. Executive summary</h2>
+<p>
+  ParallaxCompare is a desktop diff tool that opens files it did not create. That single sentence defines
+  its threat model: <b>everything it displays is untrusted input</b> — archive members, document bodies,
+  media headers, Git trees fetched from the network, and the GitHub API answers that name them.
+</p>
+<p>
+  The good news is that the codebase is visibly written with that in mind. The hand-written binary parsers
+  validate every length and offset against the buffer they came from, the four riskiest parsers are wrapped
+  in <code>catch_unwind</code>, Jinja chat templates execute under a fuel limit, archive member names pass
+  through a <code>normalize()</code> that rejects <code>..</code>, Git and <code>gh</code> are invoked with
+  <code>--end-of-options</code> and validated arguments, the webview CSP is strict and the front end has
+  <i>no</i> HTML injection sink. <b>No memory-corruption, command-injection, XXE or XSS vulnerability was
+  found in the Rust or TypeScript code itself.</b>
+</p>
+<p>
+  What remains are boundary and robustness problems, concentrated in four places:
+</p>
+<ol>
+  <li><b>LibreOffice conversion uses a predictable, symlink-following temp directory</b> in the shared temp
+      folder — a local attacker can plant a symlink and redirect writes made with the victim's privileges
+      (<span class="mono">office.rs:411</span>).</li>
+  <li><b>Relative paths from the webview are not confined to the comparison roots.</b> <code>..</code> is
+      never rejected on the write/delete path and the empty path resolves to the root itself, so the IPC
+      layer is one renderer compromise — or one UI bug — away from arbitrary file write and permanent
+      deletion outside the folders the user opened.</li>
+  <li><b>Crafted archives can kill the app</b> (and on some systems the session): allocation sizes are taken
+      from archive headers, tar payloads are fully decompressed into RAM at open time, and directory
+      creation recurses per path component.</li>
+  <li><b>LibreOffice is the parser for untrusted legacy documents</b> — one of the largest native attack
+      surfaces on a typical desktop — and it is invoked without any sandbox.</li>
+</ol>
+
+<div class="cards">
+  <div class="card crit"><div class="n">0</div><div class="l">Critical</div></div>
+  <div class="card high"><div class="n">2</div><div class="l">High</div></div>
+  <div class="card med"><div class="n">5</div><div class="l">Medium</div></div>
+  <div class="card low"><div class="n">7</div><div class="l">Low</div></div>
+  <div class="card ok"><div class="n">0</div><div class="l">Secrets in repo</div></div>
+</div>
+
+<h2>2. Trust boundaries</h2>
+<p>
+  The application has exactly one privilege boundary that matters: <b>the Rust process runs with the full
+  rights of the logged-in user, and everything the webview asks it to do is done with those rights.</b>
+  Tauri's capability system guards <i>plugin</i> commands; the 37 custom commands in
+  <span class="mono">commands.rs</span> are not covered by <code>capabilities/default.json</code> at all.
+  That is normal for Tauri, but it makes the renderer a fully privileged peer: any script that runs there
+  can read, copy and delete any file the user can.
+</p>
+
+<div class="flow">
+  <div class="node hostile">
+    <div class="t">Untrusted input</div>
+    Files, archives, repos and PR links the user opens. Attacker fully controls bytes, names and headers.
+  </div>
+  <div class="node">
+    <div class="t">parallax-core parsers</div>
+    ~60 hand-written format readers. Bounds-checked; the risky four are panic-wrapped. <b>Solid.</b>
+  </div>
+  <div class="node">
+    <div class="t">VFS layer</div>
+    Local files, archives, Git trees. <code>normalize()</code> rejects <code>..</code> for archive and Git
+    members, but <b>not</b> for paths arriving from the UI.
+  </div>
+  <div class="node trust">
+    <div class="t">Tauri IPC — full user privileges</div>
+    File read, copy, write, permanent delete, "open with default app". No path confinement, no capability
+    restriction.
+  </div>
+  <div class="node">
+    <div class="t">Svelte renderer</div>
+    Strict CSP, no <code>innerHTML</code>, SVG only inside <code>&lt;img&gt;</code>. <b>Solid.</b>
+  </div>
+</div>
+
+<div class="callout">
+  <p><b>How to read the severities below.</b> A finding is rated <i>High</i> when an attacker with a plausible
+  position (a local user on a shared machine, a document or link sent to the victim) obtains a concrete,
+  damaging primitive without needing a second, unrelated bug. Findings that need a renderer compromise first
+  are rated <i>Medium</i> — they are the reason a renderer compromise would be catastrophic rather than
+  cosmetic, which is exactly why they should be closed.</p>
+</div>
+
+<h2>3. Findings</h2>
+<div class="tablewrap">
+<table class="findings">
+  <thead>
+    <tr><th class="id">#</th><th>Severity</th><th>Area</th><th>Location</th><th>Finding</th><th>Conf.</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="id">1</td><td><span class="badge b-high">High</span></td><td>Temp files</td>
+      <td class="mono">convert/office.rs:411–459</td>
+      <td>Predictable, world-traversable temp directory is created with <code>create_dir_all</code> and used for
+          symlink-following writes of untrusted documents; local attacker can redirect them.</td><td>8/10</td>
+    </tr>
+    <tr>
+      <td class="id">2</td><td><span class="badge b-high">High</span></td><td>IPC / VFS</td>
+      <td class="mono">commands.rs:529–613, 1431 · vfs/local.rs:45</td>
+      <td>No containment of webview-supplied relative paths: <code>..</code> escapes the compared root and
+          <code>""</code> resolves to the root itself (permanent delete of the whole folder).</td><td>9/10</td>
+    </tr>
+    <tr>
+      <td class="id">3</td><td><span class="badge b-med">Medium</span></td><td>DoS</td>
+      <td class="mono">vfs/archive.rs:276, 330, 394 · archive/write.rs:186</td>
+      <td>Buffers are pre-allocated from header-declared sizes; a one-byte zip/tar/7z header field aborts the
+          process through the allocator.</td><td>9/10</td>
+    </tr>
+    <tr>
+      <td class="id">4</td><td><span class="badge b-med">Medium</span></td><td>DoS</td>
+      <td class="mono">vfs/archive.rs:72–87</td>
+      <td>Recursive parent creation with one stack frame per path component; a deeply nested member name
+          overflows the stack while indexing.</td><td>7/10</td>
+    </tr>
+    <tr>
+      <td class="id">5</td><td><span class="badge b-med">Medium</span></td><td>DoS</td>
+      <td class="mono">vfs/archive.rs:256–291</td>
+      <td>Whole tar stream is decompressed and retained in memory at open time; a compression bomb exhausts RAM
+          before any file is compared.</td><td>8/10</td>
+    </tr>
+    <tr>
+      <td class="id">6</td><td><span class="badge b-med">Medium</span></td><td>Third-party parser</td>
+      <td class="mono">convert/office.rs:374–443</td>
+      <td>Legacy <code>.doc/.xls/.ppt/.vsd</code> are converted by LibreOffice in-process of the user, with no
+          sandbox — a well-known native-code attack surface.</td><td>7/10</td>
+    </tr>
+    <tr>
+      <td class="id">7</td><td><span class="badge b-med">Medium</span></td><td>Network</td>
+      <td class="mono">remote.rs:24–27, 276</td>
+      <td><code>http://</code> and unauthenticated <code>git://</code> remotes are accepted, so compared
+          content can be substituted by a network attacker.</td><td>8/10</td>
+    </tr>
+    <tr>
+      <td class="id">8</td><td><span class="badge b-low">Low</span></td><td>Webview</td>
+      <td class="mono">tauri.conf.json:24</td>
+      <td>CSP is strict but omits <code>base-uri</code>, <code>object-src</code> and
+          <code>frame-ancestors</code>, which do not inherit from <code>default-src</code>.</td><td>9/10</td>
+    </tr>
+    <tr>
+      <td class="id">9</td><td><span class="badge b-low">Low</span></td><td>Subprocess</td>
+      <td class="mono">remote.rs:276 · pull_request.rs:120 · office.rs:357</td>
+      <td><code>git</code>, <code>gh</code> and <code>soffice</code> are resolved through <code>PATH</code>;
+          the code executes whatever binary that resolves to.</td><td>7/10</td>
+    </tr>
+    <tr>
+      <td class="id">10</td><td><span class="badge b-low">Low</span></td><td>CLI output</td>
+      <td class="mono">crates/parallax-cli/src/main.rs</td>
+      <td>Raw file content is written to the terminal unescaped: escape-sequence injection from a compared
+          file.</td><td>8/10</td>
+    </tr>
+    <tr>
+      <td class="id">11</td><td><span class="badge b-low">Low</span></td><td>CI / supply chain</td>
+      <td class="mono">.github/workflows/*.yml</td>
+      <td>Actions pinned to mutable tags rather than commit SHAs; <code>$TAG</code> is interpolated into shell
+          commands in the release job.</td><td>9/10</td>
+    </tr>
+    <tr>
+      <td class="id">12</td><td><span class="badge b-low">Low</span></td><td>Memory</td>
+      <td class="mono">convert/image_diff.rs:135, 227</td>
+      <td>Image decoding relies on the crate's default 512 MiB allocation cap instead of explicit dimension
+          limits; a pixel bomb still costs hundreds of megabytes.</td><td>7/10</td>
+    </tr>
+    <tr>
+      <td class="id">13</td><td><span class="badge b-low">Low</span></td><td>Symlinks</td>
+      <td class="mono">ops.rs:167–175 · vfs/local.rs:257</td>
+      <td>Symlinks are recreated with attacker-chosen targets when copying out of an archive; combined with
+          any later write this is the classic link-swap recipe.</td><td>6/10</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<h2>4. Findings in detail</h2>
+
+<div class="finding high">
+  <h3><span class="badge b-high">High</span> 1 · Predictable, symlink-following temp directory for document conversion</h3>
+  <p class="loc mono">crates/parallax-core/src/convert/office.rs:411–459 (also <span class="mono">unique()</span> at 447)</p>
+  <dl>
+    <dt>Attacker controls</dt>
+    <dd>A local account on the same machine, plus the document the victim compares (easy to arrange: "can you
+        diff these two builds / these two contracts for me?").</dd>
+    <dt>Root cause</dt>
+    <dd>The conversion directory is <code>temp_dir()/parallax-convert-&lt;pid&gt;-&lt;counter&gt;</code>. The PID is
+        readable from <code>/proc</code> or <code>ps</code>, and the counter starts at 0 for every process, so the
+        name is fully predictable. It is then created with <code>create_dir_all</code>, which succeeds when the
+        path already exists — including as a symlink — and the document is written with <code>std::fs::write</code>,
+        which follows symlinks. The directory is also handed to LibreOffice as <code>--outdir</code>, and the result
+        is read back with <code>std::fs::read</code>, again following links.</dd>
+    <dt>Impact</dt>
+    <dd>Two directions. <i>Integrity:</i> a symlink planted at <code>/tmp/parallax-convert-&lt;pid&gt;-0/input.doc</code>
+        makes the app write the attacker's bytes to any path the victim can write, with the victim's privileges
+        (startup entries, shell profiles, SSH <code>authorized_keys</code>). <i>Confidentiality:</i> the directory is
+        world-readable under the default umask, so confidential documents being compared are left readable to other
+        local users while the conversion runs.</dd>
+    <dt>Remediation</dt>
+    <dd>Use an exclusive, randomly named, owner-only directory and stop following links:</dd>
+  </dl>
+<pre><code>let dir = tempfile::Builder::new()
+    .prefix("parallax-convert-")
+    .tempdir()?;                          // mkdtemp semantics, mode 0700
+let input = dir.path().join(format!("input.{ext}"));
+let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&amp;input)?;
+f.write_all(data)?;                       // refuses a pre-planted symlink
+// keep the TempDir guard; it removes the directory on drop</code></pre>
+</div>
+
+<div class="finding high">
+  <h3><span class="badge b-high">High</span> 2 · Relative paths from the webview are not confined to the compared roots</h3>
+  <p class="loc mono">app/src-tauri/src/commands.rs:529, 578, 597, 785, 1431 · crates/parallax-core/src/vfs/local.rs:45–49 · source.rs:102–104</p>
+  <dl>
+    <dt>Attacker controls</dt>
+    <dd>Whatever script runs in the webview. Today that is nothing, because the CSP is strict and there is no HTML
+        sink — but it is also what a future <code>{@html}</code>, a dependency with a DOM sink, a WebKit bug or a
+        developer with DevTools open reduces to. Separately, a bug or injection in the UI itself makes the same
+        primitive reachable.</dd>
+    <dt>Root cause</dt>
+    <dd><code>Source::path()</code> is a plain string join and <code>LocalFs::abs()</code> forwards every component
+        verbatim, so <code>..</code> resolves outside the root. A <code>normalize()</code> helper that rejects
+        <code>..</code> already exists and is applied to archive and Git members and to <code>SourceSpec::child</code>,
+        but never on the operation paths. The Tauri commands are not covered by
+        <code>capabilities/default.json</code>, and <code>delete_entries</code> takes
+        <code>permanent: bool</code> straight from the caller, with the confirmation living only in the UI.</dd>
+    <dt>Impact</dt>
+    <dd><code>delete_entries({ paths: [""], permanent: true })</code> calls <code>remove_dir_all</code> on the
+        comparison root — the whole folder, unrecoverably. <code>paths: ["../../.ssh"]</code> deletes files anywhere
+        the user can. <code>copy_file_as</code> and <code>copy_entries</code> write attacker-chosen content to
+        arbitrary paths; <code>expand</code> and <code>open_file_diff</code> read arbitrary files back out.</dd>
+    <dt>Remediation</dt>
+    <dd>Make confinement a property of the VFS layer rather than of each call site:</dd>
+  </dl>
+<pre><code>// crates/parallax-core/src/vfs/local.rs
+fn abs(&amp;self, path: &amp;str) -&gt; PathBuf {
+    let mut p = self.root.clone();
+    for part in path.split('/').filter(|p| !p.is_empty()) {
+        if part == "." { continue; }
+        // ".." is never a legitimate member: it cannot come from a listing,
+        // a Git tree or an archive index, only from a caller.
+        debug_assert!(part != "..", "unconfined path: {path}");
+        p.push(part);
+    }
+    p
+}</code></pre>
+  <p>
+    Return an error instead of pushing <code>..</code>, and reject <code>""</code> in the mutating commands
+    (<code>delete_entries</code>, <code>copy_entries</code>, <code>copy_file_as</code>) where it means "the root".
+    Then add a regression test in <span class="mono">crates/parallax-core/tests</span> that asserts a traversal
+    attempt fails for every <code>Vfs</code> implementation.
+  </p>
+</div>
+
+<div class="finding med">
+  <h3><span class="badge b-med">Medium</span> 3 · Archive header sizes drive allocations</h3>
+  <p class="loc mono">crates/parallax-core/src/vfs/archive.rs:276 (tar), 330 (7z), 394 (zip) · vfs/archive/write.rs:186</p>
+  <dl>
+    <dt>Attacker controls</dt>
+    <dd>The bytes of any archive the user opens.</dd>
+    <dt>Impact</dt>
+    <dd>A zip central-directory entry that declares 4 GiB uncompressed, or a tar header claiming terabytes, makes
+        <code>Vec::with_capacity(n)</code> request that much up front. Allocation failure in Rust is not a catchable
+        error: it aborts the process. The archive need not contain any data, so a few hundred bytes kill the
+        application instantly, and on a machine without swap the OOM killer may take more than the app. This applies
+        to merely <i>opening</i> a tar/7z (indexing reads the stream) and to clicking a file inside a zip.</dd>
+    <dt>Remediation</dt>
+    <dd>Never trust a claimed size for allocation; clamp and let the reader grow the buffer. Also enforce a global
+        decompression budget (for example 2 GiB per archive or 100× the compressed size) and surface a clear error
+        instead of a crash.</dd>
+  </dl>
+<pre><code>let hint = (file.size() as usize).min(1 &lt;&lt; 20);
+let mut buf = Vec::with_capacity(hint);
+file.read_to_end(&amp;mut buf)?;   // grows as needed, bounded by our budget check</code></pre>
+</div>
+
+<div class="finding med">
+  <h3><span class="badge b-med">Medium</span> 4 · Stack overflow while indexing deep archive paths</h3>
+  <p class="loc mono">crates/parallax-core/src/vfs/archive.rs:72–87</p>
+  <dl>
+    <dt>Root cause</dt>
+    <dd><code>Index::ensure_dir</code> recurses once per parent directory. Archive member names have no length
+        limit worth relying on (tar long-name entries reach megabytes), so a name made of tens of thousands of
+        <code>a/</code> components overflows the worker stack while the archive is indexed — before anything is
+        displayed.</dd>
+    <dt>Impact</dt>
+    <dd>Process abort on opening a crafted archive (Rust's stack-overflow guard aborts, it does not unwind).</dd>
+    <dt>Remediation</dt>
+    <dd>Walk the components iteratively, and cap the nesting depth (a few hundred is generous for real archives);
+        skip deeper entries with a diagnostic.</dd>
+  </dl>
+</div>
+
+<div class="finding med">
+  <h3><span class="badge b-med">Medium</span> 5 · tar streams are decompressed entirely into memory at open</h3>
+  <p class="loc mono">crates/parallax-core/src/vfs/archive.rs:256–291</p>
+  <dl>
+    <dt>Root cause</dt>
+    <dd><code>open_tar</code> drives the decoder to the end of the stream and keeps every regular file's bytes in a
+        <code>HashMap&lt;String, Arc&lt;Vec&lt;u8&gt;&gt;&gt;</code> so that listing never decompresses twice. Decompression
+        ratios of 1000:1 are trivial for gzip, xz and bzip2, and for <code>.tar.gz</code> the ratio is not bounded by
+        anything the app checks.</dd>
+    <dt>Impact</dt>
+    <dd>A 1 MB archive expands to gigabytes of resident memory the moment it is opened — a crash, or a machine-wide
+        memory squeeze. The zip and 7z backends avoid this by decoding lazily; tar is the outlier.</dd>
+    <dt>Remediation</dt>
+    <dd>Index tar entries from the headers only (name, size, mtime, type) and remember the byte range; decompress a
+        member on demand into a seekable cache, as the other backends do. If a full decode stays, cap the total
+        uncompressed size while streaming and abort with a message.</dd>
+  </dl>
+</div>
+
+<div class="finding med">
+  <h3><span class="badge b-med">Medium</span> 6 · LibreOffice parses untrusted legacy documents without a sandbox</h3>
+  <p class="loc mono">crates/parallax-core/src/convert/office.rs:374–443</p>
+  <dl>
+    <dt>Context</dt>
+    <dd>Native readers exist for <code>.doc</code>, <code>.xls</code> and <code>.ppt</code>, but when one fails or
+        the format is <code>.vsd</code>, the bytes are handed to <code>soffice --headless --convert-to</code>. The
+        Rust parsers in this repository are memory-safe by construction; LibreOffice's import filters are C++ and
+        have a long history of memory-corruption bugs reachable from a document alone.</dd>
+    <dt>Impact</dt>
+    <dd>A malicious document opens a native parser with the user's full rights, bypassing the entire "bounds-checked
+        Rust" argument. The 90-second timeout and the private profile limit resources but do not contain code
+        execution.</dd>
+    <dt>Remediation</dt>
+    <dd>Give the converter a small blast radius: run it under <code>bwrap</code>/<code>firejail</code> (or a Windows
+        AppContainer / Job Object) with only the temp directory visible, no network, a read-only home, and a
+        dedicated low-privilege profile. Failing that, make the fallback opt-in and label it in the UI as
+        "external converter".</dd>
+  </dl>
+</div>
+
+<div class="finding med">
+  <h3><span class="badge b-med">Medium</span> 7 · Plaintext and unauthenticated remotes are accepted</h3>
+  <p class="loc mono">crates/parallax-core/src/remote.rs:24–27, 236–262</p>
+  <dl>
+    <dt>Root cause</dt>
+    <dd><code>is_remote()</code> accepts <code>http://</code> and <code>git://</code> in addition to
+        <code>https://</code> and <code>ssh://</code>, and <code>fetch()</code> passes them to
+        <code>git fetch</code>. There is host validation in the pull-request path, but a repository URL typed or
+        pasted by the user gets none of it.</dd>
+    <dt>Impact</dt>
+    <dd>A network attacker (public Wi-Fi, a hostile proxy) can substitute the contents being compared. For a tool
+        whose purpose is to prove that two artifacts are identical, silently comparing attacker-chosen content is a
+        meaningful integrity failure. <code>file://</code> additionally lets a pasted "URL" read local
+        repositories — harmless in itself, but it makes a link's effective scope surprising.</dd>
+    <dt>Remediation</dt>
+    <dd>Accept only <code>https://</code> and <code>ssh://</code> by default; put <code>http://</code>,
+        <code>git://</code> and <code>file://</code> behind an explicit "allow insecure remote" setting and show a
+        warning in the path bar. <code>git</code> can also be told
+        <code>-c protocol.ext.allow=never</code> and <code>GIT_ALLOW_PROTOCOL=https:ssh</code> for defence in
+        depth.</dd>
+  </dl>
+</div>
+
+<div class="finding low">
+  <h3><span class="badge b-low">Low</span> 8 · CSP directives that do not inherit from <code>default-src</code></h3>
+  <p class="loc mono">app/src-tauri/tauri.conf.json:24</p>
+  <dl>
+    <dt>Observation</dt>
+    <dd>The policy is already good — <code>default-src 'self'</code>, no <code>unsafe-inline</code> scripts, no
+        <code>withGlobalTauri</code>, no remote origins. But <code>base-uri</code>, <code>form-action</code>,
+        <code>frame-ancestors</code> and <code>object-src</code> are <i>not</i> covered by <code>default-src</code>,
+        so they fall back to "allow". A <code>&lt;base&gt;</code> injection would redirect module loading; a plugin
+        document could be embedded.</dd>
+    <dt>Remediation</dt>
+    <dd>Extend to:
+      <code>default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;
+      object-src 'none'; base-uri 'self'; form-action 'none'; frame-ancestors 'none';
+      connect-src ipc: http://ipc.localhost</code>.</dd>
+  </dl>
+</div>
+
+<div class="finding low">
+  <h3><span class="badge b-low">Low</span> 9 · Subprocesses resolved through <code>PATH</code></h3>
+  <p class="loc mono">remote.rs:276 · pull_request.rs:120 · convert/office.rs:352–368</p>
+  <dl>
+    <dt>Observation</dt>
+    <dd><code>Command::new("git")</code>, <code>Command::new("gh")</code> and the <code>PATH</code> search for
+        <code>soffice</code> execute whatever the environment points at. Two realistic amplifiers: on Windows the
+        process search order historically includes the working directory, and the app is designed to be launched
+        from a repository (as <code>git difftool</code>) — so a <code>git.exe</code> in that directory is a candidate;
+        and a per-user <code>PATH</code> entry in a writable location is a standard persistence foothold.</dd>
+    <dt>Remediation</dt>
+    <dd>Resolve each tool once at startup to an absolute path, refuse paths inside the compared tree or inside the
+        temp directory, and pass <code>CREATE_NO_WINDOW</code> plus an explicit environment. For <code>soffice</code>,
+        prefer the well-known install locations over <code>PATH</code>.</dd>
+  </dl>
+</div>
+
+<div class="finding low">
+  <h3><span class="badge b-low">Low</span> 10 · Terminal escape injection in the CLI</h3>
+  <p class="loc mono">crates/parallax-cli/src/main.rs (diff rendering and <code>Paint</code>)</p>
+  <dl>
+    <dt>Observation</dt>
+    <dd>Line content is written to stdout unchanged. A compared file containing ANSI/OSC sequences can rewrite the
+        scrollback, hide or forge output, or set the clipboard via OSC 52 on terminals that allow it. This is the
+        usual reason <code>git</code> escapes control characters.</dd>
+    <dt>Remediation</dt>
+    <dd>When stdout is a terminal, render control characters as visible escapes (at least C0 and DEL, plus ESC in
+        file names and diff text); add <code>--color=never</code>-style raw output only on explicit request.</dd>
+  </dl>
+</div>
+
+<div class="finding low">
+  <h3><span class="badge b-low">Low</span> 11 · CI supply chain</h3>
+  <p class="loc mono">.github/workflows/ci.yml · release.yml</p>
+  <dl>
+    <dt>Observation</dt>
+    <dd>Actions are pinned to mutable tags (<code>actions/checkout@v4</code>, <code>Swatinem/rust-cache@v2</code>,
+        <code>dtolnay/rust-toolchain@stable</code>). A compromised or retagged action runs with the workflow token.
+        <code>ci.yml</code> sets no explicit <code>permissions:</code>, so it inherits the repository default rather
+        than least privilege. In <code>release.yml</code> the <code>workflow_dispatch</code> input is interpolated
+        directly into bash (<code>"dist/ParallaxCompare-${TAG}-linux-x86_64.AppImage"</code>) — only reachable by
+        people with write access, but it is still shell injection (CWE-78) and should not depend on that.
+        The release job does pin the downloaded <code>linuxdeploy</code> AppImage by SHA-256, which is good practice
+        and shows the pattern is understood.</dd>
+    <dt>Remediation</dt>
+    <dd>Pin every action to a full commit SHA (Dependabot can maintain them), add
+        <code>permissions: contents: read</code> to the CI workflow, pass workflow inputs through <code>env:</code>
+        and quote <code>"$TAG"</code>, and add <code>cargo audit</code> plus <code>npm audit --omit=dev</code> as a
+        non-blocking job.</dd>
+  </dl>
+</div>
+
+<div class="finding low">
+  <h3><span class="badge b-low">Low</span> 12 · Image decoding without explicit limits</h3>
+  <p class="loc mono">crates/parallax-core/src/convert/image_diff.rs:135, 227; image_meta/mod.rs:86</p>
+  <dl>
+    <dt>Observation</dt>
+    <dd><code>image::load_from_memory_with_format</code> uses the crate defaults: no width/height cap and a 512 MiB
+        allocation ceiling. A few-kilobyte PNG that decodes to a huge canvas therefore still costs hundreds of
+        megabytes before the 120 M-pixel mask check applies, and <code>to_rgba8()</code> multiplies it by four.</dd>
+    <dt>Remediation</dt>
+    <dd>Set an explicit <code>image::Limits</code> (for example 20 000 × 20 000 and 256 MiB) on an
+        <code>ImageReader</code> before decoding, and reject larger images with a message that points at the hex
+        view.</dd>
+  </dl>
+</div>
+
+<div class="finding low">
+  <h3><span class="badge b-low">Low</span> 13 · Symlinks recreated from archive content</h3>
+  <p class="loc mono">crates/parallax-core/src/ops.rs:167–175 · vfs/local.rs:257–262</p>
+  <dl>
+    <dt>Observation</dt>
+    <dd>Copying a symlink out of an archive creates it with the target stored in the archive, which may be
+        <code>/etc/passwd</code> or <code>../../.ssh/authorized_keys</code>. The subsequent write path is already
+        careful — <code>replace_file</code> writes to a temporary name and renames over the link, so a link cannot be
+        used to write through it — and <code>list</code>/<code>stat</code> never follow links. The residual risk is a
+        link placed by the tool that a <i>different</i> program later follows.</dd>
+    <dt>Remediation</dt>
+    <dd>Warn before creating links with absolute or escaping targets, or store them as link entries that are only
+        materialised on explicit extract.</dd>
+  </dl>
+</div>
+
+<h2>5. How this application could be attacked</h2>
+
+<h3>Scenario A — "Please compare these two builds for me"</h3>
+<p>
+  The most realistic attack needs no local account and no network position, only that the victim opens files the
+  attacker supplied — exactly what a diff tool is for.
+</p>
+<ol class="steps">
+  <li>The attacker sends two archives. One contains an entry whose header declares a multi-gigabyte size
+      (finding 3) or a tar stream that expands without bound (finding 5).</li>
+  <li>The victim drops them into the app. Indexing or the first click on a member aborts the process or exhausts
+      memory. Repeated indefinitely, it is a reliable crash of the tool the team relies on for release
+      verification.</li>
+  <li>Alternatively the archive carries a <code>.doc</code> and the victim opens the document view, handing
+      the file to LibreOffice (finding 6). Any bug in the importer runs as the victim.</li>
+</ol>
+
+<h3>Scenario B — a link is pasted</h3>
+<p>
+  The path bar accepts <code>https://github.com/owner/repo/blob/main/x</code> and pull-request URLs, then runs
+  <code>git ls-remote</code>, <code>git fetch</code> and <code>gh api</code> against them. Validation here is
+  genuinely careful (host pinning for PRs, 40-hex commit checks, <code>--end-of-options</code> on every Git
+  argument), so the interesting paths are: a plain <code>http://</code> or <code>git://</code> URL, where the
+  fetched content can be swapped in transit (finding 7); and a URL for an arbitrary host, which makes the
+  victim's machine issue requests to it and reflects the error text back into the UI.
+</p>
+
+<h3>Scenario C — a local attacker on a shared machine</h3>
+<p>
+  Wait for the victim to convert a legacy document, then win the race on
+  <code>/tmp/parallax-convert-&lt;pid&gt;-&lt;n&gt;</code> (finding 1). The name is predictable, so the symlink can
+  be planted before the conversion starts; no race is even required. What follows is an arbitrary write with the
+  victim's rights, or a read of the document being compared.
+</p>
+
+<h3>Scenario D — anything executes in the renderer</h3>
+<p>
+  Today nothing does: there is no <code>innerHTML</code>, no <code>{@html}</code>, no <code>eval</code>, SVG is
+  only ever loaded inside <code>&lt;img&gt;</code> where scripting is disabled, and the CSP blocks inline script
+  and remote origins. That is a strong position — but it is a <i>single</i> control. If a future feature renders
+  Markdown, an inline SVG, or a template from a dependency, the injected script inherits the whole IPC surface:
+  <code>delete_entries</code> with <code>permanent: true</code>, <code>copy_file_as</code>, <code>open_source</code>
+  and friends, none of which checks that the path it is given lies inside the folder the user opened
+  (finding 2). Closing finding 2 converts "one XSS is game over" into "one XSS is annoying".
+</p>
+
+<h3>Scenario E — supply chain</h3>
+<p>
+  ~40 third-party crates parse attacker-controlled data (<code>pdf-extract</code>, <code>mail-parser</code>,
+  <code>calamine</code>, <code>cfb</code>, <code>syntect</code>/oniguruma, <code>image</code>,
+  <code>sevenz-rust2</code>, <code>zip</code>). None of them is audited by this review, and CI runs neither
+  <code>cargo audit</code> nor a fuzzer over the view layer, although
+  <span class="mono">tests/fuzz_views.rs</span> shows the shape such a harness would take.
+</p>
+
+<h2>6. What is already solid</h2>
+<ul>
+  <li><b>Parser hygiene.</b> Lengths, offsets and counts are checked with <code>.get()</code>, <code>checked_add</code>
+      and explicit bounds before use — for example <span class="mono">sqlite.rs:158</span> refuses a payload larger
+      than the file, <span class="mono">parquet.rs:169</span> caps a length at the remaining input and
+      <span class="mono">parquet.rs:174</span> caps recursion at 32, <span class="mono">dotnet.rs:378</span>
+      verifies that the decoded tables fit the metadata stream. This is not accidental; it is a consistent style.</li>
+  <li><b>Panic containment.</b> The converters that wrap C-style or panic-prone dependencies (<code>pdf-extract</code>,
+      <code>mail-parser</code>, <code>calamine</code>, the native <code>.doc</code> reader) are wrapped in
+      <code>catch_unwind</code> and degrade to the hex/text view.</li>
+  <li><b>Template execution is bounded.</b> Jinja chat templates taken from model files run with
+      <code>set_fuel</code> and no filesystem or network access.</li>
+  <li><b>Archive and Git member names are normalised.</b> <code>normalize()</code> rejects <code>..</code> outright
+      and there is a regression test for it; tar hard links without a target are represented as links rather than
+      dereferenced.</li>
+  <li><b>Writes are atomic and symlink-safe.</b> <code>replace_file</code> writes to an exclusively created
+      temporary name and renames over the target, so a symlink at the destination is replaced rather than followed.
+      Deleting defaults to the trash.</li>
+  <li><b>Subprocess handling is careful.</b> No shell is used, arguments are validated, <code>--end-of-options</code>
+      separates them from revisions, stdin is closed, terminal prompts are disabled, and every call has a deadline
+      and non-interactive output.</li>
+  <li><b>The pull-request resolver validates server answers</b>: HTTPS only, no credentials in URLs, owner/repo
+      restricted to a safe alphabet, commit IDs required to be 40 hex characters, and the returned clone URL pinned
+      to the requested host.</li>
+  <li><b>No secrets, no evaluated config, no unsafe code in the parsers.</b> The only <code>unsafe</code> in the
+      engine is the read-only mmap in <span class="mono">vfs/local.rs:236</span>.</li>
+</ul>
+
+<h2>7. Prioritised roadmap</h2>
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Priority</th><th>Action</th><th>Findings</th><th>Effort</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><span class="badge b-high">P0</span></td>
+      <td>Replace the hand-rolled conversion temp directory with an exclusive random one and stop following links.</td>
+      <td>1</td><td>~1 h</td>
+    </tr>
+    <tr>
+      <td><span class="badge b-high">P0</span></td>
+      <td>Reject <code>..</code> and the empty path at the <code>Vfs</code> boundary; add traversal tests for local,
+          archive and Git backends.</td>
+      <td>2</td><td>~half a day</td>
+    </tr>
+    <tr>
+      <td><span class="badge b-med">P1</span></td>
+      <td>Clamp archive allocation hints and enforce a per-archive decompression budget; make tar indexing lazy;
+          make <code>ensure_dir</code> iterative with a depth cap.</td>
+      <td>3, 4, 5</td><td>~1–2 days</td>
+    </tr>
+    <tr>
+      <td><span class="badge b-med">P1</span></td>
+      <td>Sandbox the LibreOffice fallback and resolve <code>git</code>/<code>gh</code>/<code>soffice</code> to
+          absolute paths at startup.</td>
+      <td>6, 9</td><td>~1 day</td>
+    </tr>
+    <tr>
+      <td><span class="badge b-med">P1</span></td>
+      <td>Restrict remote protocols to <code>https</code>/<code>ssh</code> by default and warn on insecure ones.</td>
+      <td>7</td><td>~2 h</td>
+    </tr>
+    <tr>
+      <td><span class="badge b-low">P2</span></td>
+      <td>Tighten the CSP, escape control characters in CLI output, set explicit image limits.</td>
+      <td>8, 10, 12</td><td>~2 h</td>
+    </tr>
+    <tr>
+      <td><span class="badge b-low">P2</span></td>
+      <td>Pin Actions by SHA, least-privilege CI permissions, quote workflow inputs, add
+          <code>cargo audit</code>/<code>npm audit</code>, extend the existing fuzz harness over the view layer.</td>
+      <td>11, plus parser coverage</td><td>~half a day</td>
+    </tr>
+    <tr>
+      <td><span class="badge b-low">P2</span></td>
+      <td>Warn on escaping/absolute symlink targets when copying out of archives.</td>
+      <td>13</td><td>~2 h</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<div class="callout warn">
+  <p><b>The one structural change worth more than all the individual fixes:</b> put the containment check inside
+  <code>Vfs</code>, so that no command, present or future, can name a path outside its root. Every other fix here
+  protects one call path; that one protects the boundary itself.</p>
+</div>
+
+<h2>8. Method and limitations</h2>
+<p>
+  This was a manual, whole-codebase review of revision <code>9f7d5cd</code>: the Tauri configuration, capabilities
+  and all 37 IPC commands; the VFS layer (local, archive, Git, mount); the comparison and file-operation engines;
+  the process-execution helpers; the network paths (<code>remote.rs</code>, <code>pull_request.rs</code>); the
+  front end's rendering and IPC usage; and the CI workflows. Where a parser was checked, it was checked
+  representatively — the allocation, bounds-checking, recursion and decompression patterns that recur across
+  the ~60 converters — rather than line by line in every one of the ~25 000 lines.
+</p>
+<p>
+  <b>Not covered:</b> dynamic testing, fuzzing or exploitation. No proof-of-concept archives were built; the
+  severity of findings 3–5 rests on reading the allocation and recursion sites, which is reliable for
+  <code>Vec::with_capacity</code> and recursion depth but says nothing about how the <code>zip</code>,
+  <code>tar</code>, <code>sevenz-rust2</code> or <code>image</code> crates themselves behave on malformed input.
+  Third-party crates were not audited, no <code>cargo audit</code> or <code>npm audit</code> was run, and no
+  binary-level or WebKit-level analysis was performed. Findings 13 and the Git-tree case in finding 2's
+  neighbourhood are reported as hardening gaps, not confirmed exploits.
+</p>
+
+<footer>
+  Static security review of ParallaxCompare v0.0.9 (9f7d5cd) · no files were modified by the review ·
+  13 findings, none critical.
+</footer>
+
+</div>
+</body>
+</html>

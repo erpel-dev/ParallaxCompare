@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Code review — ParallaxCompare, last 24 h (2026-10-19 → 2026-10-20)</title>
+<style>
+  :root {
+    --bg: #10141a; --panel: #171d26; --panel2: #1d2430; --line: #2a3342;
+    --fg: #d7dee8; --dim: #8b98a9; --accent: #6cb2ff;
+    --ok: #5dd48a; --warn: #e8b45a; --err: #ef7d7d; --info: #7aa2d4;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 15px/1.6 "Segoe UI", system-ui, sans-serif; }
+  main { max-width: 1000px; margin: 0 auto; padding: 32px 24px 80px; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  h2 { font-size: 19px; margin: 40px 0 12px; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+  h3 { font-size: 15px; margin: 22px 0 6px; }
+  p.sub { color: var(--dim); margin: 0 0 24px; }
+  code, .mono { font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace; font-size: 13px;
+                background: var(--panel2); padding: 1px 5px; border-radius: 4px; }
+  a { color: var(--accent); text-decoration: none; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 20px; margin: 14px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 14px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--dim); font-weight: 600; font-size: 12.5px; text-transform: uppercase; letter-spacing: .04em; }
+  .badge { display: inline-block; padding: 1px 9px; border-radius: 99px; font-size: 12px; font-weight: 600; }
+  .b-ok   { background: #173524; color: var(--ok); }
+  .b-med  { background: #3a2c14; color: var(--warn); }
+  .b-low  { background: #1c2a3a; color: var(--info); }
+  .finding { border-left: 4px solid var(--line); margin: 18px 0; padding: 10px 16px; background: var(--panel); border-radius: 0 8px 8px 0; }
+  .finding.med { border-left-color: var(--warn); }
+  .finding.low { border-left-color: var(--info); }
+  .finding.good { border-left-color: var(--ok); }
+  .finding h3 { margin: 2px 0 6px; }
+  .loc { color: var(--dim); font-size: 12.5px; }
+  ul { padding-left: 22px; } li { margin: 4px 0; }
+  .verdict { font-size: 16px; padding: 18px 22px; border-radius: 10px; background: #12271c; border: 1px solid #1f4d31; }
+  .stats { display: flex; gap: 14px; flex-wrap: wrap; margin: 18px 0; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 18px; min-width: 140px; }
+  .stat .n { font-size: 22px; font-weight: 700; color: var(--accent); }
+  .stat .l { color: var(--dim); font-size: 12.5px; }
+  pre { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; overflow-x: auto; font-size: 12.5px; }
+  pre code { background: none; padding: 0; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>Code review — ParallaxCompare</h1>
+<p class="sub">Changes from the last 24 hours · reviewed 2026-10-20 · <span class="mono">fd29975</span> “Add DCM, ODX/PDX and read-only GitHub PR comparisons” + <span class="mono">9f7d5cd</span> “Release 0.0.9”</p>
+
+<div class="verdict">
+  <strong>Verdict: ship it.</strong> Two commits, ~2 570 added lines. The work is unusually thorough — defensive parsers with resource limits, an SSRF-aware PR resolver with a security-focused test suite, and dense test coverage (17 new unit tests verified passing, TypeScript check clean). No blocking defects found; three medium items worth follow-up (two since fixed), several low. Follow-up on 2026-10-20 re-verified every finding against the code: <strong>M1 was misdiagnosed</strong> (the unbounded join is on the success path, not the kill path) and <strong>M3 was broader than stated</strong>; both are fixed, and the corrections are noted below.
+</div>
+
+<div class="stats">
+  <div class="stat"><div class="n">+2 569</div><div class="l">lines added / −99 removed</div></div>
+  <div class="stat"><div class="n">39</div><div class="l">files changed</div></div>
+  <div class="stat"><div class="n">17 / 17</div><div class="l">new unit tests pass</div></div>
+  <div class="stat"><div class="n">0</div><div class="l">tsc --noEmit errors</div></div>
+  <div class="stat"><div class="n">3 + 5</div><div class="l">medium / low findings</div></div>
+  <div class="stat"><div class="n">2</div><div class="l">medium findings fixed (M1, M3)</div></div>
+</div>
+
+<h2>1 · What changed</h2>
+<div class="panel">
+  <table>
+    <tr><th>Area</th><th>Files</th><th>Summary</th></tr>
+    <tr>
+      <td><strong>DCM view</strong></td>
+      <td class="mono">convert/dcm.rs</td>
+      <td>New ASAM DCM 2.x calibration parser/renderer (FESTWERT, KENNLINIE, KENNFELD, axes…). Exact decimal normalization (no f64), sorted objects, unknown vendor statements disable the ≈ similar rule, 64 MiB / 2 M value limits.</td>
+    </tr>
+    <tr>
+      <td><strong>ODX/PDX view</strong></td>
+      <td class="mono">convert/odx.rs<br>vfs/archive.rs</td>
+      <td>New ODX diagnostic XML view: definition sets sorted by ID/SHORT-NAME, wire order preserved, <span class="mono">xml:space</span> honoured, DOCTYPE rejected, 64 MiB / 250 k nodes / depth 128 limits. <span class="mono">.pdx</span> registered as a zip container.</td>
+    </tr>
+    <tr>
+      <td><strong>GitHub PR source</strong></td>
+      <td class="mono">pull_request.rs<br>remote.rs</td>
+      <td>Paste a PR URL → resolves merge-base ↔ head through the <span class="mono">gh</span> CLI, fetches into the existing bare cache and pins snapshots with <span class="mono">refs/parallax/commits/&lt;sha&gt;</span>. Read-only, no checkout.</td>
+    </tr>
+    <tr>
+      <td><strong>Process runner</strong></td>
+      <td class="mono">process.rs</td>
+      <td>Shared bounded, non-interactive subprocess helper extracted from <span class="mono">remote::git</span> (drained pipes, kill-on-timeout, install-PATH error, Windows no-console flag).</td>
+    </tr>
+    <tr>
+      <td><strong>Wiring</strong></td>
+      <td class="mono">convert/mod.rs<br>commands.rs, main.rs</td>
+      <td>New <span class="mono">View::Diagnostics</span> / DCM under <span class="mono">View::Calibration</span>, content (≈) rules for both, <span class="mono">resolve_pull_request</span> Tauri command, ODX-FD highlight alias.</td>
+    </tr>
+    <tr>
+      <td><strong>Frontend</strong></td>
+      <td class="mono">App.svelte, NewCompare.svelte,<br>PathBar.svelte, api.ts…</td>
+      <td>PR URL detection in both pickers and path bar, “Opening…” busy state, PR tab title <span class="mono">PR #n: title</span>, recents store PR info, swap / side-edit correctly drop the PR linkage.</td>
+    </tr>
+    <tr>
+      <td><strong>Tests & fixtures</strong></td>
+      <td class="mono">tests/automotive/*, fuzz_views.rs,<br>sources.rs, cli.rs, regenerate.py</td>
+      <td>Three fixture families (dcm / odx-d / pdx) with v1, reformatted and v2 variants + regeneration script; fuzz suite extended; folder-compare and CLI exit-code tests.</td>
+    </tr>
+  </table>
+</div>
+
+<h2>2 · Verification performed</h2>
+<ul>
+  <li><span class="badge b-ok">PASS</span> <span class="mono">cargo test -p parallax-core --lib -- convert::dcm convert::odx pull_request:: process::</span> → 17 passed, 0 failed.</li>
+  <li><span class="badge b-ok">PASS</span> <span class="mono">npx tsc --noEmit</span> in <span class="mono">app/</span> → clean.</li>
+  <li><span class="badge b-ok">PASS</span> (follow-up) <span class="mono">cargo test -p parallax-core --lib -- process::</span> → 5 passed, including the two new grandchild cases for M1.</li>
+  <li><span class="badge b-ok">PASS</span> (follow-up) predicate cross-check: <span class="mono">isPullRequestUrl</span> judged the same URLs as <span class="mono">PullRequestUrl::parse</span> over the backend's accept/reject corpus (17 accept, 17 reject), <span class="mono">tsc</span> and <span class="mono">svelte-check</span> clean.</li>
+  <li>Full diff of both commits read line-by-line; surrounding invariants (<span class="mono">content_equal</span> kind guard, view dispatch, archive detection) checked in context.</li>
+</ul>
+
+<h2>3 · What the change does well</h2>
+
+<div class="finding good">
+  <h3>Security posture of the PR resolver</h3>
+  <p class="loc">crates/parallax-core/src/pull_request.rs</p>
+  <ul>
+    <li>URL parsing rejects credentials-in-URL, non-HTTPS, path tricks (<span class="mono">%2F</span>, <span class="mono">.</span>/<span class="mono">..</span>), bogus numbers, and unknown sub-paths — each case has a test.</li>
+    <li>Server-returned data is treated as hostile: clone URL must stay on the requested host (SSRF), commit IDs must be 40 hex chars (an <span class="mono">--upload-pack=bad</span> payload is explicitly tested), SSH URLs validated and checked for control characters.</li>
+    <li><span class="mono">GH_PROMPT_DISABLED=1</span> + shared runner with <span class="mono">stdin(null)</span> prevents credential prompts from hanging the app.</li>
+    <li>TOCTOU handling: if the head moves while opening, the fetched SHA mismatch is detected and the user is asked to re-paste — tested both ways.</li>
+  </ul>
+</div>
+
+<div class="finding good">
+  <h3>≈-similar rules fail closed</h3>
+  <p class="loc">convert/dcm.rs, convert/odx.rs, convert/mod.rs</p>
+  <p>Unknown DCM statements, malformed files, or non-round-trip encodings return <span class="mono">None</span>/<span class="mono">false</span> — a parse failure can never become proof of equivalence. The explicit <span class="mono">l.encode() != left</span> round-trip check in <span class="mono">content_equal</span> is a nice touch: lossy UTF‑16 decoding cannot fake equality through replacement characters.</p>
+</div>
+
+<div class="finding good">
+  <h3>Correct-by-construction numerics and XML handling</h3>
+  <ul>
+    <li>DCM <span class="mono">number()</span> normalizes decimals exactly (<span class="mono">9007199254740993</span> survives; <span class="mono">NaN</span>/<span class="mono">inf</span>/exponent overflow rejected) — right call for calibration data.</li>
+    <li>ODX rejects DOCTYPE (XXE), bounds node count/depth, keeps processing instructions and vendor namespaces visible, and only sorts keyed definition sets — wire-order data (PARAMS, COMPU-SCALES) is untouched.</li>
+    <li>Resource limits are consistent with the codebase's existing 64 MiB view budget.</li>
+  </ul>
+</div>
+
+<div class="finding good">
+  <h3>Extraction of process::run</h3>
+  <p>Removing the ~40 duplicated subprocess lines from <span class="mono">remote::git</span> and sharing them with <span class="mono">gh</span> is the right refactor, with tests for missing-binary, failing-command, and stall-timeout behaviour. Behavioural parity with the old git runner is preserved (GIT_TERMINAL_PROMPT, Windows creation flags, 20 ms poll loop).</p>
+</div>
+
+<h2>4 · Findings</h2>
+
+<div class="finding good">
+  <h3>M1 · <span class="badge b-ok">FIXED</span> Drain-thread joins can outlive the deadline</h3>
+  <p class="loc">crates/parallax-core/src/process.rs · run()</p>
+  <p><strong>Correction (2026-10-20, measured):</strong> the original text put this after the kill path, but the timeout path returns <em>before</em> joining — a stalled command with a grandchild holding the pipes returned in 301 ms with a 300 ms limit. The real unbounded wait was on the <em>success</em> path: <span class="mono">sh -c 'sleep 3 &amp; exit 0'</span> with a 200 ms limit returned after <strong>3.00 s</strong>, because the child exits while the grandchild keeps the pipes open, and <span class="mono">stdout.join()</span> waits for EOF. The timeout path instead leaked both drain threads.</p>
+  <p><strong>Fixed:</strong> each pipe is now drained into an <span class="mono">Arc&lt;Mutex&lt;Vec&lt;u8&gt;&gt;&gt;</span> and signalled over a channel, and <span class="mono">Drain::until(deadline)</span> waits with <span class="mono">recv_timeout</span> until the deadline before returning whatever arrived. Both pipes share one absolute deadline, so a lingering helper can delay a call by at most <span class="mono">DRAIN_GRACE</span> (1 s) after the command exits; the timeout path still answers immediately. The grace deliberately applies even when the command ends at its limit, since truncating a successful result’s tail would be worse than returning 1 s later. Regression tests cover a grandchild on the success path and on the timeout path; the earlier 3 s hang is now bounded by the grace.</p>
+  <p><strong>Still open:</strong> <span class="mono">child.kill()</span> only reaps the direct child, so a helper that never exits keeps its drain thread alive (idle, bounded buffer). A process-group kill (<span class="mono">process_group(0)</span> + <span class="mono">libc::kill(-pid)</span>) would close that too, at the cost of a platform-specific dependency.</p>
+</div>
+
+<div class="finding med">
+  <h3>M2 · <span class="badge b-med">MEDIUM</span> DCM rejects valid files where <span class="mono">WERT</span> precedes <span class="mono">ST/Y</span></h3>
+  <p class="loc">crates/parallax-core/src/convert/dcm.rs · Object::validate / ST/Y handling</p>
+  <p><span class="mono">rows.push(obj.values.len())</span> records the offset <em>when ST/Y is seen</em>, and <span class="mono">rows[0] != 0</span> then forces every map to declare <span class="mono">ST/Y</span> <em>before</em> its first <span class="mono">WERT</span> row. Several vendor tools (and DCM 3.0-style exports — note the header version is accepted at any value) interleave or emit values first. Such files currently error, which is correct behaviour (no false ≈) but makes them unopenable in the Calibration view.</p>
+  <p><strong>Correction (2026-10-20):</strong> the earlier claim that “a test even asserts the reverse order fails” does not hold up — the <span class="mono">tall</span> test that swaps <span class="mono">ST/Y 9999\nWERT 9999</span> fails because it also drops the row count to 9 999 against <span class="mono">y.len() == 10 000</span>, not because of the ordering rule. No test pins the ordering decision either way.</p>
+  <p><strong>Suggestion:</strong> confirm against ASAM MCD-3-3 and real exports; if both orders occur, record row starts as “offset known” vs “position implied” instead of requiring 0. A fixture with the values-first order would pin the decision either way.</p>
+</div>
+
+<div class="finding good">
+  <h3>M3 · <span class="badge b-ok">FIXED</span> Frontend PR predicate differs from the backend</h3>
+  <p class="loc">app/src/lib/api.ts · isPullRequestUrl vs pull_request.rs</p>
+  <p>The original finding was the <span class="mono">http:</span> mismatch: <span class="mono">isPullRequestUrl</span> accepted it, so a pasted <span class="mono">http://ghe.internal/o/r/pull/1</span> routed to <span class="mono">openPullRequest</span>, which always failed, and <span class="mono">SidePicker</span> skipped ref completion for it. Re-checking showed the drift was wider: the regex also accepted <span class="mono">/pull/0</span>, <span class="mono">/pull/42abc</span>, <span class="mono">/pull/+42</span>, percent-encoded owner/repo segments and credentials-in-URL, all of which <span class="mono">PullRequestUrl::parse</span> rejects.</p>
+  <p><strong>Fixed:</strong> the predicate now mirrors the parser — <span class="mono">https:</span> only, no username/password, owner and repo limited to <span class="mono">[A-Za-z0-9._-]</span> (and not <span class="mono">.</span>/<span class="mono">..</span>), a positive u64 pull number, and <span class="mono">/files|commits|checks|changes|overview</span> as the only extra segment. An <span class="mono">http://</span> PR link now goes down the ordinary source path, where the error explains the problem instead of a dead-end PR open.</p>
+</div>
+
+<div class="finding low">
+  <h3>L1 · <span class="badge b-low">LOW</span> Pinned PR refs are never pruned from the shared cache</h3>
+  <p class="loc">crates/parallax-core/src/remote.rs · pin_commit</p>
+  <p>Every opened PR adds <span class="mono">refs/parallax/commits/&lt;sha&gt;</span>, which permanently protects those objects from <span class="mono">gc</span>. Repeated use on large repos grows the cache without a bound. Consider a prune step (e.g. drop pin refs older than N days before fetch) or document the trade-off in the cache directory's README comment.</p>
+</div>
+
+<div class="finding low">
+  <h3>L2 · <span class="badge b-low">LOW</span> <span class="mono">.pdx</span> claimed by extension alone</h3>
+  <p class="loc">crates/parallax-core/src/vfs/archive.rs</p>
+  <p>Consistent with how <span class="mono">.jar</span> etc. are handled, but <span class="mono">.pdx</span> is also used by unrelated formats (Epi Info, some PLC data). Since mis-detection only costs a view, not correctness (content compare falls back), this is acceptable — a magic-bytes check on first open would settle it.</p>
+</div>
+
+<div class="finding low">
+  <h3>L3 · <span class="badge b-low">LOW</span> DCM lexer treats backslash as an escape</h3>
+  <p class="loc">convert/dcm.rs · tokenize</p>
+  <p>DCM strings quote with doubled <span class="mono">""</span>, so a strict reader gives a backslash no special meaning. This lexer does: <span class="mono">\\</span> → <span class="mono">\</span> and <span class="mono">\"</span> → <span class="mono">"</span>.</p>
+  <p><strong>Correction (2026-10-20, measured):</strong> this is not the harmless “permissive superset” the first pass described. <span class="mono">TEXT "C:\\cal"</span> renders as <span class="mono">C:\cal</span> (lossy), and a string that legitimately ends in a backslash — <span class="mono">TEXT "C:\dir\"</span> — fails with <span class="mono">unterminated string</span>, making an otherwise valid file unopenable. Rare, and equality is unaffected because both sides parse the same way, but it should be either documented as deliberate or narrowed to the backslash-free reading the format implies.</p>
+</div>
+
+<div class="finding low">
+  <h3>L4 · <span class="badge b-low">LOW</span> PR tab mutates the session spec for display</h3>
+  <p class="loc">app/src/App.svelte · sessionTab</p>
+  <p><span class="mono">session.left.rev = "Merge base"</span> overwrites the 40-hex rev the backend reports with a display label inside the session model. It works (the real spec lives in <span class="mono">request</span>), but any future code that reads <span class="mono">session.*.rev</span> for identity — not display — will get a lie. A display-only field would be safer.</p>
+</div>
+
+<div class="finding low">
+  <h3>L5 · <span class="badge b-low">LOW</span> 20 ms poll adds latency to every git/gh call</h3>
+  <p class="loc">crates/parallax-core/src/process.rs</p>
+  <p>Inherited from the old git runner, fine in practice; noted since the helper is now shared with the interactive PR path where a few extra ms are user-visible. A blocking <span class="mono">wait</span> on a watcher thread would remove it.</p>
+</div>
+
+<h2>5 · Test-coverage observations</h2>
+<ul>
+  <li>Strong: mutation-style assertions (change one field → no ≈), order-swap non-equivalence (catches over-eager sorting), deletion-fork PR fallback, error-message content assertions, fuzz of damaged/truncated exports, CLI exit-code matrix, UTF‑16 round-trip through <span class="mono">content_equal</span>.</li>
+  <li>Suggested additions: a DCM fixture with values-before-axes order (M2); a test that the PR pin ref actually survives <span class="mono">git gc</span> (L1); a DCM string ending in a backslash (L3). Added for M1: <span class="mono">pipes_held_by_a_grandchild_do_not_outlive_the_deadline</span> and <span class="mono">stalled_commands_report_without_waiting_for_grandchildren</span>.</li>
+</ul>
+
+<h2>6 · Release commit (<span class="mono">9f7d5cd</span>)</h2>
+<p>Version bumps consistent across <span class="mono">Cargo.toml</span>, <span class="mono">package.json</span>, <span class="mono">tauri.conf.json</span>; release notes added. One cosmetic note: the commit also trimmed a stray trailing blank line in <span class="mono">engine-v1-reformatted.dcm</span> — harmless (parser trims, tests pass) but fixtures are usually frozen once committed; regeneration via <span class="mono">regenerate.py</span> keeps this clean.</p>
+
+<p class="sub" style="margin-top:48px">Reviewed automatically on 2026-10-20 against <span class="mono">main</span> = <span class="mono">9f7d5cd</span> (tag <span class="mono">v0.0.9</span>). Follow-up verification and the M1/M3 fixes were made on 2026-10-20; M1’s mechanism, M2’s test claim and L3’s impact were corrected against the code.</p>
+
+</main>
+</body>
+</html>

@@ -34,6 +34,7 @@ impl ArchiveMount {
     /// Maps a mount path to the provider that owns it and the path inside it.
     /// Returns `depth == 0` when no archive was entered.
     fn resolve(&self, path: &str) -> Result<(Arc<dyn Vfs>, String, usize)> {
+        crate::vfs::check_rel(path)?;
         let mut vfs = self.base.clone();
         let mut inner = String::new();
         let mut outer = String::new();

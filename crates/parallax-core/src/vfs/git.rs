@@ -218,6 +218,7 @@ impl GitTreeFs {
     }
 
     fn tree_at<'r>(&self, repo: &'r gix::Repository, dir: &str) -> Result<gix::Tree<'r>> {
+        crate::vfs::check_rel(dir)?;
         let root = repo.find_tree(self.tree).map_err(Error::git)?;
         if dir.is_empty() {
             return Ok(root);
@@ -255,6 +256,11 @@ impl Vfs for GitTreeFs {
             for entry in tree.iter() {
                 let entry = entry.map_err(Error::git)?;
                 let name = entry.filename().to_str_lossy().into_owned();
+                // A hand-crafted tree can name an entry `..` or `a/b`; Git itself
+                // refuses to check those out, and they must not become path parts here.
+                if crate::vfs::check_rel(&name).is_err() || name.contains(['/', '\\']) {
+                    continue;
+                }
                 out.push(to_entry(repo, name, entry.mode().kind(), entry.object_id())?);
             }
             Ok(out)
@@ -262,6 +268,7 @@ impl Vfs for GitTreeFs {
     }
 
     fn stat(&self, path: &str) -> Result<Entry> {
+        crate::vfs::check_rel(path)?;
         if path.is_empty() {
             let mut root = root_entry();
             root.quick_id = Some(QuickId::GitOid(self.tree));
@@ -279,6 +286,7 @@ impl Vfs for GitTreeFs {
     }
 
     fn read(&self, path: &str) -> Result<Data> {
+        crate::vfs::check_rel(path)?;
         self.repo.with(|repo| {
             let root = repo.find_tree(self.tree).map_err(Error::git)?;
             let entry = root

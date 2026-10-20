@@ -501,11 +501,9 @@ pub fn views_for(name: &str, data: &[u8]) -> Vec<View> {
     let longest_line = || data.split(|&b| b == b'\n').map(<[u8]>::len).max().unwrap_or(0);
     let mut views = match kind_of(name, data) {
         Kind::Pdf | Kind::Ooxml | Kind::Odf => vec![View::Document],
-        Kind::LegacyOffice if office::has_native_reader(&extension(name)) || office::soffice().is_some() => {
-            vec![View::Document]
-        }
+        Kind::LegacyOffice if office::has_native_reader(&extension(name)) => vec![View::Document],
         Kind::Visio => vec![View::Diagram, View::Document],
-        // Visio 2000 to 2010 are read natively; Visio 5 needs LibreOffice.
+        // Visio 2000 to 2010 are read; older files have no view.
         Kind::LegacyVisio => vec![View::Diagram, View::Document],
         Kind::LegacyOffice | Kind::Binary => vec![],
         Kind::Executable if dwarf::has_debug_info(data) => vec![View::Executable, View::DebugSymbols],
@@ -607,12 +605,12 @@ pub fn render(view: View, name: &str, data: &[u8]) -> Result<String> {
             Kind::Odf => office::odf_text(data),
             Kind::LegacyOffice => office::legacy_text(&extension(name), data),
             Kind::Visio => visio::diagram_text(data),
-            Kind::LegacyVisio => visio::legacy_text(&extension(name), data),
+            Kind::LegacyVisio => visio::legacy_text(data),
             _ => Err(Error::Unsupported(format!("{name} is not a document"))),
         },
         View::Diagram => match kind_of(name, data) {
             Kind::Visio => visio::diagram(data),
-            Kind::LegacyVisio => visio::legacy_diagram(&extension(name), data),
+            Kind::LegacyVisio => visio::legacy_diagram(data),
             _ => Err(Error::Unsupported(format!("{name} is not a Visio drawing"))),
         },
         View::Executable => binary::executable_summary(data),
@@ -858,7 +856,7 @@ pub fn content_equal(name: &str, left: &[u8], right: &[u8]) -> Option<&'static s
         Kind::Pdf | Kind::Ooxml | Kind::Odf => {
             render(View::Document, name, left).ok()? == render(View::Document, name, right).ok()?
         }
-        // Without a native reader each side would take LibreOffice seconds.
+        // Only formats with a native reader have a text notion.
         Kind::LegacyOffice if office::has_native_reader(&extension(name)) => {
             render(View::Document, name, left).ok()? == render(View::Document, name, right).ok()?
         }
@@ -1561,7 +1559,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_office_without_libreoffice() {
+    fn legacy_office_views_and_content() {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/legacy-office/");
         for name in ["xls-workbook.xls", "ppt-deck.ppt", "doc-report.doc", "../visio/dwg.vsd"] {
             let data = std::fs::read(format!("{dir}{name}")).unwrap();

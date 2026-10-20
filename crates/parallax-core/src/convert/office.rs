@@ -2,10 +2,6 @@
 
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
-use std::sync::OnceLock;
-use std::time::{Duration, Instant};
 
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
@@ -348,36 +344,14 @@ pub fn pdf_text(data: &[u8]) -> Result<String> {
     Ok(out)
 }
 
-/// LibreOffice's `soffice`, used to convert legacy binary Office files.
-pub fn soffice() -> Option<&'static PathBuf> {
-    static FOUND: OnceLock<Option<PathBuf>> = OnceLock::new();
-    FOUND
-        .get_or_init(|| {
-            let exe = if cfg!(windows) { "soffice.exe" } else { "soffice" };
-            let in_path = std::env::var_os("PATH")
-                .map(|p| std::env::split_paths(&p).map(|d| d.join(exe)).collect::<Vec<_>>())
-                .unwrap_or_default();
-            let defaults = [
-                PathBuf::from(r"C:\Program Files\LibreOffice\program\soffice.exe"),
-                PathBuf::from(r"C:\Program Files (x86)\LibreOffice\program\soffice.exe"),
-                PathBuf::from("/usr/lib/libreoffice/program/soffice"),
-                PathBuf::from("/opt/libreoffice/program/soffice"),
-            ];
-            in_path.into_iter().chain(defaults).find(|p| p.is_file())
-        })
-        .as_ref()
-}
-
 /// Reads the text of a file in one format.
 type TextReader = fn(&[u8]) -> Result<String>;
 
-/// Extracts text from .doc/.xls/.ppt: with a native reader where there is one, otherwise
-/// (or when that reader fails and LibreOffice is installed) through LibreOffice.
+/// Extracts text from .doc/.xls/.ppt with the native reader.
 pub fn legacy_text(ext: &str, data: &[u8]) -> Result<String> {
-    match native_reader(ext).map(|read| read(data)) {
-        Some(Ok(text)) => Ok(text),
-        Some(Err(e)) if soffice().is_none() => Err(e),
-        _ => libreoffice_text(ext, data),
+    match native_reader(ext) {
+        Some(read) => read(data),
+        None => Err(Error::Unsupported(format!(".{ext} files are not read"))),
     }
 }
 
@@ -390,72 +364,9 @@ fn native_reader(ext: &str) -> Option<TextReader> {
     }
 }
 
-/// Whether .`ext` files are read without LibreOffice.
+/// Whether .`ext` files are read by [`legacy_text`].
 pub fn has_native_reader(ext: &str) -> bool {
     native_reader(ext).is_some()
-}
-
-/// Converts .doc/.xls/.ppt to their OOXML counterpart with LibreOffice, then extracts text.
-fn libreoffice_text(ext: &str, data: &[u8]) -> Result<String> {
-    let target = match ext.chars().next() {
-        Some('d') => "docx",
-        Some('x') => "xlsx",
-        _ => "pptx",
-    };
-    ooxml_text(target, &convert(ext, data, target)?)
-}
-
-/// Converts `data`, a file of type `ext`, to `target` (an extension) with LibreOffice.
-pub(super) fn convert(ext: &str, data: &[u8], target: &str) -> Result<Vec<u8>> {
-    let exe = soffice().ok_or_else(|| Error::Unsupported(format!(".{ext} files need LibreOffice to be installed")))?;
-    let dir = std::env::temp_dir().join(format!("parallax-convert-{}-{}", std::process::id(), unique()));
-    std::fs::create_dir_all(&dir).map_err(|e| Error::io(dir.display().to_string(), e))?;
-    let cleanup = Cleanup(dir.clone());
-    let input = dir.join(format!("input.{ext}"));
-    std::fs::write(&input, data).map_err(|e| Error::io(input.display().to_string(), e))?;
-    // A private profile lets several conversions run at once.
-    let profile = format!(
-        "-env:UserInstallation=file:///{}",
-        dir.join("profile").display().to_string().replace('\\', "/").trim_start_matches('/')
-    );
-    let mut child = Command::new(exe)
-        .args([profile.as_str(), "--headless", "--norestore", "--convert-to", target, "--outdir"])
-        .arg(&dir)
-        .arg(&input)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| Error::io(exe.display().to_string(), e))?;
-    let started = Instant::now();
-    loop {
-        if child.try_wait().map_err(|e| Error::io("soffice", e))?.is_some() {
-            break;
-        }
-        if started.elapsed() > Duration::from_secs(90) {
-            let _ = child.kill();
-            return Err(Error::Unsupported("LibreOffice did not finish converting within 90 s".into()));
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let output = dir.join(format!("input.{target}"));
-    let converted =
-        std::fs::read(&output).map_err(|_| Error::Unsupported("LibreOffice could not convert the file".into()))?;
-    drop(cleanup);
-    Ok(converted)
-}
-
-fn unique() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static N: AtomicU64 = AtomicU64::new(0);
-    N.fetch_add(1, Ordering::Relaxed)
-}
-
-struct Cleanup(PathBuf);
-
-impl Drop for Cleanup {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
 }
 
 #[cfg(test)]
@@ -504,7 +415,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_without_libreoffice() {
+    fn legacy_documents_render() {
         let fixture = |f: &str| {
             std::fs::read(format!("{}/tests/fixtures/legacy-office/{f}", env!("CARGO_MANIFEST_DIR"))).unwrap()
         };
@@ -512,9 +423,7 @@ mod tests {
         assert!(ppt.starts_with("=== Slide 1 ===\nQuarterly Review\n"), "{ppt}");
         let xls = legacy_text("xls", &fixture("xls-workbook.xls")).unwrap();
         assert!(xls.starts_with("=== Sheet: Parts ===\n"), "{xls}");
-        if soffice().is_none() {
-            assert!(legacy_text("xls", b"\xD0\xCF\x11\xE0 damaged").is_err());
-        }
+        assert!(legacy_text("xls", b"\xD0\xCF\x11\xE0 damaged").is_err());
     }
 
     #[test]

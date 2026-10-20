@@ -12,8 +12,23 @@ use crate::compare::Filter;
 use crate::progress::Progress;
 use crate::source::Source;
 use crate::vfs::local::{make_symlink, replace_file, same_file};
-use crate::vfs::{Change, Data, Entry, EntryKind, join};
+use crate::vfs::{Change, Data, Entry, EntryKind, check_rel, join};
 use crate::{Error, Result};
+
+/// Every path must name an entry inside the tree it is applied to, never the tree
+/// itself: the UI and the CLI reach this code with paths they built as strings.
+fn check_paths(paths: &[String]) -> Result<()> {
+    paths.iter().try_for_each(|path| check_rel(path))
+}
+
+/// The same for paths that are written to or deleted: `""` is the compared root.
+fn check_writable_path(paths: &[String]) -> Result<()> {
+    check_paths(paths)?;
+    if paths.iter().any(String::is_empty) {
+        return Err(Error::InvalidSource("the compared folder itself".into()));
+    }
+    Ok(())
+}
 
 /// Copies each of `paths` from `from` to the same path in `to`, recursively for
 /// folders, and returns the number of files copied. Archives are copied as files;
@@ -24,6 +39,7 @@ use crate::{Error, Result};
 /// Cancelling through `progress` stops a copy into folders after the current
 /// files, and a copy into an archive before the archive is replaced.
 pub fn copy(from: &Source, to: &Source, paths: &[String], filter: &Filter, progress: &Progress) -> Result<u64> {
+    check_writable_path(paths)?;
     let mut copied = 0;
     let mut into_archives = Vec::new();
     for rel in paths {
@@ -69,6 +85,7 @@ pub fn copy(from: &Source, to: &Source, paths: &[String], filter: &Filter, progr
 /// Copies the file at `src` in `from` over the file at `dst` in `to`, e.g. to
 /// a file that moved to another folder on the other side.
 pub fn copy_file_as(from: &Source, to: &Source, src: &str, dst: &str, progress: &Progress) -> Result<u64> {
+    check_writable_path(&[src.to_string(), dst.to_string()])?;
     let entry = from.stat(src)?;
     if entry.kind == EntryKind::Dir {
         return Err(Error::Unsupported("only files are copied onto another path".into()));
@@ -212,6 +229,7 @@ pub enum Removal {
 /// Returns the paths that could not be moved to the trash (for example on a
 /// network drive); they are left in place.
 pub fn delete(source: &Source, paths: &[String], removal: Removal, progress: &Progress) -> Result<Vec<String>> {
+    check_writable_path(paths)?;
     let mut local: Vec<(String, PathBuf)> = Vec::new();
     let mut in_archives = Vec::new();
     for rel in paths {

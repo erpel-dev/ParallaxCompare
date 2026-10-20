@@ -22,6 +22,33 @@ pub fn is_remote(repo: &str) -> bool {
     ["https://", "http://", "ssh://", "git://", "file://"].iter().any(|p| repo.starts_with(p)) || scp_like(repo)
 }
 
+/// Protocols that are fetched without authenticating or encrypting the transport,
+/// so that a network attacker can substitute the content being compared. `file://`
+/// is not one of them: opening it is the same as opening the path itself.
+const INSECURE_PROTOCOLS: [&str; 2] = ["http://", "git://"];
+
+/// Whether `repo` is fetched over a transport that a network attacker cannot tamper
+/// with: HTTPS, SSH, or a local path.
+fn is_secure(repo: &str) -> bool {
+    !INSECURE_PROTOCOLS.iter().any(|p| repo.starts_with(p))
+}
+
+/// Refuses to fetch over a plaintext, unauthenticated protocol unless
+/// `PARALLAX_ALLOW_INSECURE_REMOTES=1` asks for it.
+fn check_protocol(url: &str) -> Result<()> {
+    if is_secure(url) || insecure_remotes_allowed() {
+        return Ok(());
+    }
+    Err(Error::Unsupported(format!(
+        "{url} is fetched without encryption or authentication, so the content could be substituted on the way. Use an https:// or ssh:// URL, or set PARALLAX_ALLOW_INSECURE_REMOTES=1 to allow it"
+    )))
+}
+
+/// Whether insecure remotes were asked for in the environment.
+fn insecure_remotes_allowed() -> bool {
+    matches!(std::env::var("PARALLAX_ALLOW_INSECURE_REMOTES").as_deref(), Ok("1" | "true" | "yes"))
+}
+
 /// `git@github.com:owner/repo.git`: user, host, a colon and a path, no scheme.
 fn scp_like(text: &str) -> bool {
     let Some((user_host, path)) = text.split_once(':') else { return false };
@@ -178,6 +205,7 @@ pub fn display(url: &str) -> String {
 /// bare repository and the fetched commit id.
 pub fn fetch(url: &str, rev: &str) -> Result<(PathBuf, String)> {
     plain_arg("repository", url)?;
+    check_protocol(url)?;
     plain_arg("revision", rev)?;
     // One fetch at a time: fetches into one cache repository would collide.
     static FETCHING: Mutex<()> = Mutex::new(());
@@ -214,6 +242,7 @@ pub(crate) fn pin_commit(dir: &std::path::Path, commit: &str) -> Result<()> {
 /// The branch and tag names of the repository at `url`.
 pub fn ls_remote(url: &str) -> Result<Vec<String>> {
     plain_arg("repository", url)?;
+    check_protocol(url)?;
     let out = git(&["ls-remote", "--heads", "--tags", "--end-of-options", url], None)?;
     Ok(out
         .lines()
@@ -228,6 +257,7 @@ pub fn ls_remote(url: &str) -> Result<Vec<String>> {
 pub fn ref_list(url: &str) -> Result<crate::vfs::git::RefList> {
     use crate::vfs::git::{RefInfo, RefList};
     plain_arg("repository", url)?;
+    check_protocol(url)?;
     let out = git(&["ls-remote", "--symref", "--end-of-options", url], None)?;
     let mut list =
         RefList { head: None, branches: Vec::new(), remotes: Vec::new(), tags: Vec::new(), recent_commits: Vec::new() };
@@ -278,6 +308,11 @@ fn git(args: &[&str], dir: Option<&std::path::Path>) -> Result<String> {
         cmd.arg("-C").arg(dir);
     }
     cmd.args(args).env("GIT_TERMINAL_PROMPT", "0");
+    // Defence in depth: `git` refuses the plaintext protocols itself, and also
+    // `ext::`, which would run a program.
+    if !insecure_remotes_allowed() {
+        cmd.env("GIT_ALLOW_PROTOCOL", "https:ssh:file");
+    }
     crate::process::run(&mut cmd, "git", &format!("git {command}"), limit)
 }
 
@@ -383,6 +418,24 @@ mod tests {
         assert_eq!(parse_with("https://github.com/o/r/blob/dev/x/y.rs", &refs), rev(gh, "dev", "x/y.rs"));
         // Any other address is taken as a repository; Git reports when it is none.
         assert_eq!(parse_with("https://example.com/about", &refs), rev("https://example.com/about", "HEAD", ""));
+    }
+
+    #[test]
+    fn insecure_remotes_are_refused() {
+        for url in ["http://example.com/o/r.git", "git://example.com/o/r.git"] {
+            for error in [
+                fetch(url, "main").unwrap_err().to_string(),
+                ls_remote(url).unwrap_err().to_string(),
+                ref_list(url).unwrap_err().to_string(),
+            ] {
+                assert!(error.contains("PARALLAX_ALLOW_INSECURE_REMOTES"), "{error}");
+            }
+        }
+        assert!(is_secure("https://example.com/o/r.git"));
+        assert!(is_secure("ssh://git@example.com/o/r.git"));
+        assert!(is_secure("git@example.com:o/r.git"));
+        assert!(is_secure("/home/me/checkouts/r"));
+        assert!(!is_secure("http://example.com/o/r.git") && !is_secure("git://example.com/o/r.git"));
     }
 
     /// Fetches from a repository given by a file:// URL, as from a server.

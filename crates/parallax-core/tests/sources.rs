@@ -1266,3 +1266,136 @@ fn include_patterns_select_files() {
     let paths: Vec<&str> = list.iter().map(|(p, _)| p.as_str()).collect();
     assert_eq!(paths, ["gen", "gen/out.txt", "src", "src/readme.txt"], "{list:?}");
 }
+
+/// Paths that name something outside the compared folders are refused by the
+/// operations themselves, not only by the UI that built them.
+#[test]
+fn operations_cannot_leave_the_compared_folders() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    write(&a, &[("file.txt", "left"), ("sub/inside.txt", "in")]);
+    write(&b, &[("file.txt", "right")]);
+    fs::write(dir.path().join("outside.txt"), "untouched").unwrap();
+
+    let open = |p: &Path| {
+        SourceSpec::Local { path: p.display().to_string() }.open(SourceOptions::default()).expect("source opens")
+    };
+    let (left, right) = (open(&a), open(&b));
+
+    for path in ["../outside.txt", "sub/../../outside.txt", "/etc/passwd"] {
+        assert!(ops::delete(&left, &[path.to_string()], Removal::Permanent, &Progress::default()).is_err(), "{path}");
+        assert!(copy(&left, &right, path).is_err(), "{path}");
+        assert!(left.vfs.read(&left.path(path)).is_err(), "{path}");
+        assert!(left.vfs.local_path(&left.path(path)).is_none(), "{path}");
+    }
+    // The folder itself is not an entry to copy or delete.
+    assert!(ops::delete(&left, &[String::new()], Removal::Permanent, &Progress::default()).is_err());
+    assert!(copy(&left, &right, "").is_err());
+
+    assert_eq!(fs::read_to_string(dir.path().join("outside.txt")).unwrap(), "untouched");
+    assert!(a.join("file.txt").exists() && a.join("sub/inside.txt").exists());
+    // Legitimate paths still work.
+    assert!(copy(&left, &right, "sub/inside.txt").unwrap() == 1);
+    assert!(b.join("sub/inside.txt").exists());
+    assert!(ops::delete(&right, &["sub/inside.txt".into()], Removal::Permanent, &Progress::default()).is_ok());
+}
+
+/// The same for archives: a member name cannot be used as a path into the folder
+/// that holds the archive.
+#[test]
+fn archive_operations_cannot_leave_the_archive() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("a.zip");
+    fs::write(&archive, zip_bytes(&[("in.txt", "x"), ("dir/nested.txt", "y")])).unwrap();
+    let spec = SourceSpec::Local { path: archive.display().to_string() };
+    let source = spec.open(SourceOptions::default()).expect("archive opens");
+    for path in ["../outside.txt", "dir/../../outside.txt", "/etc/passwd"] {
+        assert!(source.vfs.read(&source.path(path)).is_err(), "{path}");
+        assert!(source.vfs.stat(&source.path(path)).is_err(), "{path}");
+    }
+    assert!(ops::delete(&source, &[String::new()], Removal::Permanent, &Progress::default()).is_err());
+}
+
+/// A member name too deep to create is skipped instead of overflowing the stack,
+/// and ordinary nesting still works.
+#[test]
+fn deeply_nested_archive_members_are_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("deep.tar");
+    let mut tar = tar::Builder::new(fs::File::create(&path).unwrap());
+    let append = |tar: &mut tar::Builder<fs::File>, name: &str, body: &str| {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append_data(&mut header, name, body.as_bytes()).unwrap();
+    };
+    append(&mut tar, "dir/file.txt", "fine");
+    append(&mut tar, &format!("{}leaf.txt", "a/".repeat(5000)), "deep");
+    append(&mut tar, &format!("{}leaf.txt", "b/".repeat(100)), "deeper but listed");
+    tar.finish().unwrap();
+    drop(tar);
+
+    let spec = SourceSpec::Local { path: path.display().to_string() };
+    let source = spec.open(SourceOptions::default()).expect("the archive opens");
+    let root = source.vfs.list(&source.path("")).expect("the root lists");
+    let names: Vec<&str> = root.iter().map(|e| e.name.as_str()).collect();
+    assert!(names.contains(&"dir") && names.contains(&"b"), "{names:?}");
+    assert_eq!(&*source.vfs.read(&source.path("dir/file.txt")).unwrap(), b"fine");
+    let ok = format!("{}leaf.txt", "b/".repeat(100));
+    assert_eq!(&*source.vfs.read(&source.path(&ok)).unwrap(), b"deeper but listed");
+}
+
+/// A zip entry whose header claims a size no comparison needs is refused before
+/// anything is allocated for it.
+#[test]
+fn zip_entries_claiming_huge_sizes_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("huge.zip");
+    let mut bytes = zip_bytes(&[("a.txt", "small")]);
+    // Set the uncompressed size to 4 GiB in the local and the central header.
+    let patch = |bytes: &mut Vec<u8>, signature: [u8; 4], at: usize| {
+        let start = bytes.windows(4).position(|w| w == signature).expect("header found");
+        bytes[start + at..start + at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    };
+    patch(&mut bytes, [0x50, 0x4b, 0x03, 0x04], 22);
+    patch(&mut bytes, [0x50, 0x4b, 0x01, 0x02], 24);
+    fs::write(&path, &bytes).unwrap();
+
+    let spec = SourceSpec::Local { path: path.display().to_string() };
+    let source = spec.open(SourceOptions::default()).expect("the archive opens");
+    // Listing reads only headers; reading the entry is refused.
+    let error = source.vfs.read(&source.path("a.txt")).unwrap_err().to_string();
+    assert!(error.contains("more than a comparison reads"), "{error}");
+}
+
+/// A compressed tar that expands past the limit is refused instead of being
+/// decompressed into memory or into the temporary file.
+#[test]
+fn tars_that_expand_too_far_are_refused() {
+    use flate2::write::GzEncoder;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bomb.tar.gz");
+    let mut tar = tar::Builder::new(GzEncoder::new(fs::File::create(&path).unwrap(), flate2::Compression::best()));
+    let mut header = tar::Header::new_gnu();
+    // Zeros inside a single member: 300 MiB, over the 256 MiB floor.
+    let size = 300u64 << 20;
+    header.set_size(size);
+    header.set_mode(0o644);
+    header.set_entry_type(tar::EntryType::Regular);
+    header.set_cksum();
+    use std::io::Read as _;
+    tar.append_data(&mut header, "zeros.bin", std::io::repeat(0).take(size)).unwrap();
+    tar.into_inner().unwrap().finish().unwrap();
+
+    // The archive is entered on the first listing, and refused there.
+    let spec = SourceSpec::Local { path: path.display().to_string() };
+    let source = spec.open(SourceOptions::default()).expect("the source opens");
+    let error = match source.vfs.list(&source.path("")) {
+        Ok(_) => panic!("the archive is refused"),
+        Err(e) => e.to_string(),
+    };
+    assert!(error.contains("expands to more than"), "{error}");
+}

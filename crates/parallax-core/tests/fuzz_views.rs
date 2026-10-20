@@ -153,7 +153,6 @@ fn legacy_word_documents_render() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/legacy-office");
     for name in ["doc-report.doc", "doc-plain.doc", "doc-mixed.doc"] {
         let data = std::fs::read(format!("{dir}/{name}")).unwrap();
-        // Read natively, so this does not depend on LibreOffice.
         let text = convert::render(convert::View::Document, name, &data).unwrap();
         assert!(text.lines().count() >= 3, "{name}: {text}");
         let _ = convert::content_equal(name, &data, &data);
@@ -162,8 +161,7 @@ fn legacy_word_documents_render() {
 
 /// Binary Visio drawings with bytes changed inside their VisioDocument stream
 /// (so that the compound file around it stays readable) render or fail, never
-/// panic. Bytes before 0x40 stay: with a broken header the native reader gives
-/// up, and the slow LibreOffice fallback would be tried.
+/// panic. Bytes before 0x40 stay: with a broken header the reader gives up.
 #[test]
 fn visio_drawings_survive_damage() {
     use std::io::{Read, Write};

@@ -59,6 +59,7 @@ hmac = "0.12"
 mail-parser = { version = "0.11", features = ["full_encoding"] }
 cfb = "0.7"
 calamine = { version = "0.37", default-features = false }
+tempfile = "3"
 
 [dev-dependencies]
 sevenz-rust2 = { version = "0.24", default-features = false, features = ["compress", "util"] }

@@ -1,6 +1,6 @@
-//! Binary Visio drawings (.vsd, .vss, .vst of Visio 2000–2010) read without
-//! LibreOffice, into the same model as .vsdx, so that a drawing saved in either
-//! format reads alike in the Diagram view.
+//! Binary Visio drawings (.vsd, .vss, .vst of Visio 2000–2010), read into the
+//! same model as .vsdx, so that a drawing saved in either format reads alike in
+//! the Diagram view.
 //!
 //! The file is an OLE compound file whose `VisioDocument` stream starts with a
 //! header pointing at the trailer stream. Streams hold either pointers to further
@@ -63,7 +63,7 @@ const NAME_INDEX: u32 = 0xc9;
 const NAME_INDEX_OLD: u32 = 0x34;
 
 /// Reads a binary Visio file. Errors are `Unsupported` for versions not read here
-/// (Visio 5 and older), so that the caller can try LibreOffice.
+/// (Visio 5 and older).
 pub(super) fn read(data: &[u8]) -> Result<Drawing> {
     let doc = visio_stream(data)?;
     let version = *doc.get(0x1a).ok_or_else(|| bad("the header is cut off"))?;
@@ -989,7 +989,7 @@ mod tests {
 
     #[test]
     fn same_drawing_as_vsdx() {
-        let vsd = legacy_diagram("vsd", fixture!("dwg.vsd")).unwrap();
+        let vsd = legacy_diagram(fixture!("dwg.vsd")).unwrap();
         let vsdx = diagram(fixture!("dwg.vsdx")).unwrap();
         assert!(read(fixture!("dwg.vsd")).is_ok());
         assert_eq!(outline(&vsd), outline(&vsdx), "{vsd}");
@@ -1008,7 +1008,7 @@ mod tests {
 
     #[test]
     fn connectors_and_labels() {
-        let view = legacy_diagram("vsd", fixture!("Visio11FormatLine.vsd")).unwrap();
+        let view = legacy_diagram(fixture!("Visio11FormatLine.vsd")).unwrap();
         assert!(view.starts_with("=== Page: Page-1 (8.2677 in × 11.6929 in) ===\n"), "{view}");
         assert!(view.contains("Shape 1 \"Dynamic connector\" · master Dynamic connector\n"), "{view}");
         assert!(view.contains("\n  from 6.4961, 8.6614 to 7.7756, 8.0709\n"), "{view}");
@@ -1017,7 +1017,7 @@ mod tests {
         let drawing = read(fixture!("Visio11FormatLine.vsd")).unwrap();
         assert_eq!(drawing.pages.len(), 1);
         assert_eq!(drawing.pages[0].shapes.len(), 100);
-        let text = legacy_text("vsd", fixture!("Visio11FormatLine.vsd")).unwrap();
+        let text = legacy_text(fixture!("Visio11FormatLine.vsd")).unwrap();
         assert!(text.starts_with("=== Page: Page-1 ===\n"), "{text}");
         assert!(text.contains("\nCollosal\nExtra large\n"), "{text}");
     }
@@ -1040,11 +1040,11 @@ mod tests {
 
     #[test]
     fn text_fields() {
-        let view = legacy_diagram("vsd", fixture!("Visio11TextFieldsWithAngle.vsd")).unwrap();
+        let view = legacy_diagram(fixture!("Visio11TextFieldsWithAngle.vsd")).unwrap();
         assert!(view.contains("Shape 1\n  text: TextField GeometryAngleGeneral -30 deg\n"), "{view}");
         assert!(view.contains("  angle -0.5236\n"), "{view}");
         // Visio 2000: 8-bit text and names.
-        let view = legacy_diagram("vsd", fixture!("Visio6TextFieldsWithUnits.vsd")).unwrap();
+        let view = legacy_diagram(fixture!("Visio6TextFieldsWithUnits.vsd")).unwrap();
         assert!(view.starts_with("=== Page: Page-1 (8.5 in × 11 in) ===\n"), "{view}");
         assert!(view.contains("Shape 1\n  text: Text with [cm] units 1 cm\n"), "{view}");
         assert_eq!(read(fixture!("Visio6TextFieldsWithUnits.vsd")).unwrap().pages[0].shapes.len(), 12);
@@ -1096,7 +1096,7 @@ mod tests {
     }
 
     #[test]
-    fn older_versions_are_left_to_libreoffice() {
+    fn older_versions_are_reported() {
         let mut stream = visio_stream(fixture!("dwg.vsd")).unwrap();
         stream[0x1a] = 5;
         assert!(matches!(read(&compound(&stream)), Err(Error::Unsupported(m)) if m.contains("version 5")));
