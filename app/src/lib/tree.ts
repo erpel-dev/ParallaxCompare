@@ -1,7 +1,7 @@
 // Helpers for the folder compare result tree.
 import type { Node, Side, Status } from "./api";
 
-export type Filter = "all" | "diffs" | "same" | "orphans";
+export type Filter = "all" | "diffs" | "orphans" | Exclude<Status, "pending">;
 
 export interface FlatRow {
   node: Node;
@@ -29,7 +29,7 @@ export function closedArchive(node: Node): boolean {
   return !!node.unexpanded && (node.left ?? node.right)?.kind === "archive";
 }
 
-function selfMatches(node: Node, filter: Filter): boolean {
+export function selfMatches(node: Node, filter: Filter): boolean {
   // Not compared yet: shown whatever it turns out to be.
   if (node.status === "pending") return true;
   switch (filter) {
@@ -37,22 +37,41 @@ function selfMatches(node: Node, filter: Filter): boolean {
       return true;
     case "diffs":
       return node.status !== "same" && node.status !== "similar";
-    case "same":
-      return node.status === "same" || node.status === "similar";
     case "orphans":
       return node.status === "leftOnly" || node.status === "rightOnly";
+    default:
+      return node.status === filter;
   }
 }
 
 function visible(node: Node, filter: Filter, memo: Map<Node, boolean>): boolean {
   if (filter === "all") return true;
-  if (filter === "diffs") return node.status !== "same" && node.status !== "similar";
   let hit = memo.get(node);
   if (hit === undefined) {
-    hit = selfMatches(node, filter) || (node.children ?? []).some((c) => visible(c, filter, memo));
+    // A folder's aggregate status must not match instead of its descendants:
+    // a "different" folder may contain only left-only files.
+    hit = isContainer(node) && !closedArchive(node) && node.status !== "error" && (node.children?.length ?? 0) > 0
+      ? node.children!.some((c) => visible(c, filter, memo))
+      : selfMatches(node, filter);
     memo.set(node, hit);
   }
   return hit;
+}
+
+/** Loaded ancestors to open when selecting a count; unopened archives stay unopened. */
+export function matchingFolders(root: Node, filter: Filter): string[] {
+  const out: string[] = [];
+  const memo = new Map<Node, boolean>();
+  const walk = (node: Node, dir: string) => {
+    for (const child of node.children ?? []) {
+      if (!isContainer(child) || child.unexpanded || !visible(child, filter, memo)) continue;
+      const path = joinPath(dir, child.name);
+      out.push(path);
+      walk(child, path);
+    }
+  };
+  walk(root, "");
+  return out;
 }
 
 export function joinPath(dir: string, name: string): string {
@@ -230,6 +249,25 @@ export function countFiles(root: Node): Counts {
   };
   walk(root);
   return c;
+}
+
+/** Counts in a flat comparison use its matched pairs, once per displayed file pair. */
+export function countFlatFiles(rows: FlatRow[]): Counts {
+  const c: Counts = { files: 0, same: 0, similar: 0, different: 0, leftOnly: 0, rightOnly: 0, errors: 0 };
+  for (const { node, pending } of rows) {
+    if (pending || node.status === "pending") continue;
+    c.files++;
+    if (node.status === "error") c.errors++;
+    else c[node.status]++;
+  }
+  return c;
+}
+
+export function matchingCount(c: Counts, filter: Filter): number {
+  if (filter === "all") return c.files;
+  if (filter === "diffs") return c.different + c.leftOnly + c.rightOnly + c.errors;
+  if (filter === "orphans") return c.leftOnly + c.rightOnly;
+  return filter === "error" ? c.errors : c[filter];
 }
 
 /** One side of a row: the path, and whether it is the left side's entry. */

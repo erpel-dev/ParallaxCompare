@@ -5,7 +5,8 @@
   import { api, defaultCompareOptions, sourceText, type CompareResult, type Node, type OpResult, type PathsChanged, type SessionInfo, type Side, type SourceSpec } from "./api";
   import type { Command } from "./commands";
   import Dropdown from "./Dropdown.svelte";
-  import Menu, { type MenuItem } from "./Menu.svelte";
+  import FilterBar, { type CountFilter } from "./FilterBar.svelte";
+  import Menu, { type MenuItem, type MenuContext } from "./Menu.svelte";
   import Nav, { type NavActions } from "./Nav.svelte";
   import { notify } from "./toast.svelte";
   import PathBar, { type SideEdit } from "./PathBar.svelte";
@@ -14,6 +15,10 @@
   import {
     allFolders,
     countFiles,
+    countFlatFiles,
+    matchingCount,
+    matchingFolders,
+    selfMatches,
     countNodes,
     differingFolders,
     filesBelow,
@@ -65,6 +70,7 @@
   let filter = $state<Filter>("all");
   /** The focused row; `selection` holds all selected rows (Ctrl/Shift+click). */
   let selected = $state<string | null>(null);
+  let activeSide = $state<"left" | "right">("left");
   let selection = $state(new Set<string>());
   let anchor: string | null = null;
   let running = $state(false);
@@ -93,10 +99,14 @@
     void version;
     return flat && result ? movedPairs(result.root) : [];
   });
+  const flatRows = $derived.by(() => {
+    void version;
+    return flat && result ? flatFiles(result.root, "all", moved, pairStatus) : [];
+  });
   const rows = $derived.by(() => {
     void version;
     if (!result) return [];
-    return flat ? flatFiles(result.root, filter, moved, pairStatus) : flatten(result.root, expanded, filter);
+    return flat ? flatRows.filter((r) => r.pending || selfMatches(r.node, filter)) : flatten(result.root, expanded, filter);
   });
   const rowByPath = $derived(new Map(rows.map((r) => [r.path, r])));
 
@@ -176,8 +186,34 @@
   }
   const counts = $derived.by(() => {
     void version;
-    return result ? countFiles(result.root) : null;
+    return result ? (flat ? countFlatFiles(flatRows) : countFiles(result.root)) : null;
   });
+  const countFilters = $derived<CountFilter[]>([
+    { id: "all", label: "All files", count: counts?.files ?? 0 },
+    { id: "diffs", label: "All differences", count: counts ? matchingCount(counts, "diffs") : 0, title: "Changed, left-only, right-only, and error entries", tone: "different" },
+    { id: "same", label: "Same", count: counts?.same ?? 0, tone: "same" },
+    { id: "similar", label: "Similar", count: counts?.similar ?? 0, title: "Equal content, different bytes", tone: "similar" },
+    { id: "different", label: "Different", count: counts?.different ?? 0, title: "Changed files present on both sides", tone: "different" },
+    { id: "leftOnly", label: "Left only", count: counts?.leftOnly ?? 0, tone: "left" },
+    { id: "rightOnly", label: "Right only", count: counts?.rightOnly ?? 0, tone: "right" },
+    { id: "error", label: "Errors", count: counts?.errors ?? 0, tone: "error" },
+  ]);
+  const matchingFiles = $derived(counts ? matchingCount(counts, filter) : 0);
+
+  function setFilter(id: Filter) {
+    filter = id;
+    menu = null;
+    selected = null;
+    selection = new Set();
+    anchor = null;
+    if (result && !flat && id !== "all") {
+      for (const folder of matchingFolders(result.root, id)) expanded.add(folder);
+    }
+    version++;
+    scrollTop = 0;
+    if (viewport) viewport.scrollTop = 0;
+  }
+
   // Huge trees scroll through a scaled spacer (see vscroll.ts); `vTop` is the
   // scroll position in row pixels.
   const scale = $derived(scrollScale(rows.length * ROW, viewHeight));
@@ -440,7 +476,7 @@
         if (e.key === "F10" && !e.shiftKey) return;
         if (row && viewport) {
           const r = viewport.getBoundingClientRect();
-          rowMenu(row.path, r.left + 40, r.top + selectedIndex * ROW - vTop + ROW);
+          rowMenu(row.path, activeSide, r.left + (activeSide === "left" ? 40 : r.width / 2 + 40), r.top + selectedIndex * ROW - vTop + ROW);
         }
         e.preventDefault();
         return;
@@ -604,6 +640,7 @@
   /** Brings the rows of changed paths up to date, or compares again when too much changed. */
   async function flushChanges() {
     if (!result || running || op || (!deferred.size && !deferredFull)) return;
+    menu = null;
     if (deferredFull) {
       deferredFull = false;
       deferred.clear();
@@ -632,7 +669,7 @@
   }
 
   let pathbars = $state<PathBar[]>([]);
-  let menu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  let menu = $state<{ x: number; y: number; items: MenuItem[]; context: MenuContext } | null>(null);
   const optionsChanged = $derived.by(() => {
     const d = defaultCompareOptions();
     return (
@@ -644,16 +681,11 @@
     );
   });
 
-  /** Opens, reveals or copies the path of one side of a row. */
-  async function onSide(path: string, left: boolean, action: "open" | "reveal" | "copy") {
+  /** Opens or reveals the file on one side of a row. */
+  async function onSide(path: string, left: boolean, action: "open" | "reveal") {
     try {
       const spec = await api.sideSource(session.id, left, path);
-      if (action === "copy") {
-        await navigator.clipboard.writeText(sourceText(spec));
-        notify("Path copied", "info");
-      } else {
-        await api.openSource(spec, action === "reveal");
-      }
+      await api.openSource(spec, action === "reveal");
     } catch (e) {
       notify(String(e));
     }
@@ -673,61 +705,92 @@
     }
   }
 
-  /** The context menu for the row at `path`: it acts on the selection, like the toolbar. */
-  function rowMenu(path: string, x: number, y: number) {
+  /** The clicked side supplies files; the opposite side is only a copy destination. */
+  function rowMenu(path: string, side: "left" | "right", x: number, y: number) {
     if (!selection.has(path)) selectOnly(path);
+    activeSide = side;
     const row = rows.find((r) => r.path === path);
     if (!row) return;
-    // Each action names what it applies to: of two unmatched files, only one is
-    // on the side a copy or delete starts from.
-    const what = (paths: string[]) =>
-      paths.length === 1 ? `“${paths[0].split("/").pop()}”` : `${paths.length} items`;
-    const sideActions: MenuItem[] = [];
-    for (const [label, paths, allowed, run] of [
-      ["Copy %s to the right", present(true), session.right.writable, () => copy(true)],
-      ["Copy %s to the left", present(false), session.left.writable, () => copy(false)],
-      ["Delete %s on the left", present(true), session.left.writable, () => remove(true)],
-      ["Delete %s on the right", present(false), session.right.writable, () => remove(false)],
-    ] as const) {
-      if (paths.length && allowed) sideActions.push({ label: label.replace("%s", what(paths)), disabled: !!op, run });
-    }
+    const left = side === "left";
+    const other = left ? "right" : "left";
+    const source = left ? session.left : session.right;
+    const destination = left ? session.right : session.left;
+    const entry = left ? row.node.left : row.node.right;
+    const paths = present(left);
+    const incoming = present(!left);
+    const n = paths.length;
+    const multiple = selection.size > 1;
+    const what = (n: number) => `${n} item${n === 1 ? "" : "s"}`;
+    const kind = entry?.kind === "dir" ? "folder" : "file";
     const items: MenuItem[] = [
       row.container
         ? { label: row.expanded ? "Collapse" : "Expand", keys: row.expanded ? "←" : "→", run: () => toggle(path) }
-        : { label: "Open comparison", keys: "Enter", run: () => onOpenFile(path) },
+        : { label: multiple ? "Open clicked comparison" : "Open comparison", detail: multiple ? path : undefined, keys: "Enter", run: () => onOpenFile(path) },
     ];
     if (pair && onCompareRows) {
       const [a, b] = pair;
       items.push({ label: "Compare these two", run: () => onCompareRows(a, b) });
     }
-    if (sideActions.length) items.push("separator", ...sideActions);
-    // A folder (or archive) of the tree as the new top folder of its side.
-    if (onSetBase && row.container) {
-      const folder = `“${path.split("/").pop()}”`;
-      const isFolder = (s: typeof row.node.left) => !!s && (s.kind === "dir" || s.kind === "archive");
-      const [onLeft, onRight] = [isFolder(row.node.left), isFolder(row.node.right)];
-      const base: MenuItem[] = [];
-      if (onLeft && onRight) base.push({ label: `Set ${folder} as base folder on both sides`, run: () => setBase(path, ["left", "right"]) });
-      if (onLeft) base.push({ label: `Set left ${folder} as base folder`, run: () => setBase(path, ["left"]) });
-      if (onRight) base.push({ label: `Set right ${folder} as base folder`, run: () => setBase(path, ["right"]) });
-      if (base.length) items.push("separator", ...base);
+    if (n) {
+      items.push("separator", {
+        label: `${multiple ? `Copy ${what(n)}` : "Copy"} to ${other} ${left ? "→" : "←"}`,
+        detail: !destination.writable ? `The ${other} source is read-only` : `From ${side} to ${other}`,
+        tone: "primary", disabled: !!op || !destination.writable, run: () => copy(left),
+      });
+      if (onSetBase && entry && (entry.kind === "dir" || entry.kind === "archive") && !multiple) {
+        items.push("separator", { label: `Set as ${side} base folder`, run: () => setBase(path, [side]) });
+        const opposite = left ? row.node.right : row.node.left;
+        if (opposite && (opposite.kind === "dir" || opposite.kind === "archive")) {
+          items.push({ label: "Set as base folder on both sides", run: () => setBase(path, ["left", "right"]) });
+        }
+      }
+      items.push("separator");
+      if (!multiple && entry) {
+        items.push(
+          { label: "Open in default app", run: () => onSide(sidePath(path, left), left, "open") },
+          { label: "Show in file manager", run: () => onSide(sidePath(path, left), left, "reveal") },
+        );
+      }
+      items.push({ label: multiple ? `Copy ${n} path${n === 1 ? "" : "s"}` : "Copy path", run: () => copyPaths(paths.map((p) => sidePath(p, left)), left) });
+      items.push("separator", {
+        label: multiple ? `Delete ${what(n)} on ${side}…` : `Delete ${side} ${kind}…`,
+        detail: source.writable ? undefined : "This source is read-only",
+        tone: "danger", disabled: !!op || !source.writable, run: () => remove(left),
+      });
+    } else if (incoming.length) {
+      items.push("separator", {
+        label: multiple ? `Copy ${what(incoming.length)} from ${other} here ${left ? "←" : "→"}` : `Copy ${other} ${row.container ? "folder" : "file"} here ${left ? "←" : "→"}`,
+        detail: source.writable ? `Create ${multiple ? "missing items" : row.container ? "the missing folder" : "the missing file"} on the ${side}` : `The ${side} source is read-only`,
+        tone: "primary", disabled: !!op || !source.writable, run: () => copy(!left),
+      });
     }
-    for (const [left, side, name] of [[true, row.node.left, "left"], [false, row.node.right, "right"]] as const) {
-      if (!side) continue;
-      items.push(
-        "separator",
-        { label: `Open ${name} in default app`, run: () => onSide(sidePath(path, left), left, "open") },
-        { label: `Show ${name} in file manager`, run: () => onSide(sidePath(path, left), left, "reveal") },
-        { label: `Copy ${name} path`, run: () => onSide(sidePath(path, left), left, "copy") },
-      );
+    const filename = sidePath(path, left).split("/").pop() ?? path;
+    const scope = multiple
+      ? targets.length !== selection.size ? `${what(n)} on the ${side} · ${selection.size} rows selected (includes nested entries)`
+        : `${n} of ${targets.length} selected items exist on the ${side}`
+      : entry ? "" : `Missing on the ${side}`;
+    const shownPath = multiple && n === 1 ? paths[0] : path;
+    menu = { x, y, items, context: {
+      side, title: multiple ? `${what(n)} on the ${side}` : filename,
+      detail: [multiple && n !== 1 ? source.display : `${source.display} › ${sidePath(shownPath, left)}`, scope].filter(Boolean).join("\n"),
+      badge: !n ? "Missing here" : source.writable ? "Editable" : "Read-only",
+    } };
+  }
+
+  async function copyPaths(paths: string[], left: boolean) {
+    try {
+      const specs = await Promise.all(paths.map((p) => api.sideSource(session.id, left, p)));
+      await navigator.clipboard.writeText(specs.map(sourceText).join("\n"));
+      notify(paths.length === 1 ? "Path copied" : `${paths.length} paths copied`, "info");
+    } catch (e) {
+      notify(String(e));
     }
-    menu = { x, y, items };
   }
 
   /** What this view offers in the command palette. */
   export function commands(): Command[] {
     const group = "Folder";
-    const filters = [["all", "All"], ["diffs", "Differences"], ["same", "Same"], ["orphans", "Only on one side"]] as const;
+    const filters = [...countFilters.map((f) => [f.id as Filter, f.label] as const), ["orphans", "Only on one side"] as const];
     return [
       { group, title: "Compare again", keys: "F5", enabled: !running, run: () => run(true) },
       { group, title: "Swap left and right", run: onSwap },
@@ -740,10 +803,7 @@
       ...filters.map(([id, label]) => ({
         group,
         title: `Show: ${label}`,
-        run: () => {
-          filter = id;
-          version++;
-        },
+        run: () => setFilter(id),
       })),
       { group, title: "Filter files by name pattern", run: () => patternInput?.focus() },
       { group, title: "Expand all folders", run: () => setAll(true) },
@@ -823,10 +883,6 @@
       title="Compare the two selected rows with each other, e.g. a file renamed between the sides (select with Ctrl+click)"
     >⇆ Compare these</button>
     <span class="sep"></span>
-    {#each [["all", "All"], ["diffs", "Diffs"], ["same", "Same"], ["orphans", "Orphans"]] as const as [id, label] (id)}
-      <button class:on={filter === id} onclick={() => { filter = id; version++; }}>{label}</button>
-    {/each}
-    <span class="sep"></span>
     <span class="patterns" class:active={options.includes.length > 0}>
       <input
         bind:this={patternInput}
@@ -891,6 +947,16 @@
     </Dropdown>
   </div>
 
+  <FilterBar items={countFilters} value={filter} onSelect={(id) => setFilter(id as Filter)} disabled={!result}
+    hint={running ? "Totals update during comparison" : flatRows.some((r) => r.pending) ? "Matched files are still being compared" : ""} />
+  {#if result && filter !== "all"}
+    <div class="filter-scope">
+      <strong>{countFilters.find((f) => f.id === filter)?.label ?? "Only on one side"}</strong>
+      <span>· {matchingFiles.toLocaleString()} matching files · {flat ? "Flat file list" : "Parent folders remain visible"}</span>
+      <button onclick={() => setFilter("all")}>Show all</button>
+    </div>
+  {/if}
+
   <div class="pathbars">
     <PathBar bind:this={pathbars[0]} info={session.left} edit={edit?.[0]} title="Left" />
     <PathBar bind:this={pathbars[1]} info={session.right} edit={edit?.[1]} title="Right" />
@@ -914,7 +980,7 @@
     role="tree"
   >
     {#if result && rows.length === 0 && !running}
-      <div class="empty">{result.root.status === "same" ? "Both sides are identical." : "Nothing matches the current filter."}</div>
+      <div class="empty">{filter !== "all" ? "Nothing matches the current filter." : result.root.status === "same" ? "Both sides are identical." : "No files to compare."}</div>
     {/if}
     <div class="spacer" style:height="{spacerHeight(rows.length * ROW)}px">
       <div class="window" style:transform="translateY({windowOffset(scrollTop, scale, first, ROW)}px)">
@@ -934,10 +1000,6 @@
               viewport?.focus({ preventScroll: true });
             }}
             ondblclick={() => activate(row.path, row.container)}
-            oncontextmenu={(e) => {
-              e.preventDefault();
-              rowMenu(row.path, e.clientX, e.clientY);
-            }}
             title={row.node.message ?? ""}
           >
             {#each [row.node.left, row.node.right] as side, i (i)}
@@ -945,7 +1007,8 @@
                 <div class="mid">{row.pending ? "…" : glyph[row.node.status]}{row.rightPath ? "↷" : ""}</div>
               {/if}
               {#if side}
-                <div class="side">
+                <!-- svelte-ignore a11y_no_static_element_interactions -->
+                <div class="side" data-side={i === 0 ? "left" : "right"} onmousedown={() => (activeSide = i === 0 ? "left" : "right")} oncontextmenu={(e) => { e.preventDefault(); rowMenu(row.path, i === 0 ? "left" : "right", e.clientX, e.clientY); }}>
                   <span class="name" style:padding-left="{row.depth * 16}px">
                     {#if row.container}
                       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -959,7 +1022,8 @@
                   <span class="num">{formatTime(side.mtime)}</span>
                 </div>
               {:else}
-                <div class="side filler"></div>
+                <!-- svelte-ignore a11y_no_static_element_interactions -->
+                <div class="side filler" data-side={i === 0 ? "left" : "right"} onmousedown={() => (activeSide = i === 0 ? "left" : "right")} oncontextmenu={(e) => { e.preventDefault(); rowMenu(row.path, i === 0 ? "left" : "right", e.clientX, e.clientY); }}></div>
               {/if}
             {/each}
           </div>
@@ -974,13 +1038,7 @@
       <button class="small" onclick={() => api.cancelCompare(session.id)}>Cancel</button>
     {:else if result && counts}
       {@const s = result.summary}
-      <span><b>{counts.files.toLocaleString()}</b> files</span>
-      <span class="c-same">{counts.same.toLocaleString()} same</span>
-      {#if counts.similar}<span class="c-similar" title="Equal content, different bytes">{counts.similar.toLocaleString()} similar</span>{/if}
-      <span class="c-diff">{counts.different.toLocaleString()} different</span>
-      <span class="c-left">{counts.leftOnly.toLocaleString()} left only</span>
-      <span class="c-right">{counts.rightOnly.toLocaleString()} right only</span>
-      {#if counts.errors}<span class="c-err">{counts.errors} errors</span>{/if}
+      <span>Showing <b>{matchingFiles.toLocaleString()}</b> of <b>{counts.files.toLocaleString()}</b> files</span>
       <span>compared in <b>{s.elapsedMs < 1000 ? `${s.elapsedMs} ms` : `${(s.elapsedMs / 1000).toFixed(2)} s`}</b>{s.identicalSubtrees ? ` · ${s.identicalSubtrees.toLocaleString()} identical folders skipped via Git tree ids` : ""}</span>
     {/if}
     {#if busy}<span>{busy}</span>{/if}
@@ -992,7 +1050,7 @@
     {#if error}<span class="c-err" title={error}>{error}</span>{/if}
   </div>
   {#if menu}
-    <Menu items={menu.items} x={menu.x} y={menu.y} onClose={() => (menu = null)} />
+    <Menu items={menu.items} context={menu.context} x={menu.x} y={menu.y} returnFocus={viewport} onClose={() => (menu = null)} />
   {/if}
 </div>
 
@@ -1012,6 +1070,9 @@
     background: var(--panel);
     border-bottom: 1px solid var(--line);
   }
+  .filter-scope { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 4px 10px; background: var(--panel-2); color: var(--dim); font-size: 11px; border-bottom: 1px solid var(--line); }
+  .filter-scope strong { color: var(--accent); font-weight: 600; }
+  .filter-scope button { font-size: 11px; padding: 0 6px; }
   .check {
     display: flex;
     gap: 4px;
@@ -1183,18 +1244,6 @@
   }
   .small {
     padding: 0 8px;
-  }
-  .c-diff {
-    color: var(--diff);
-  }
-  .c-similar {
-    color: var(--similar);
-  }
-  .c-left {
-    color: var(--left-only);
-  }
-  .c-right {
-    color: var(--right-only);
   }
   .c-err {
     color: var(--error);

@@ -5,6 +5,7 @@
   import {
     api,
     defaultDiffOptions,
+    sourceText,
     END,
     theme,
     type EditInfo,
@@ -19,6 +20,9 @@
     type View,
   } from "./api";
   import ImagePanel from "./ImagePanel.svelte";
+  import FilterBar, { type CountFilter } from "./FilterBar.svelte";
+  import { RowProjection, type RowFilter } from "./rowFilter";
+  import Menu, { type MenuItem, type MenuContext } from "./Menu.svelte";
   import type { Command } from "./commands";
   import Dropdown from "./Dropdown.svelte";
   import Nav, { type NavActions } from "./Nav.svelte";
@@ -89,6 +93,7 @@
   let canRedo = $state(false);
   /** The side that keyboard commands (Enter, copy) act on: the last one clicked. */
   let activeSide = $state<0 | 1>(1);
+  let menu = $state<{ x: number; y: number; items: MenuItem[]; context: MenuContext } | null>(null);
   /** The line being typed in: its row, and its line number (null in a filler row). */
   let editing = $state<{ side: 0 | 1; row: number; line: number | null } | null>(null);
   let draft = $state("");
@@ -102,6 +107,7 @@
   let changedOnDisk = $state(false);
   // Edits run one after another, in the order they were made.
   let queue: Promise<unknown> = Promise.resolve();
+  let applied: Promise<void> = Promise.resolve();
   /** Edits sent and not answered yet. */
   let unanswered = $state(0);
   /** An edit that moves the caret is on its way; the editor waits for where it goes. */
@@ -128,7 +134,55 @@
   /** The current match should be scrolled into view sideways once its row is drawn. */
   let revealHitWanted = false;
 
+  let rowFilter = $state<RowFilter>("all");
   const total = $derived(info?.rows ?? 0);
+  const projection = $derived(new RowProjection(info?.rowRuns ?? [], rowFilter));
+  const displayTotal = $derived(projection.length);
+  const rowFilters = $derived<CountFilter[]>([
+    { id: "all", label: "All rows", count: total },
+    { id: "diffs", label: "All differences", count: (info?.stats.changed ?? 0) + (info?.stats.added ?? 0) + (info?.stats.removed ?? 0), tone: "different" },
+    { id: "equal", label: "Same", count: total - (info?.stats.changed ?? 0) - (info?.stats.added ?? 0) - (info?.stats.removed ?? 0) - (info?.stats.minor ?? 0), tone: "same" },
+    { id: "minor", label: "Ignored", count: info?.stats.minor ?? 0, title: "Rows differing only in ignored whitespace or case", tone: "similar" },
+    { id: "changed", label: "Changed", count: info?.stats.changed ?? 0, tone: "different" },
+    { id: "removed", label: "Removed (left only)", count: info?.stats.removed ?? 0, tone: "left" },
+    { id: "added", label: "Added (right only)", count: info?.stats.added ?? 0, tone: "right" },
+  ]);
+  const projectedSections = $derived.by(() => {
+    const out: { index: number; start: number; end: number; source: number }[] = [];
+    for (const [index, s] of (info?.sections ?? []).entries()) {
+      const start = projection.position(s.start), end = projection.position(s.end);
+      if (end > start) out.push({ index, start, end, source: projection.source(start)! });
+    }
+    return out;
+  });
+
+  async function setRowFilter(id: RowFilter) {
+    if (!info || loading || awaiting) return;
+    const diff = info.id;
+    if (editing && draft !== original) commit(draft, null);
+    await queue;
+    await applied;
+    if (info?.id !== diff || destroyed) return;
+    editing = null;
+    menu = null;
+    rowFilter = id;
+    anchor = null;
+    selected = projection.source(0);
+    section = -1;
+    scrollTop = 0;
+    if (viewport) viewport.scrollTop = 0;
+    ensureLoaded();
+  }
+
+  const sectionOrdinals = $derived(new Map(projectedSections.map((s, i) => [s.index, i])));
+
+  /** Editing and range selections use full context, so hidden lines cannot be changed unseen. */
+  function showAllRows() {
+    if (rowFilter === "all") return;
+    rowFilter = "all";
+    tick().then(() => { if (selected !== null) reveal(selected); });
+  }
+
   /** Matches by row and side, for drawing. */
   const hitsAt = $derived.by(() => {
     const map = new Map<number, Hit[]>();
@@ -143,21 +197,21 @@
   const currentHit = $derived(hitIndex >= 0 ? hits[hitIndex] : undefined);
   /** Rows with matches for the overview, at most one mark per pixel or so. */
   const hitMarks = $derived.by(() => {
-    if (!total) return [];
+    if (!displayTotal) return [];
     const buckets = new Set<number>();
-    for (const h of hits) buckets.add(Math.floor((h.row / total) * 600));
+    for (const h of hits) if (projection.contains(h.row)) buckets.add(Math.floor((projection.position(h.row) / displayTotal) * 600));
     return [...buckets].map((b) => b / 600);
   });
   // Very long files scroll through a scaled spacer (see vscroll.ts); `vTop`
   // is the scroll position in row pixels.
-  const scale = $derived(scrollScale(total * ROW, viewHeight));
+  const scale = $derived(scrollScale(displayTotal * ROW, viewHeight));
   const vTop = $derived(scrollTop * scale);
   const first = $derived(Math.max(0, Math.floor(vTop / ROW) - 20));
-  const last = $derived(Math.min(total, first + Math.ceil(viewHeight / ROW) + 40));
+  const last = $derived(Math.min(displayTotal, first + Math.ceil(viewHeight / ROW) + 40));
   const visible = $derived.by(() => {
     void cacheVersion;
     const out: { index: number; row: RowView | undefined }[] = [];
-    for (let i = first; i < last; i++) out.push({ index: i, row: cache.get(i) });
+    for (let i = first; i < last; i++) { const index = projection.source(i)!; out.push({ index, row: cache.get(index) }); }
     return out;
   });
   const selectedRow = $derived.by(() => {
@@ -182,13 +236,13 @@
    */
   const sectionMarks = $derived.by(() => {
     const marks: { top: number; height: number }[] = [];
-    if (!info || !total) return marks;
+    if (!info || !displayTotal) return marks;
     const B = 1000;
     let from = -1;
     let to = -1;
-    for (const s of info.sections) {
-      const a = Math.floor((s.start / total) * B);
-      const b = Math.max(a + 1, Math.ceil((s.end / total) * B));
+    for (const s of projectedSections) {
+      const a = Math.floor((s.start / displayTotal) * B);
+      const b = Math.max(a + 1, Math.ceil((s.end / displayTotal) * B));
       if (a <= to) to = Math.max(to, b);
       else {
         if (from >= 0) marks.push({ top: from / B, height: (to - from) / B });
@@ -208,20 +262,22 @@
     if (!info) return { above: 0, shown: -1 };
     const top = Math.floor(vTop / ROW);
     const bottom = top + Math.max(1, Math.floor(viewHeight / ROW));
-    const onScreen = (i: number) => info!.sections[i].end > top && info!.sections[i].start < bottom;
-    // The first section that ends below the top of the view.
-    let lo = 0;
-    let hi = info.sections.length;
+    const onScreen = (s: { start: number; end: number }) => s.end > top && s.start < bottom;
+    let lo = 0, hi = projectedSections.length;
     while (lo < hi) {
       const mid = (lo + hi) >> 1;
-      if (info.sections[mid].end <= top) lo = mid + 1;
+      if (projectedSections[mid].end <= top) lo = mid + 1;
       else hi = mid;
     }
-    if (section >= 0 && section < info.sections.length && onScreen(section)) return { above: lo, shown: section };
-    return { above: lo, shown: lo < info.sections.length && onScreen(lo) ? lo : -1 };
+    const ordinal = sectionOrdinals.get(section);
+    const current = ordinal === undefined ? undefined : projectedSections[ordinal];
+    if (current && onScreen(current)) return { above: lo, shown: current.index };
+    const first = projectedSections[lo];
+    return { above: lo, shown: first && onScreen(first) ? first.index : -1 };
   });
   const shownSection = $derived(viewSections.shown);
-  const sectionStarts = $derived(new Map((info?.sections ?? []).map((s, i) => [s.start, i])));
+  const shownOrdinal = $derived(sectionOrdinals.get(shownSection) ?? -1);
+  const sectionStarts = $derived(new Map(projectedSections.map((s) => [s.source, s.index])));
   /** The section the toolbar's copy buttons act on. */
   const currentSection = $derived.by(() => {
     if (!info) return -1;
@@ -229,7 +285,7 @@
       const i = info.sections.findIndex((s) => s.start <= selected! && selected! < s.end);
       if (i >= 0) return i;
     }
-    return section;
+    return sectionOrdinals.has(section) ? section : -1;
   });
 
   $effect(() => onDirty?.(anyDirty));
@@ -253,6 +309,7 @@
   }
 
   async function load(keepPosition = false) {
+    menu = null;
     const run = ++loads;
     loading = true;
     error = "";
@@ -290,6 +347,7 @@
   }
 
   function resetRows() {
+    menu = null;
     cache = new Map();
     pending = new Set();
     loaded = new Set();
@@ -328,9 +386,10 @@
 
   /** Drops the loaded chunks farthest from the view, so memory stays bounded in huge files. */
   function evict() {
-    const here = Math.floor(first / CHUNK);
+    const here = Math.floor((projection.source(first) ?? 0) / CHUNK);
     const far = [...loaded].sort((a, b) => Math.abs(b - here) - Math.abs(a - here));
-    for (const chunk of far.slice(0, loaded.size - KEEP_CHUNKS)) {
+    const wanted = new Set(wantedChunks());
+    for (const chunk of far.filter((c) => !wanted.has(c)).slice(0, Math.max(0, loaded.size - KEEP_CHUNKS))) {
       loaded.delete(chunk);
       pending.delete(chunk);
       for (let i = chunk * CHUNK; i < (chunk + 1) * CHUNK; i++) cache.delete(i);
@@ -339,21 +398,22 @@
 
   /** The chunks to load, most needed first: those on screen, then their neighbours. */
   function wantedChunks(): number[] {
-    const from = Math.floor(first / CHUNK);
-    const to = Math.floor(Math.max(first, last - 1) / CHUNK);
     const list: number[] = [];
     if (caretWanted) {
-      // The caret's chunk and those around it, where `placeCaret` looks for its line.
       const c = Math.floor(caretWanted.hint / CHUNK);
       list.push(c);
       if ((c + 1) * CHUNK < total) list.push(c + 1);
       if (c > 0) list.push(c - 1);
     }
-    for (let c = from; c <= to; c++) list.push(c);
-    // So that scrolling on finds its rows loaded already.
-    if ((to + 1) * CHUNK < total) list.push(to + 1);
-    if (from > 0) list.push(from - 1);
-    return list;
+    for (let i = first; i < last; i++) {
+      const row = projection.source(i);
+      if (row !== null) list.push(Math.floor(row / CHUNK));
+    }
+    for (const i of [first - CHUNK, last + CHUNK]) {
+      const row = projection.source(i);
+      if (row !== null) list.push(Math.floor(row / CHUNK));
+    }
+    return [...new Set(list)];
   }
 
   function ensureLoaded() {
@@ -377,11 +437,11 @@
   }
 
   function goTo(i: number) {
-    if (!info || !viewport || !info.sections.length) return;
-    section = Math.max(0, Math.min(info.sections.length - 1, i));
-    const start = info.sections[section].start;
-    selected = start;
-    scrollToV((start - 3) * ROW);
+    if (!info || !viewport || !projectedSections.length) return;
+    const target = projectedSections.find((s) => s.index >= i) ?? projectedSections[projectedSections.length - 1];
+    section = target.index;
+    selected = target.source;
+    scrollToV((target.start - 3) * ROW);
     revealMarkWanted = true;
   }
 
@@ -420,21 +480,21 @@
   });
 
   function next(dir: 1 | -1) {
-    if (!info?.sections.length) return;
-    // After scrolling away from the difference moved to, Next and Prev go on from the view.
-    if (section === -1 || shownSection !== section) {
+    if (!projectedSections.length) return;
+    const current = sectionOrdinals.get(section) ?? -1;
+    let at: number;
+    if (current < 0 || shownSection !== section) {
       const top = Math.floor(vTop / ROW);
-      const idx = info.sections.findIndex((s) => s.start > top);
-      goTo(dir === 1 ? (idx === -1 ? info.sections.length - 1 : idx) : Math.max(0, (idx === -1 ? info.sections.length : idx) - 1));
-    } else {
-      goTo(section + dir);
-    }
+      const idx = projectedSections.findIndex((s) => s.start > top);
+      at = dir === 1 ? (idx === -1 ? projectedSections.length - 1 : idx) : Math.max(0, (idx === -1 ? projectedSections.length : idx) - 1);
+    } else at = Math.max(0, Math.min(projectedSections.length - 1, current + dir));
+    goTo(projectedSections[at].index);
   }
 
-  /** Scrolls a row into view if it is not visible. */
+  /** Scrolls an original row into the filtered viewport. */
   function reveal(row: number) {
-    if (!viewport) return;
-    const top = row * ROW;
+    if (!viewport || !projection.contains(row)) return;
+    const top = projection.position(row) * ROW;
     if (top < vTop || top + ROW > vTop + viewHeight) scrollToV(top - viewHeight / 3);
   }
 
@@ -496,8 +556,15 @@
    * Shows the result of an edit. The rows on screen are fetched first and swapped
    * in together with the new layout, so the view never shows empty rows meanwhile.
    */
-  async function applyEdit(e: EditInfo | undefined) {
+  function applyEdit(e: EditInfo | undefined): Promise<void> {
+    applied = showEdit(e);
+    return applied;
+  }
+
+  async function showEdit(e: EditInfo | undefined) {
     if (!e || !info) return;
+    showAllRows();
+    menu = null;
     const id = info.id;
     const token = ++swapToken;
     const top = Math.max(0, Math.floor(vTop / ROW) - 20);
@@ -515,6 +582,7 @@
       ...info,
       rows: e.rows,
       sections: e.sections,
+      rowRuns: e.rowRuns,
       stats: e.stats,
       identical: e.identical,
       note: null,
@@ -591,6 +659,7 @@
       error = "This line is too long to edit here.";
       return;
     }
+    showAllRows();
     activeSide = side;
     selected = index;
     editing = { side, row: index, line: line ? line.n : null };
@@ -831,6 +900,7 @@
 
   function copySection(i: number, to: 0 | 1) {
     if (!info || i < 0 || !editable[to]) return;
+    showAllRows();
     const s = info.sections[i];
     const id = info.id;
     editing = null;
@@ -844,18 +914,109 @@
   }
 
   /** Copies the selected lines of the active side, and with `cut` deletes them. */
-  async function copyLines(cut: boolean) {
-    const r = lineRange;
+  async function copyLines(cut: boolean, side = activeSide, r = lineRange) {
     if (!info || !r) return;
     const id = info.id;
     try {
-      const text = await api.rowsText(id, SIDE_NAMES[activeSide], r[0], r[1]);
+      const text = await api.rowsText(id, SIDE_NAMES[side], r[0], r[1]);
       if (!text) return;
       await navigator.clipboard.writeText(text);
       if (cut) replaceLines("", true);
     } catch (e) {
       error = String(e);
     }
+  }
+
+  /** Keep the native text menu while typing into the editor. Diff rows have their own menu. */
+  function rowContext(e: MouseEvent, index: number) {
+    if (editing || waiting() || unanswered || loading || !info) return;
+    const target = (e.target as Element).closest<HTMLElement>(".code[data-side], .ln[data-side]");
+    if (!target) return;
+    e.preventDefault();
+    const side = target.dataset.side === "left" ? 0 : 1;
+    const selection = window.getSelection();
+    const cellOf = (node: Node | null) => (node instanceof Element ? node : node?.parentElement)?.closest<HTMLElement>(".code[data-side]");
+    const from = cellOf(selection?.anchorNode ?? null), to = cellOf(selection?.focusNode ?? null);
+    const text = selection && !selection.isCollapsed && from?.dataset.side === target.dataset.side && to?.dataset.side === target.dataset.side
+      && selection.getRangeAt(0).intersectsNode(target) ? selection.toString() : "";
+    if (!text) selection?.removeAllRanges();
+    rowMenu(index, side, e.clientX, e.clientY, text);
+  }
+
+  function rowMenu(index: number, side: 0 | 1, x: number, y: number, selectedText = "") {
+    if (!info || !cache.has(index) || editing || waiting() || unanswered || loading) return;
+    if (activeSide !== side || !lineRange || index < lineRange[0] || index >= lineRange[1]) {
+      anchor = null;
+      selected = index;
+    }
+    activeSide = side;
+    const range: [number, number] = lineRange ? [...lineRange] : [index, index + 1];
+    const many = range[1] - range[0] > 1;
+    const name = SIDE_NAMES[side], other = SIDE_NAMES[1 - side], destination = (1 - side) as 0 | 1;
+    const source = side === 0 ? session.left : session.right;
+    const line = lineOf(side, cache.get(index));
+    const at = info.sections.findIndex((s) => s.start <= index && index < s.end);
+    const id = info.id, epoch = generation;
+    const run = (action: () => void) => () => {
+      if (info?.id === id && generation === epoch && !waiting() && !unanswered
+        && activeSide === side && lineRange?.[0] === range[0] && lineRange[1] === range[1]) action();
+    };
+    const items: MenuItem[] = [{
+      label: `Copy difference to ${other} ${side === 0 ? "→" : "←"}`,
+      detail: at < 0 ? "No difference at this line" : !editable[destination] ? `The ${other} side is read-only in this view` : `Replaces the ${other}-hand difference`,
+      keys: side === 0 ? "Alt+→" : "Alt+←", tone: "primary",
+      disabled: at < 0 || !editable[destination], run: run(() => copySection(at, destination)),
+    }, "separator", {
+      label: selectedText ? "Copy selected text" : many ? "Copy selected lines" : "Copy line to clipboard",
+      keys: "Ctrl+C", disabled: !selectedText && !many && !line,
+      run: run(() => selectedText ? copyText(selectedText) : copyLines(false, side, range)),
+    }, {
+      label: "Select all lines", keys: "Ctrl+A", run: run(() => { showAllRows(); window.getSelection()?.removeAllRanges(); anchor = 0; selected = total - 1; }),
+    }, "separator"];
+    const reason = editable[side] ? undefined : `The ${name} side is read-only in this view`;
+    items.push({
+      label: "Edit line…", keys: "F2", detail: reason ?? (many ? "Select a single line to edit" : line?.x || line?.o ? "This line is too long to edit here" : undefined),
+      disabled: !editable[side] || many || !!line?.x || !!line?.o,
+      run: run(() => { anchor = null; openEditor(side, index); }),
+    }, {
+      label: many ? `Delete selected lines on ${name}` : `Delete ${name} line`,
+      detail: reason, tone: "danger", disabled: !editable[side] || (!many && !line),
+      run: run(() => replaceLines("", true)),
+    });
+    if (dirty[side] && editable[side]) items.push({ label: `Save ${name} file`, run: run(() => save([side])) });
+    items.push("separator", { label: "Copy file path", run: () => copyFilePath(side) }, { label: "Find in both files…", keys: "Ctrl+F", run: openFind });
+    const atLine = line ? `Line ${line.n + 1}` : `No line on the ${name}`;
+    const where = many ? `${atLine} · ${range[1] - range[0]} comparison rows selected` : atLine;
+    menu = { x, y, items, context: {
+      side: name, title: path.split("/").pop() || source.display.split(/[\\/]/).pop() || source.display,
+      detail: `${source.display}${path ? ` › ${path}` : ""}\n${where}`, badge: editable[side] ? "Editable" : "Read-only",
+    } };
+  }
+
+  async function copyText(text: string) {
+    try { await navigator.clipboard.writeText(text); } catch (e) { error = String(e); }
+  }
+
+  async function copyFilePath(side: 0 | 1) {
+    try { await copyText(sourceText(await api.sideSource(session.id, side === 0, path))); }
+    catch (e) { error = String(e); }
+  }
+
+  async function keyboardMenu() {
+    if (!info || selected === null || !viewport) return;
+    const id = info.id, index = selected, side = activeSide, epoch = generation;
+    try {
+      // Ctrl+A can leave the current row outside the rendered window.
+      if (!cache.has(index)) {
+        const [row] = await api.fileRows(id, index, 1, theme());
+        if (info?.id !== id || selected !== index || activeSide !== side || generation !== epoch || !row) return;
+        cache.set(index, row);
+        cacheVersion++;
+      }
+      const r = viewport.getBoundingClientRect();
+      const y = Math.max(r.top, Math.min(r.bottom - ROW, r.top + projection.position(index) * ROW - vTop)) + ROW;
+      rowMenu(index, side, r.left + (side === 0 ? 40 : r.width / 2 + 40), y);
+    } catch (e) { error = String(e); }
   }
 
   /** Replaces the selected lines of the active side, or inserts before the current one. */
@@ -957,10 +1118,11 @@
     const group = "Text";
     const text = !!info && info.view !== "image";
     const list: Command[] = [
-      { group, title: "Previous difference", keys: "F7", enabled: text && !!info?.sections.length, run: () => next(-1) },
-      { group, title: "Next difference", keys: "F8", enabled: text && !!info?.sections.length, run: () => next(1) },
+      { group, title: "Previous difference", keys: "F7", enabled: text && !!projectedSections.length, run: () => next(-1) },
+      { group, title: "Next difference", keys: "F8", enabled: text && !!projectedSections.length, run: () => next(1) },
       { group, title: "Find in both files", keys: "Ctrl+F", enabled: text, run: openFind },
     ];
+    if (text) list.push(...rowFilters.map((f) => ({ group, title: `Show: ${f.label}`, run: () => setRowFilter(f.id as RowFilter) })));
     if (onSwap) list.push({ group, title: "Swap left and right", run: onSwap });
     if (editable[0] || editable[1]) {
       list.push(
@@ -1102,13 +1264,13 @@
   function showHit(i: number) {
     const h = hits[i];
     if (!h) return;
+    if (!projection.contains(h.row)) showAllRows();
     hitIndex = i;
     selected = h.row;
     activeSide = h.side;
     section = -1;
     if (viewport) {
-      const top = h.row * ROW;
-      if (top < vTop || top + ROW > vTop + viewHeight) scrollToV(top - viewHeight / 3);
+      tick().then(() => reveal(h.row));
     }
     revealHitWanted = true;
     tick().then(revealHitSideways);
@@ -1192,6 +1354,11 @@
     // Keys typed into the line editor.
     if (e.target instanceof HTMLInputElement || holdKey(e)) return;
     const mod = e.ctrlKey || e.metaKey;
+    if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
+      keyboardMenu();
+      e.preventDefault();
+      return;
+    }
     // Typing on a selected line of an editable side edits it, from its end.
     if (e.key.length === 1 && !mod && !e.altKey && selected !== null && editable[activeSide]) {
       e.preventDefault();
@@ -1213,6 +1380,7 @@
     else if (mod && (e.key === "y" || (e.key === "Z" && e.shiftKey) || (e.key === "z" && e.shiftKey))) redo();
     else if (mod && e.key === "s") save();
     else if (mod && e.key.toLowerCase() === "a" && total) {
+      showAllRows();
       anchor = 0;
       selected = total - 1;
     } else if (mod && e.key === "c" && selected !== null && !textSelected()) copyLines(false);
@@ -1221,21 +1389,23 @@
       replaceLines("", true);
     else if ((e.key === "Enter" || e.key === "F2") && selected !== null) openEditor(activeSide, selected);
     else if (e.key === "ArrowDown" && selected !== null) {
+      if (e.shiftKey) showAllRows();
       anchor = e.shiftKey ? (anchor ?? selected) : null;
-      selected = Math.min(total - 1, selected + 1);
+      selected = projection.source(Math.min(displayTotal - 1, projection.position(selected) + 1)) ?? selected;
       reveal(selected);
     } else if (e.key === "ArrowUp" && selected !== null) {
+      if (e.shiftKey) showAllRows();
       anchor = e.shiftKey ? (anchor ?? selected) : null;
-      selected = Math.max(0, selected - 1);
+      selected = projection.source(Math.max(0, projection.position(selected) - 1)) ?? selected;
       reveal(selected);
     } else if (e.key === "PageDown" || e.key === "PageUp") {
       const page = Math.max(1, Math.floor(viewHeight / ROW) - 2) * (e.key === "PageDown" ? 1 : -1);
-      if (selected !== null) selected = Math.max(0, Math.min(total - 1, selected + page));
+      if (selected !== null) selected = projection.source(Math.max(0, Math.min(displayTotal - 1, projection.position(selected) + page))) ?? selected;
       scrollToV(vTop + page * ROW);
     } else if (e.key === "Home" || e.key === "End") {
       const end = e.key === "End";
-      if (selected !== null) selected = end ? total - 1 : 0;
-      scrollToV(end ? total * ROW : 0);
+      if (selected !== null) selected = projection.source(end ? displayTotal - 1 : 0);
+      scrollToV(end ? displayTotal * ROW : 0);
     } else return;
     e.preventDefault();
   }
@@ -1253,9 +1423,9 @@
   }
 
   function overviewClick(e: MouseEvent) {
-    if (!viewport || !total) return;
+    if (!viewport || !displayTotal) return;
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    const row = Math.floor(((e.clientY - rect.top) / rect.height) * total);
+    const row = Math.floor(((e.clientY - rect.top) / rect.height) * displayTotal);
     scrollToV(row * ROW - viewHeight / 2);
     section = -1;
   }
@@ -1361,17 +1531,17 @@
       </Dropdown>
     {/if}
 {#if info?.view !== "image"}
-    <button onclick={() => next(-1)} disabled={!info?.sections.length} title="Previous difference (F7)">◀ Prev</button>
-    <button onclick={() => next(1)} disabled={!info?.sections.length} title="Next difference (F8)">Next ▶</button>
+    <button onclick={() => next(-1)} disabled={!projectedSections.length} title="Previous difference (F7)">◀ Prev</button>
+    <button onclick={() => next(1)} disabled={!projectedSections.length} title="Next difference (F8)">Next ▶</button>
     {#if info}
-      <span class="count" title={shownSection >= 0 || !info.sections.length ? undefined : "No difference on screen; the view is between these two"}
+      <span class="count" title={shownSection >= 0 || !projectedSections.length ? undefined : "No difference on screen; the view is between these two"}
         >{shownSection >= 0
-          ? shownSection + 1
+          ? shownOrdinal + 1
           : viewSections.above === 0
             ? "–"
-            : viewSections.above < info.sections.length
+            : viewSections.above < projectedSections.length
               ? `${viewSections.above}–${viewSections.above + 1}`
-              : `${viewSections.above}›`} / {info.sections.length}</span
+              : `${viewSections.above}›`} / {projectedSections.length}</span
       >
     {/if}
     {#if editable[0] || editable[1]}
@@ -1412,6 +1582,18 @@
     {/if}
   </div>
 
+  {#if info && info.view !== "image"}
+    <FilterBar items={rowFilters} value={rowFilter} onSelect={(id) => setRowFilter(id as RowFilter)} disabled={loading || awaiting}
+      hint={rowFilter !== "all" ? "Editing and range selections show all rows" : ""} />
+    {#if rowFilter !== "all"}
+      <div class="filter-scope">
+        <strong>{rowFilters.find((f) => f.id === rowFilter)?.label}</strong>
+        <span>· {displayTotal.toLocaleString()} matching rows · Original line numbers</span>
+        <button onclick={() => setRowFilter("all")}>Show all</button>
+      </div>
+    {/if}
+  {/if}
+
   {#if findOpen && info?.view !== "image"}
     <div class="findbar">
       <input
@@ -1422,6 +1604,7 @@
         oninput={searchSoon}
         onkeydown={findKey}
         placeholder="Find in both files"
+        title="Searches all rows; revealing a hidden match switches to All rows"
         spellcheck="false"
       />
       <button class="opt" class:on={findOptions.matchCase} onclick={() => toggle("matchCase")} title="Match case">Aa</button>
@@ -1480,14 +1663,14 @@
   <div class="body">
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <div class="overview" onclick={overviewClick} title="Overview: click to jump">
-      {#if info && total}
+      {#if info && displayTotal}
         {#each sectionMarks as m, i (i)}
           <i style:top="{m.top * 100}%" style:height="max(2px, {m.height * 100}%)"></i>
         {/each}
         {#each hitMarks as m (m)}
           <em style:top="{m * 100}%"></em>
         {/each}
-        <b style:top="{((vTop / ROW) / total) * 100}%" style:height="{Math.min(100, (viewHeight / ROW / total) * 100)}%"></b>
+        <b style:top="{((vTop / ROW) / displayTotal) * 100}%" style:height="{Math.min(100, (viewHeight / ROW / displayTotal) * 100)}%"></b>
       {/if}
     </div>
     <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
@@ -1502,11 +1685,14 @@
       tabindex="0"
       role="grid"
     >
-      <div class="spacer" style:height="{spacerHeight(total * ROW)}px">
+      {#if info && !displayTotal && rowFilter !== "all" && !loading}
+        <div class="filter-empty">No rows match this filter. <button onclick={() => setRowFilter("all")}>Show all rows</button></div>
+      {/if}
+      <div class="spacer" style:height="{spacerHeight(displayTotal * ROW)}px">
         <div class="window" style:transform="translateY({windowOffset(scrollTop, scale, first, ROW)}px)">
           {#each visible as { index, row } (index)}
             <!-- svelte-ignore a11y_click_events_have_key_events -->
-            <div class="row {row?.k ?? 'equal'}" class:loading={!row} class:cur={index === selected} role="row" tabindex="-1" onmousedown={(e) => e.shiftKey && e.preventDefault()} onclick={(e) => { anchor = e.shiftKey && selected !== null ? (anchor ?? selected) : null; selected = index; keepFocus(); }}>
+            <div class="row {row?.k ?? 'equal'}" class:loading={!row} class:cur={index === selected} role="row" tabindex="-1" oncontextmenu={(e) => rowContext(e, index)} onmousedown={(e) => e.shiftKey && e.preventDefault()} onclick={(e) => { if (e.shiftKey) showAllRows(); anchor = e.shiftKey && selected !== null ? (anchor ?? selected) : null; selected = index; keepFocus(); }}>
               {#each [row?.l, row?.r] as line, side (side)}
                 {@const s = side as 0 | 1}
                 {#if side === 1}
@@ -1536,14 +1722,14 @@
                   </div>
                 {:else if line}
                   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                  <div class="ln" onclick={() => (activeSide = s)}>{line.n + 1}</div>
+                  <div class="ln" data-side={SIDE_NAMES[s]} onclick={() => (activeSide = s)}>{line.n + 1}</div>
                   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                  <div class="code" class:editable={editable[s]} class:sel={anchor !== null && s === activeSide && lineRange && index >= lineRange[0] && index < lineRange[1]} onclick={(e) => clickCode(e, s, index)}><span class="text" style:transform="translateX({-hscroll}px)">{#if line.o}<span class="cut lead" title="The start of the line is left out, so its first change shows">{line.o.toLocaleString()} characters …</span>{/if}{#each segments(line, hitsAt.get(index * 2 + s)) as seg, si (si)}<span class:mk={seg.mark} class:hit={seg.hit} class:now={seg.now} style:color={seg.now ? null : seg.color}>{seg.text}</span>{/each}</span>{#if line.nn}<span class="cut" title="The other file ends with a line break">no line break at end</span>{/if}{#if line.x}<span class="cut" title="The line is cut for display">… {line.x.toLocaleString()} more characters</span>{/if}</div>
+                  <div class="code" data-side={SIDE_NAMES[s]} class:editable={editable[s]} class:sel={anchor !== null && s === activeSide && lineRange && index >= lineRange[0] && index < lineRange[1]} onclick={(e) => clickCode(e, s, index)}><span class="text" style:transform="translateX({-hscroll}px)">{#if line.o}<span class="cut lead" title="The start of the line is left out, so its first change shows">{line.o.toLocaleString()} characters …</span>{/if}{#each segments(line, hitsAt.get(index * 2 + s)) as seg, si (si)}<span class:mk={seg.mark} class:hit={seg.hit} class:now={seg.now} style:color={seg.now ? null : seg.color}>{seg.text}</span>{/each}</span>{#if line.nn}<span class="cut" title="The other file ends with a line break">no line break at end</span>{/if}{#if line.x}<span class="cut" title="The line is cut for display">… {line.x.toLocaleString()} more characters</span>{/if}</div>
                 {:else if row}
                   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                  <div class="ln fill" onclick={() => (activeSide = s)}></div>
+                  <div class="ln fill" data-side={SIDE_NAMES[s]} onclick={() => (activeSide = s)}></div>
                   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                  <div class="code fill" class:sel={anchor !== null && s === activeSide && lineRange && index >= lineRange[0] && index < lineRange[1]} onclick={(e) => clickCode(e, s, index)}></div>
+                  <div class="code fill" data-side={SIDE_NAMES[s]} class:sel={anchor !== null && s === activeSide && lineRange && index >= lineRange[0] && index < lineRange[1]} onclick={(e) => clickCode(e, s, index)}></div>
                 {:else}
                   <div class="ln"></div>
                   <div class="code"></div>
@@ -1567,16 +1753,18 @@
     {/each}
   </div>
 
+  {#if menu}
+    <Menu items={menu.items} context={menu.context} x={menu.x} y={menu.y} returnFocus={viewport} onClose={() => (menu = null)} />
+  {/if}
+
   <div class="status">
     {#if loading}
       <span>Comparing…</span>
     {:else if info?.view === "image"}
       <span>{info.views.find((v) => v.id === info?.view)?.label}</span>
     {:else if info}
-      <span><b>{info.sections.length}</b> difference sections</span>
-      <span class="c-diff">{info.stats.changed} changed</span>
-      <span class="c-add">{info.stats.added} added</span>
-      <span class="c-rem">{info.stats.removed} removed</span>
+      <span>Showing <b>{displayTotal.toLocaleString()}</b> of <b>{total.toLocaleString()}</b> rows</span>
+      <span><b>{projectedSections.length.toLocaleString()}</b> of {info.sections.length.toLocaleString()} difference sections</span>
       {#if selected !== null}<span>Row {selected + 1} of {total}</span>{/if}
       <span>{info.view === "text" ? (info.syntax ?? "Plain text") : info.views.find((v) => v.id === info?.view)?.label}</span>
       {#if busy}<span>{busy}</span>{/if}
@@ -1592,6 +1780,10 @@
     height: 100%;
     min-height: 0;
   }
+  .filter-scope { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 4px 10px; background: var(--panel-2); color: var(--dim); font-size: 11px; border-bottom: 1px solid var(--line); }
+  .filter-scope strong { color: var(--accent); font-weight: 600; }
+  .filter-scope button, .filter-empty button { font-size: 11px; padding: 0 6px; }
+  .filter-empty { padding: 30px; color: var(--dim); text-align: center; }
   .toolbar {
     display: flex;
     flex-wrap: wrap;
@@ -1894,15 +2086,6 @@
   }
   .status b {
     color: var(--text);
-  }
-  .c-diff {
-    color: var(--diff);
-  }
-  .c-add {
-    color: var(--right-only);
-  }
-  .c-rem {
-    color: var(--left-only);
   }
   .hint {
     margin-left: auto;

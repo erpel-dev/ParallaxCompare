@@ -8,9 +8,9 @@ A fast side-by-side folder and file compare tool for Windows and Linux, in the s
 - a Git revision against the working tree
 - archives nested inside folders, inside other archives, or stored in a Git commit, which expand like folders
 
-![Folder compare: Git branch against Git branch, with a zip archive expanded inline](docs/screenshots/folder-compare.png)
+![Folder comparison with clickable status counts, left-only and right-only files, and a ZIP archive expanded inline](docs/screenshots/folder-compare.png)
 
-![Text compare with syntax highlighting and changed characters marked within each line](docs/screenshots/text-compare.png)
+![Text comparison with clickable row counts, C++ syntax highlighting and changed characters marked within each line](docs/screenshots/text-compare.png)
 
 The design rationale, the GUI mockups and a comparison with existing tools are in [docs/concept.html](docs/concept.html).
 
@@ -19,10 +19,10 @@ The design rationale, the GUI mockups and a comparison with existing tools are i
 | | |
 |---|---|
 | **Sources** | Local folders and files · zip and zip-based formats (jar, war, nupkg, vsix, whl, apk …) · 7z · tar, tar.gz, tar.xz, tar.zst, tar.bz2 · Git branches, tags, commits and `HEAD~n` · Git working tree (honours `.gitignore`) |
-| **Folder compare** | Aligned two-pane tree with missing-side placeholders · filters: all, differences, same, orphans · **Flat**: all files in one list sorted by name, each with its folder; a file found on only one side each is matched with the file of the same name in the most alike folder, compared and marked ↷, and opening, copying (over its match) and deleting work on the pair · entries show as soon as they are listed and fill in their status (… until compared) while the compare runs · archives inside the compared folders are compared as files (by size, stored CRC32 or bytes) and opened when you expand them, so their contents are compared only on demand · compare by content (default) or by size and date · **≈ similar** status for files whose bytes differ but whose content is equal (CRLF vs LF, re-saved documents with the same text, re-encoded images with the same pixels, Java classes recompiled with only debug info changed) · **file patterns** in the toolbar (`*.java *hello*w*c`): only matching files are compared and shown, folders without any are left out · exclude globs · select several rows (Ctrl/Shift+click) to copy left↔right or delete at once, with progress and Cancel · copying asks first when it replaces files, and names those newer than the copy · deleting moves files to the Recycle Bin / Trash (inside archives it is for good, and the dialog says so) · rows update by themselves when files change on disk |
+| **Folder compare** | Aligned two-pane tree with missing-side placeholders · clickable count filters: all files, all differences, same, similar, different, left only, right only, errors · **Flat**: all files in one list sorted by name, each with its folder; a file found on only one side each is matched with the file of the same name in the most alike folder, compared and marked ↷, and opening, copying (over its match) and deleting work on the pair · entries show as soon as they are listed and fill in their status (… until compared) while the compare runs · archives inside the compared folders are compared as files (by size, stored CRC32 or bytes) and opened when you expand them, so their contents are compared only on demand · compare by content (default) or by size and date · **≈ similar** status for files whose bytes differ but whose content is equal (CRLF vs LF, re-saved documents with the same text, re-encoded images with the same pixels, Java classes recompiled with only debug info changed) · **file patterns** in the toolbar (`*.java *hello*w*c`): only matching files are compared and shown, folders without any are left out · exclude globs · select several rows (Ctrl/Shift+click) to copy left↔right or delete at once, with progress and Cancel · copying asks first when it replaces files, and names those newer than the copy · deleting moves files to the Recycle Bin / Trash (inside archives it is for good, and the dialog says so) · rows update by themselves when files change on disk |
 | **Git** | Compare any two revisions without a checkout · *merge-base* mode shows only what a branch changed since it branched off · identical folders are recognised by their tree id and skipped without being walked |
 | **Content views** | Each file type is shown in the form that makes its changes readable, with raw text or a hex dump always one click away. See the table below. |
-| **Text compare** | Line diff (Myers, or histogram as an option) with aligned rows and placeholders · changed words marked within each line · whitespace and case rules · overview strip · previous/next difference (F7/F8) · find in both files (Ctrl+F; match case, whole words, regular expressions; Enter/F3 for the next match, matches marked in the overview strip) · line-detail pane · encoding (UTF-8/16, legacy code pages) and line-ending detection; when the line endings differ, one click converts either side to the other's · changes in very long lines (minified files) are found and scrolled into view · ≈ similar files open in the view where they are equal, with a note saying why; *Text* still shows every byte difference · binary detection |
+| **Text compare** | Line diff (Myers, or histogram as an option) with aligned rows and placeholders · changed words marked within each line · clickable count filters for changed, added, removed, same and ignored rows, preserving original line numbers · whitespace and case rules · overview strip · previous/next difference (F7/F8) · find in both files (Ctrl+F; match case, whole words, regular expressions; Enter/F3 for the next match, matches marked in the overview strip) · line-detail pane · encoding (UTF-8/16, legacy code pages) and line-ending detection; when the line endings differ, one click converts either side to the other's · changes in very long lines (minified files) are found and scrolled into view · ≈ similar files open in the view where they are equal, with a note saying why; *Text* still shows every byte difference · binary detection |
 | **Editing** | Copy a difference to the other side with the arrows next to it or Alt+←/→ · click into a line to edit it, like in an editor (the caret goes where you click; arrow keys move across lines; Enter splits, Backspace/Delete join, multi-line paste; typing on a selected line edits it from its end) · select lines by clicking the line number, with Shift+click or with Shift+↑/↓ (Ctrl+A all), then Ctrl+C / Ctrl+X to copy or cut them, Delete to remove them, Ctrl+V to replace them; with one line current, Ctrl+V inserts above it · undo/redo (Ctrl+Z/Ctrl+Y) · save a side with the 💾 button next to its "● modified" mark, or all changed sides with Ctrl+S, also into archives · the file's encoding, BOM and line endings are kept; files that would not save back byte for byte are not editable · the ECUC values view of ARXML files can be edited and saved as well (written back into the ARXML) · unsaved changes are kept through whitespace and syntax changes, and closing asks first |
 | **Syntax highlighting** | ~190 languages via the syntect grammars bundled with `bat`, plus A2L, DBC, Intel HEX, S-record, Conan files, Xpand, Xtend and Check (oAW) and FreeMarker templates (over HTML for `.ftl`/`.ftlh`, over XML for `.ftlx`, also inside attributes); ARXML, ODX, CDD, MWE workflows and other XML dialects are recognised as XML. Detected by file name, extension or shebang line, with a manual override |
 | **CLI** | `parallax` for scripts and CI: tree or unified-diff output, JSON, `diff`-style exit codes |
@@ -86,7 +86,7 @@ The design rationale, the GUI mockups and a comparison with existing tools are i
 
 ![Intel HEX files compared as an address map](docs/screenshots/firmware-compare.png)
 
-![Images compared pixel by pixel](docs/screenshots/image-compare.png)
+![Image comparison recognizes identical pixels despite different PNG metadata](docs/screenshots/image-compare.png)
 
 ### FlatBuffers schemas
 
@@ -188,11 +188,44 @@ The tab keeps its options and the other side. If the new path cannot be opened, 
 
 Each tab remembers what it compared before: ← and → in the toolbar (or the mouse's back and forward buttons) go back and forth, and ↑ goes one level up: from a file opened in a folder comparison back to that row, otherwise to both sides' parent folders. To compare two different rows of a folder comparison, such as a file renamed between the sides, Ctrl+click both and choose *Compare these*. *Swap* exchanges left and right, in folder and file comparisons.
 
-Right-click a row (or press Shift+F10) for what you can do with it: open, compare two selected rows, copy or delete on either side, set a folder as the base folder of one or both sides (it becomes the top folder of that side; Back returns), open in the default app, show in the file manager, copy the path. Settings that change less often (compare rule, line endings, excluded files; whitespace, case, diff algorithm, syntax) are under *Options* at the right of the toolbar; a dot there means they differ from the defaults.
+Right-click a folder-comparison entry for actions on the clicked side. The menu names the side and source: copy goes to the opposite pane, while delete, open, reveal and copy path apply to the clicked pane. Bulk actions show how many selected items exist on that side. A missing entry offers to copy the opposite entry here; read-only destinations and deletion on read-only sources are disabled with a reason. Folder entries can become the base folder of their side or both sides (Back returns). Open comparison and Compare these two remain shared actions. Shift+F10 opens the menu for the last active pane.
+
+In a file comparison, right-click text or a line number to copy text/lines, copy the clicked difference to the opposite side, edit or delete lines, copy the file path, or find in both files. Right-clicking within a line selection preserves it. Edits use the usual undo history and stay unsaved until Save; read-only views disable editing commands. The active line editor keeps its native text menu. Shift+F10 opens the menu for the active pane and line; arrows, Home/End, Enter and Escape navigate it.
+
+Settings that change less often (compare rule, line endings, excluded files; whitespace, case, diff algorithm, syntax) are under *Options* at the right of the toolbar; a dot there means they differ from the defaults.
 
 **Command palette:** Ctrl+Shift+P, Ctrl+K or F1 lists every action of the app and the current tab, with its shortcut. Type a few letters (in order is enough, e.g. `expall` for *Expand all folders*) and press Enter.
 
 The *New comparison* tab lists recent comparisons: click one to compare again with the same options, ☆ pins it to the top, ✎ puts it into the form to change it first. Errors and confirmations appear briefly in the lower right corner.
+
+The count strip above the comparison doubles as its status filter. In folders, choose *Different* for changed files present on both sides, *Left only* or *Right only* for files on just one side, or *All differences* for all three plus errors. *Same* and *Similar* are separate filters. Matching parent folders stay visible and are opened when selecting a filter. Totals stay fixed for the current comparison; the footer shows how many files match, including files in collapsed folders. In Flat view, totals count matched moved files once and update as their comparisons finish. Git folders skipped as identical contribute their files once loaded.
+
+File views use the same strip for *Changed*, *Added (right only)*, *Removed (left only)*, *Same*, and *Ignored* (differences only in ignored whitespace or case). Counts refer to aligned comparison rows. Filtering preserves original line numbers and F7/F8 navigates only matching difference sections. Editing, copying a whole difference, and range selections restore all rows for full context. Find searches both whole files and restores all rows if a match was hidden. *All files* / *All rows* resets the status filter; filename patterns and comparison options keep their own settings.
+
+<details>
+<summary>Screenshots: count filters, context menus and comparison setup</summary>
+
+Clicking **Left only** keeps the matching files and their parent folders visible. The counts stay fixed, and **Show all** resets the status filter.
+
+![Folder comparison filtered to left-only files](docs/screenshots/folder-filter.png)
+
+**All differences** in a file comparison shows changed and one-sided rows with their original line numbers.
+
+![File comparison filtered to differences, retaining original line numbers](docs/screenshots/file-filter.png)
+
+Folder context menus identify the clicked side and source, with copy directed toward the other side.
+
+![Left-side folder context menu with copy to right, local open, path and delete actions](docs/screenshots/folder-context-menu.png)
+
+File context menus identify the clicked side and line, including copy, edit and delete actions.
+
+![Right-side file context menu with copy to left and right-line editing actions](docs/screenshots/file-context-menu.png)
+
+Start with local paths, archives, Git revisions, worktrees or a GitHub pull request URL.
+
+![New comparison with source pickers and archive and Git options](docs/screenshots/new-comparison.png)
+
+</details>
 
 Keyboard: arrow keys, Enter (open or expand), ←/→ (collapse/expand), F5 (refresh), F7/F8 (previous/next difference), Ctrl+F (find), F3/Shift+F3 (next/previous match), Ctrl+Shift+P / Ctrl+K / F1 (command palette), Shift+F10 (context menu), Ctrl+T (new tab), Ctrl+W (close tab), Ctrl+Tab / Ctrl+Shift+Tab (next/previous tab), Ctrl+1…8 (that tab), Ctrl+9 (last tab), Ctrl+Shift+PageUp/PageDown (move the tab). Tabs can be dragged to another place. With many tabs, the tab bar scrolls with the mouse wheel.
 

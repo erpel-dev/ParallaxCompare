@@ -705,12 +705,36 @@ pub struct ImageView {
     bounds: Option<[u32; 4]>,
 }
 
+/// Compact row-kind ranges let the GUI filter before fetching highlighted text.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RowRun {
+    start: u32,
+    end: u32,
+    kind: RowKind,
+}
+
+fn row_runs(rows: &[textdiff::Row]) -> Vec<RowRun> {
+    let mut runs: Vec<RowRun> = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        if let Some(last) = runs.last_mut()
+            && last.kind == row.kind
+        {
+            last.end = i as u32 + 1;
+        } else {
+            runs.push(RowRun { start: i as u32, end: i as u32 + 1, kind: row.kind });
+        }
+    }
+    runs
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileDiffInfo {
     id: u64,
     rows: u32,
     sections: Vec<Section>,
+    row_runs: Vec<RowRun>,
     stats: DiffStats,
     left: SideInfo,
     right: SideInfo,
@@ -1021,6 +1045,7 @@ pub async fn open_file_diff(
             id: 0,
             rows: diff.rows.len() as u32,
             sections: diff.sections.clone(),
+            row_runs: row_runs(&diff.rows),
             stats: diff.stats.clone(),
             left: left_info,
             right: right_info,
@@ -1242,6 +1267,7 @@ pub async fn syntax_names() -> CmdResult<Vec<String>> {
 pub struct EditInfo {
     rows: u32,
     sections: Vec<Section>,
+    row_runs: Vec<RowRun>,
     stats: DiffStats,
     lines: [u32; 2],
     dirty: [bool; 2],
@@ -1279,6 +1305,7 @@ fn edit_info(fd: &FileDiff, focus: Option<Edited>, caret: Option<(Side, usize)>)
     EditInfo {
         rows: diff.rows.len() as u32,
         sections: diff.sections.clone(),
+        row_runs: row_runs(&diff.rows),
         stats: diff.stats.clone(),
         lines: SIDES.map(|s| e.doc(s).len() as u32),
         dirty: SIDES.map(|s| e.is_dirty(s)),
@@ -1521,4 +1548,28 @@ pub struct PathsChanged {
     /// The file comparison whose save this was.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin: Option<u64>,
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+
+    #[test]
+    fn row_runs_cover_original_rows_and_keep_kind_boundaries() {
+        use RowKind::*;
+        let kinds = [Equal, Equal, Changed, Removed, Equal, Added, Added, Minor];
+        let rows: Vec<_> = kinds.iter().map(|&kind| textdiff::Row { left: None, right: None, kind }).collect();
+        let runs = row_runs(&rows);
+        assert_eq!(runs.len(), 6);
+        let reconstructed: Vec<_> = runs.iter().flat_map(|r| (r.start..r.end).map(|_| r.kind)).collect();
+        assert_eq!(reconstructed, kinds);
+        assert_eq!(runs.first().unwrap().start, 0);
+        assert_eq!(runs.last().unwrap().end, rows.len() as u32);
+        for pair in runs.windows(2) {
+            assert_eq!(pair[0].end, pair[1].start);
+            assert_ne!(pair[0].kind, pair[1].kind);
+        }
+        assert!(row_runs(&[]).is_empty());
+        assert_eq!(serde_json::to_value(&runs[1]).unwrap(), serde_json::json!({"start":2,"end":3,"kind":"changed"}));
+    }
 }

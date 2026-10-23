@@ -269,10 +269,13 @@ export interface ImageView {
   bounds: [number, number, number, number] | null;
 }
 
+export interface RowRun { start: number; end: number; kind: RowKind }
+
 export interface FileDiffInfo {
   id: number;
   rows: number;
   sections: { start: number; end: number }[];
+  rowRuns: RowRun[];
   stats: { changed: number; added: number; removed: number; minor: number };
   left: FileSide;
   right: FileSide;
@@ -298,6 +301,7 @@ export const END = 0xffffffff;
 export interface EditInfo {
   rows: number;
   sections: { start: number; end: number }[];
+  rowRuns: RowRun[];
   stats: { changed: number; added: number; removed: number; minor: number };
   lines: [number, number];
   dirty: [boolean, boolean];
