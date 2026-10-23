@@ -286,6 +286,42 @@ fn make_repo() -> tempfile::TempDir {
 }
 
 #[test]
+fn source_preview_resolves_local_git_shapes_and_preserves_scope_and_errors() {
+    use parallax_core::source_preview::{PreviewKind, inspect, inspect_spec};
+
+    let repo = make_repo();
+    let path = repo.path().display().to_string();
+    let folder = inspect(&path);
+    assert_eq!(folder.kind, PreviewKind::Folder);
+    assert!(folder.git_root.is_some());
+    assert!(folder.git_subpath.is_empty());
+    let file = inspect(&format!("{path}/src/cart.ts"));
+    assert_eq!(file.kind, PreviewKind::File);
+    assert_eq!(file.git_subpath, "src/cart.ts");
+    assert!(file.git_root.is_some());
+    let nested = inspect(&format!("{path}/src/catalog"));
+    assert_eq!(nested.git_subpath, "src/catalog");
+
+    for (subpath, is_file) in [("src/cart.ts", true), ("src/catalog", false), ("", false)] {
+        let preview = inspect(&format!("{path}@main:{subpath}"));
+        assert_eq!(preview.kind, PreviewKind::GitRev, "{:?}", preview.message);
+        assert_eq!(preview.is_file, Some(is_file));
+    }
+    let missing = inspect(&format!("{path}@not-a-revision:src"));
+    assert_eq!(missing.kind, PreviewKind::Error);
+    assert!(missing.message.is_some());
+    assert!(missing.git_root.is_some());
+    assert!(matches!(missing.spec, Some(SourceSpec::GitRev { .. })));
+    let inside_archive = inspect(&format!("{path}@main:assets.zip/logo.svg"));
+    assert_eq!(inside_archive.kind, PreviewKind::GitRev);
+    assert_eq!(inside_archive.is_file, None);
+    let explicit =
+        inspect_spec(SourceSpec::GitRev { repo: path, rev: "feature".into(), subpath: "src/cart.ts".into() });
+    assert_eq!(explicit.kind, PreviewKind::GitRev);
+    assert_eq!(explicit.is_file, Some(true));
+}
+
+#[test]
 fn git_branches() {
     let dir = make_repo();
     let repo = dir.path().display().to_string();

@@ -1,62 +1,144 @@
 <script lang="ts">
-  import SidePicker, { toSpec, type PickerValue } from "./SidePicker.svelte";
-  import { api, isPullRequestUrl, sourceName, sourceText, type PullRequestInfo, type SourceOptions, type SourceSpec } from "./api";
+  import { tick } from "svelte";
+  import SidePicker from "./SidePicker.svelte";
+  import PathInput from "./PathInput.svelte";
   import {
-    comparisonKey,
-    forgetComparison,
-    pinComparison,
-    recentComparisons,
-    type SavedComparison,
-  } from "./recent";
+    pickerFor,
+    restorePicker,
+    shapeMismatch,
+    toSpec,
+    usable,
+    type PickerValue,
+    type PickerPreview,
+  } from "./sourcePicker";
+  import {
+    api,
+    isPullRequestUrl,
+    sourceName,
+    sourceText,
+    type PullRequestComparison,
+    type PullRequestInfo,
+    type SourceOptions,
+    type SourceSpec,
+  } from "./api";
+  import { comparisonKey, forgetComparison, pinComparison, recentComparisons, type SavedComparison } from "./recent";
 
   let {
     onCompare,
-  }: { onCompare: (left: SourceSpec, right: SourceSpec, options: SourceOptions, mergeBase: boolean, pullRequest?: PullRequestInfo) => void | Promise<void> } =
-    $props();
-
+  }: {
+    onCompare: (
+      left: SourceSpec,
+      right: SourceSpec,
+      options: SourceOptions,
+      mergeBase: boolean,
+      pullRequest?: PullRequestInfo,
+    ) => void | Promise<void>;
+  } = $props();
   const STORAGE_KEY = "parallax.newCompare";
-
-  function load(): { left: PickerValue; right: PickerValue; options: SourceOptions; mergeBase: boolean } {
-    const empty = (): PickerValue => ({ kind: "folder", path: "", rev: "", subpath: "" });
-    const fallback = {
-      left: empty(),
-      right: empty(),
+  function load() {
+    const defaults = {
+      left: { path: "" } as PickerValue,
+      right: { path: "" } as PickerValue,
       options: { expandArchives: true, respectGitignore: true },
       mergeBase: false,
+      prUrl: "",
     };
     try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      return saved ? { ...fallback, ...JSON.parse(saved) } : fallback;
+      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null");
+      if (!saved || typeof saved !== "object") return defaults;
+      const l = restorePicker(saved.left),
+        r = restorePicker(saved.right);
+      const prUrl =
+        typeof saved.prUrl === "string" && isPullRequestUrl(saved.prUrl)
+          ? saved.prUrl
+          : ([l.path, r.path].find(isPullRequestUrl) ?? "");
+      return {
+        left: isPullRequestUrl(l.path) ? { path: "" } : l,
+        right: isPullRequestUrl(r.path) ? { path: "" } : r,
+        options: {
+          expandArchives: saved.options?.expandArchives !== false,
+          respectGitignore: saved.options?.respectGitignore !== false,
+        },
+        mergeBase: saved.mergeBase === true,
+        prUrl,
+      };
     } catch {
-      return fallback;
+      return defaults;
     }
   }
-
   const initial = load();
-  let left = $state(initial.left);
-  let right = $state(initial.right);
-  let options = $state(initial.options);
-  let mergeBase = $state(initial.mergeBase);
-  let busy = $state(false);
-  let error = $state("");
-
-  const bothGit = $derived(left.kind === "gitRev" && right.kind === "gitRev");
-  const pullRequests = $derived([...new Set([left.path, right.path].map((p) => p.trim()).filter(isPullRequestUrl))]);
-  const ready = $derived(pullRequests.length > 0 || (left.path.trim() !== "" && right.path.trim() !== ""));
-
+  let left = $state(initial.left),
+    right = $state(initial.right);
+  let leftPreview = $state<PickerPreview | null>(null),
+    rightPreview = $state<PickerPreview | null>(null);
+  let options = $state(initial.options),
+    mergeBase = $state(initial.mergeBase);
+  let prUrl = $state(initial.prUrl),
+    prMode = $state(!!initial.prUrl);
+  let prResult = $state<PullRequestComparison | null>(null),
+    resolvedFor = $state("");
+  let busy = $state<"resolve" | "compare" | null>(null),
+    error = $state("");
+  let prInput = $state<HTMLInputElement>(),
+    compareButton = $state<HTMLButtonElement>();
+  let optionsOpen = $state(false);
+  const mismatch = $derived(shapeMismatch(leftPreview, rightPreview));
+  const ready = $derived(usable(leftPreview, left) && usable(rightPreview, right) && !mismatch);
+  const bothGit = $derived(
+    ready && [leftPreview, rightPreview].every((p) => p?.kind === "gitRev" || p?.kind === "remote"),
+  );
+  const resolved = $derived(prResult && resolvedFor === prUrl.trim() ? prResult : null);
+  const prValid = $derived(isPullRequestUrl(prUrl));
+  const prHost = $derived.by(() => {
+    try {
+      return new URL(prUrl).hostname;
+    } catch {
+      return "";
+    }
+  });
+  $effect(() => {
+    left.path;
+    right.path;
+    prUrl;
+    error = "";
+  });
+  function remember() {
+    try {
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({ left, right, options, mergeBase, prUrl: prMode ? prUrl : "" }),
+      );
+    } catch {
+      /* Remembering the last comparison is a convenience only. */
+    }
+  }
   function swap() {
     [left, right] = [right, left];
+    [leftPreview, rightPreview] = [rightPreview, leftPreview];
   }
-
-  async function picked(path: string, was: PickerValue): Promise<PickerValue> {
-    const info = await api.inspectPath(path).catch(() => null);
-    return { ...was, kind: info && !info.isDir ? "file" : "folder", path, rev: "", subpath: "" };
+  async function enterPR(url: string) {
+    prUrl = url;
+    prMode = true;
+    prResult = null;
+    error = "";
+    await tick();
+    prInput?.focus();
+    prInput?.setSelectionRange(url.length, url.length);
   }
-
+  async function backToPair() {
+    prMode = false;
+    prUrl = "";
+    prResult = null;
+    error = "";
+    await tick();
+    document.querySelector<HTMLInputElement>('.page:not([hidden]) input[aria-label="Left path"]')?.focus();
+  }
   let recent = $state(recentComparisons());
 
   const title = (c: SavedComparison, depth: number) =>
-    c.pullRequest ? `PR #${c.pullRequest.number}: ${c.pullRequest.title}` : `${sourceName(c.left, depth)} ↔ ${sourceName(c.right, depth)}${c.mergeBase ? " (merge-base)" : ""}`;
+    c.pullRequest
+      ? `PR #${c.pullRequest.number}: ${c.pullRequest.title}`
+      : `${sourceName(c.left, depth)} ↔ ${sourceName(c.right, depth)}${c.mergeBase ? " (merge-base)" : ""}`;
 
   /** Titles for the recent list, naming parent folders where two would otherwise read the same. */
   const titles = $derived.by(() => {
@@ -84,71 +166,81 @@
     return days === 1 ? "yesterday" : `${days} days ago`;
   }
 
-  async function pickerFor(spec: SourceSpec): Promise<PickerValue> {
-    switch (spec.type) {
-      case "gitRev":
-        return { kind: "gitRev", path: spec.repo, rev: spec.rev, subpath: spec.subpath ?? "" };
-      case "gitWorktree":
-        return { kind: "gitWorktree", path: spec.repo, rev: "", subpath: "" };
-      case "local":
-        return picked(spec.path, left);
+  function edit(c: SavedComparison) {
+    if (c.pullRequest) enterPR(c.pullRequest.url);
+    else {
+      prMode = false;
+      prUrl = "";
+      left = pickerFor(c.left);
+      right = pickerFor(c.right);
+      leftPreview = rightPreview = null;
     }
-  }
-
-  /** Puts a recent comparison into the form, to change it before comparing. */
-  async function edit(c: SavedComparison) {
-    if (c.pullRequest) {
-      left = { kind: "folder", path: c.pullRequest.url, rev: "", subpath: "" };
-      right = { kind: "folder", path: "", rev: "", subpath: "" };
-      options = { ...c.options };
-      mergeBase = false;
-      return;
-    }
-    left = await pickerFor(c.left);
-    right = await pickerFor(c.right);
     options = { ...c.options };
     mergeBase = c.mergeBase;
   }
-
   function pin(c: SavedComparison) {
     pinComparison(comparisonKey(c), !c.pinned);
     recent = recentComparisons();
   }
-
   function forget(c: SavedComparison) {
     forgetComparison(comparisonKey(c));
     recent = recentComparisons();
   }
-
-  /** Fills in dropped paths; with both sides given, compares right away. */
-  export async function fill(leftPath?: string, rightPath?: string) {
-    if (leftPath) left = await picked(leftPath, left);
-    if (rightPath) right = await picked(rightPath, right);
-    if (leftPath && rightPath) submit();
-  }
-
-  async function submit() {
-    if (!ready || busy) return;
+  async function openRecent(c: SavedComparison) {
+    if (busy) return;
+    busy = "compare";
     error = "";
-    busy = true;
     try {
-      if (pullRequests.length > 1) throw new Error("Paste one pull request URL; it supplies both comparison sides.");
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify({ left, right, options, mergeBase }));
-      } catch {
-        // Remembering the last comparison is a convenience only.
+      await onCompare(c.left, c.right, { ...c.options }, c.mergeBase, c.pullRequest);
+    } catch (e) {
+      error = String(e);
+    } finally {
+      busy = null;
+    }
+  }
+  /** Drops fill the form so detected types can be reviewed before Compare. */
+  export async function fill(leftPath?: string, rightPath?: string) {
+    const prs = [leftPath, rightPath].filter((p): p is string => !!p && isPullRequestUrl(p));
+    if (prs.length) {
+      if (new Set(prs).size > 1) {
+        error = "Drop one PR URL; it supplies both comparison sides.";
+        return;
       }
-      if (pullRequests.length) {
-        const pr = await api.resolvePullRequest(pullRequests[0]);
-        const { url, title, number } = pr;
-        await onCompare(pr.left, pr.right, { ...options }, false, { url, title, number });
+      await enterPR(prs[0]);
+      return;
+    }
+    prMode = false;
+    prUrl = "";
+    if (leftPath) left = { path: leftPath };
+    if (rightPath) right = { path: rightPath };
+  }
+  async function submit() {
+    if (busy || (prMode ? !prValid : !ready)) return;
+    error = "";
+    remember();
+    busy = prMode && !resolved ? "resolve" : "compare";
+    try {
+      if (prMode) {
+        if (!resolved) {
+          const input = prUrl.trim();
+          prResult = await api.resolvePullRequest(input);
+          resolvedFor = input;
+        } else {
+          const { left: l, right: r, url, title, number } = resolved;
+          await onCompare(l, r, { ...options }, false, { url, title, number });
+        }
       } else {
-        await onCompare(await toSpec(left), await toSpec(right), { ...options }, bothGit && mergeBase);
+        const [l, r] = await Promise.all([toSpec(left), toSpec(right)]);
+        await onCompare(l, r, { ...options }, l.type === "gitRev" && r.type === "gitRev" && mergeBase);
       }
     } catch (e) {
       error = String(e);
     } finally {
-      busy = false;
+      busy = null;
+    }
+    if (prMode && resolved) {
+      await tick();
+      compareButton?.focus();
     }
   }
 </script>
@@ -161,33 +253,144 @@
       submit();
     }}
   >
-    <header>New comparison</header>
-    <fieldset disabled={busy}>
-      <div class="sides">
-        <SidePicker title="Left" bind:value={left} onEnter={submit} />
-        <button type="button" class="swap" title="Swap sides" onclick={swap}>⇄</button>
-        <SidePicker title="Right" bind:value={right} onEnter={submit} />
-      </div>
-      <div class="opts">
-        <label title="Replace the left revision by its merge-base with the right one: shows only what the right side changed since it branched off">
-          <input type="checkbox" bind:checked={mergeBase} disabled={!bothGit || pullRequests.length > 0} /> Compare against merge-base
-        </label>
-        <label><input type="checkbox" bind:checked={options.expandArchives} /> Expand archives (zip, 7z, tar.*, jar …)</label>
-        <label><input type="checkbox" bind:checked={options.respectGitignore} /> Respect .gitignore</label>
-      </div>
-      {#if pullRequests.length}
-        <p class="pr-hint" role="status">{busy ? "Opening pull request…" : "Pull request: merge base on the left, PR head on the right. Both sides are read-only; the other path is ignored."}</p>
+    <fieldset disabled={!!busy}>
+      {#if prMode}
+        <button type="button" class="link back" onclick={backToPair}>← Back to two sources</button>
+        <header class="heading">
+          <div>
+            <h2>{resolved ? "Review pull request" : "Pull request detected"}</h2>
+            <p>One URL supplies both sides of the comparison.</p>
+          </div>
+          <span class="auto">Read-only</span>
+        </header>
+        <div class="pr-banner">
+          <strong
+            >{resolved ? `#${resolved.number} · ${resolved.title}` : "Compare the PR head with its merge base"}</strong
+          ><small
+            >Resolve with GitHub CLI to preview the exact revisions. Going back restores your previous sources.</small
+          >
+        </div>
+        <PathInput
+          bind:value={prUrl}
+          bind:input={prInput}
+          label="Pull request URL"
+          placeholder="https://github.com/owner/repo/pull/123"
+          onEnter={submit}
+        />
+        <div class="pr-meta">
+          <span>{prHost === "github.com" ? "GitHub" : "GitHub Enterprise"}</span><span>{prHost}</span><span
+            >Uses gh + git and your existing authentication</span
+          >
+        </div>
+        {#if !prValid}<p class="form-error" role="status">
+            Enter an HTTPS GitHub or GitHub Enterprise pull request URL.
+          </p>{/if}
+        {#if busy === "resolve"}<p class="loading" role="status">Resolving pull request and fetching revisions…</p>{/if}
+        {#if resolved}
+          <div class="pr-pair">
+            <section>
+              <small>LEFT · MERGE BASE</small><strong>Common ancestor</strong><code
+                >{resolved.left.type === "gitRev" ? resolved.left.rev : sourceText(resolved.left)}</code
+              ><span>Read-only Git revision</span>
+            </section>
+            <div class="pr-arrow">→</div>
+            <section class="right">
+              <small>RIGHT · PR HEAD</small><strong>Latest PR commit</strong><code
+                >{resolved.right.type === "gitRev" ? resolved.right.rev : sourceText(resolved.right)}</code
+              ><span>Read-only Git revision</span>
+            </section>
+          </div>
+          <p class="pr-help">
+            Shows changes introduced by this PR. The comparison opens locally; it does not post a review.
+          </p>
+        {/if}
+      {:else}
+        <header class="heading">
+          <div>
+            <h2>New comparison</h2>
+            <p>Paste or browse. We’ll identify each source.</p>
+          </div>
+          <span class="auto">Automatic detection</span>
+        </header>
+        <div class="sides">
+          <SidePicker
+            title="Left"
+            bind:value={left}
+            bind:preview={leftPreview}
+            respectGitignore={options.respectGitignore}
+            onEnter={submit}
+            onPullRequest={enterPR}
+          />
+          <button type="button" class="swap" title="Swap sides" aria-label="Swap left and right sources" onclick={swap}
+            >⇄</button
+          >
+          <SidePicker
+            title="Right"
+            bind:value={right}
+            bind:preview={rightPreview}
+            respectGitignore={options.respectGitignore}
+            onEnter={submit}
+            onPullRequest={enterPR}
+          />
+        </div>
+        {#if bothGit}<div class="merge">
+            <label title="Replace the left revision by its merge-base with the right one"
+              ><input type="checkbox" bind:checked={mergeBase} /> Compare from the common ancestor (merge base)</label
+            ><small
+              >{mergeBase
+                ? "Left will use the common ancestor; right stays at its selected revision."
+                : "Use the selected revisions, or show only changes introduced on the right."}</small
+            >
+          </div>{/if}
+        {#if mismatch}<p class="form-error mismatch" role="alert">
+            These sources have different shapes: one is a file and the other is a folder or archive. Choose two files or
+            two containers.
+          </p>{/if}
       {/if}
+      <details class="options" bind:open={optionsOpen}>
+        <summary
+          >Comparison options <span
+            >· {options.expandArchives ? "Archives expanded" : "Archives kept as files"} · {options.respectGitignore
+              ? "Gitignore respected"
+              : "Ignored files included"}</span
+          ></summary
+        >
+        <div class="opts">
+          <label><input type="checkbox" bind:checked={options.expandArchives} /> Expand archives inside folders</label
+          ><label
+            ><input type="checkbox" bind:checked={options.respectGitignore} /> Respect .gitignore
+            <small>for files on disk</small></label
+          >
+        </div>
+      </details>
       {#if error}<p class="form-error" role="alert">{error}</p>{/if}
-      <footer>
-        <span class="tip">
-          Paste a GitHub pull request URL in either path, including Enterprise hosts. Paths also accept <code>release.7z!/bin</code>, <code>~/src/repo@v1.4:src</code> and repository file links.
-        </span>
-        <button type="submit" class="primary" disabled={!ready || busy}>{busy ? "Opening…" : "Compare"}</button>
+      <footer class="form-footer">
+        <span class="tip"
+          >{prMode
+            ? resolved
+              ? "Both revisions are ready to compare."
+              : "Access is checked when you choose Resolve PR."
+            : "Drop one or two paths, or paste a GitHub PR URL into either source."}</span
+        ><button
+          type="submit"
+          class="primary"
+          bind:this={compareButton}
+          disabled={!!busy || (prMode ? !prValid : !ready)}
+          >{busy === "resolve"
+            ? "Resolving…"
+            : busy
+              ? "Opening…"
+              : prMode
+                ? resolved
+                  ? "Compare PR →"
+                  : error
+                    ? "Retry"
+                    : "Resolve PR →"
+                : "Compare →"}</button
+        >
       </footer>
     </fieldset>
   </form>
-
   {#if recent.length}
     <section class="recent" aria-label="Recent comparisons">
       <header>Recent comparisons</header>
@@ -195,14 +398,20 @@
         <div class="entry">
           <button
             class="open"
-            onclick={() => onCompare(c.left, c.right, { ...c.options }, c.mergeBase, c.pullRequest)}
+            onclick={() => openRecent(c)}
+            disabled={!!busy}
             title="Compare again with the same options"
           >
             <span class="names">{titles[i]}</span>
-            <span class="paths mono">{sourceText(c.left)}  ↔  {sourceText(c.right)}</span>
+            <span class="paths mono">{sourceText(c.left)} ↔ {sourceText(c.right)}</span>
           </button>
           <span class="when">{c.pinned ? "pinned" : ago(c.used)}</span>
-          <button class="icon" class:pinned={c.pinned} onclick={() => pin(c)} title={c.pinned ? "Unpin" : "Pin: keep at the top"}>{c.pinned ? "★" : "☆"}</button>
+          <button
+            class="icon"
+            class:pinned={c.pinned}
+            onclick={() => pin(c)}
+            title={c.pinned ? "Unpin" : "Pin: keep at the top"}>{c.pinned ? "★" : "☆"}</button
+          >
           <button class="icon" onclick={() => edit(c)} title="Put into the form above to change it">✎</button>
           <button class="icon" onclick={() => forget(c)} title="Remove from the list">✕</button>
         </div>
@@ -215,15 +424,17 @@
   .wrap {
     height: 100%;
     overflow: auto;
-    padding: 32px 16px;
+    padding: 32px 20px;
+    background: var(--panel-2);
   }
   .dialog {
-    max-width: 980px;
+    max-width: 1100px;
     margin: 0 auto;
-    background: var(--panel);
+    background: var(--input);
     border: 1px solid var(--line);
-    border-radius: 8px;
-    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+    border-radius: 10px;
+    box-shadow: 0 6px 25px #0001;
+    padding: 25px 28px 20px;
   }
   fieldset {
     border: 0;
@@ -231,64 +442,217 @@
     margin: 0;
     min-width: 0;
   }
-  .pr-hint, .form-error {
+  .heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 18px;
+    margin-bottom: 22px;
+  }
+  h2 {
+    font-size: 21px;
+    letter-spacing: -0.4px;
     margin: 0;
-    padding: 0 14px 12px;
+    font-weight: 650;
   }
-  .pr-hint {
+  .heading p {
     color: var(--dim);
+    margin: 5px 0 0;
+    font-size: 12px;
   }
-  .form-error {
-    color: var(--error, #e36c6c);
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-  }
-  header {
-    padding: 10px 14px;
-    border-bottom: 1px solid var(--line);
-    font-weight: 600;
+  .auto {
+    color: var(--accent);
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    padding: 4px 8px;
+    border-radius: 5px;
+    font-size: 10px;
   }
   .sides {
     display: grid;
-    grid-template-columns: 1fr auto 1fr;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
     gap: 12px;
-    padding: 14px;
-    align-items: start;
+    align-items: stretch;
   }
   .swap {
-    margin-top: 52px;
+    align-self: center;
+    border-radius: 50%;
+    padding: 0;
+    width: 30px;
+    height: 30px;
+    color: var(--dim);
+    font-size: 17px;
+  }
+  .options {
+    border-top: 1px solid var(--line);
+    margin-top: 18px;
+    padding-top: 14px;
+    color: var(--dim);
+    font-size: 11px;
+  }
+  .options summary {
+    cursor: pointer;
+    width: fit-content;
+    list-style: none;
+  }
+  .options summary::-webkit-details-marker {
+    display: none;
+  }
+  .options summary::before {
+    content: "›";
+    display: inline-block;
+    margin-right: 7px;
+    color: var(--dim);
+  }
+  .options[open] summary::before {
+    transform: rotate(90deg);
+  }
+  .options summary span {
+    opacity: 0.8;
+    margin-left: 6px;
+    font-size: 10px;
   }
   .opts {
     display: flex;
     flex-wrap: wrap;
-    gap: 6px 20px;
-    padding: 0 14px 12px;
+    gap: 10px 24px;
+    padding-top: 14px;
   }
-  .opts label {
+  .opts label,
+  .merge label {
     display: flex;
     gap: 6px;
     align-items: center;
   }
-  footer {
+  .opts small {
+    color: var(--dim);
+  }
+  .merge {
+    margin-top: 16px;
+    padding: 12px 14px;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    font-size: 12px;
+  }
+  .merge small {
+    display: block;
+    margin: 4px 0 0 23px;
+    color: var(--dim);
+    font-size: 11px;
+  }
+  .form-footer {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    gap: 12px;
-    padding: 10px 14px;
-    border-top: 1px solid var(--line);
+    gap: 20px;
+    margin-top: 20px;
+  }
+  .form-footer button {
+    padding: 8px 18px;
   }
   .tip {
     color: var(--dim);
+    font-size: 11px;
+  }
+  .form-error {
+    color: var(--error);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    margin: 15px 0 0;
+  }
+  .mismatch {
+    font-size: 12px;
+    border: 1px solid var(--line);
+    padding: 10px;
+    border-radius: 6px;
+  }
+  .link {
+    border: none;
+    background: none;
+    color: var(--accent);
+    padding: 0;
+  }
+  .back {
+    margin-bottom: 20px;
     font-size: 12px;
   }
-  code {
-    font-family: var(--mono);
-    background: var(--input);
-    padding: 1px 4px;
-    border-radius: 3px;
+  .pr-banner {
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    padding: 14px;
+    margin-bottom: 16px;
+  }
+  .pr-banner strong,
+  .pr-banner small {
+    display: block;
+  }
+  .pr-banner small {
+    color: var(--dim);
+    font-size: 11px;
+    margin-top: 5px;
+  }
+  .pr-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    font-size: 11px;
+    color: var(--dim);
+    margin-top: 10px;
+  }
+  .pr-meta span:first-child {
+    color: var(--left-only);
+  }
+  .pr-pair {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 25px minmax(0, 1fr);
+    gap: 10px;
+    align-items: center;
+    margin-top: 22px;
+  }
+  .pr-pair section {
+    border: 1px solid var(--line);
+    background: var(--panel-2);
+    border-radius: 7px;
+    padding: 15px;
+  }
+  .pr-pair small {
+    display: block;
+    color: var(--dim);
+    font-size: 10px;
+  }
+  .pr-pair strong {
+    display: block;
+    font-size: 13px;
+    margin: 6px 0;
+  }
+  .pr-pair code {
+    display: block;
+    font-size: 11px;
+    color: var(--dim);
+    overflow-wrap: anywhere;
+  }
+  .pr-pair section > span {
+    display: block;
+    font-size: 10px;
+    margin-top: 12px;
+    color: var(--accent);
+  }
+  .pr-pair .right > span {
+    color: var(--left-only);
+  }
+  .pr-arrow {
+    color: var(--dim);
+    text-align: center;
+  }
+  .pr-help,
+  .loading {
+    font-size: 11px;
+    color: var(--dim);
   }
   .recent {
-    max-width: 980px;
+    max-width: 1100px;
     margin: 20px auto 0;
     background: var(--panel);
     border: 1px solid var(--line);
@@ -356,13 +720,38 @@
   .icon.pinned {
     color: var(--accent);
   }
-  @media (max-width: 760px) {
+  @media (max-width: 900px) {
+    .wrap {
+      padding: 20px 14px;
+    }
+    .dialog {
+      padding: 20px;
+    }
+    .auto {
+      display: none;
+    }
     .sides {
+      gap: 8px;
+    }
+  }
+  @media (max-width: 760px) {
+    .sides,
+    .pr-pair {
       grid-template-columns: 1fr;
     }
     .swap {
-      margin: 0;
       justify-self: center;
+      transform: rotate(90deg);
+    }
+    .pr-arrow {
+      transform: rotate(90deg);
+    }
+    .form-footer {
+      align-items: flex-end;
+    }
+    .options summary span {
+      display: block;
+      margin: 5px 0 0 16px;
     }
   }
 </style>

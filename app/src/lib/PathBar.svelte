@@ -21,7 +21,8 @@
   import type { Command } from "./commands";
   import { formatTime } from "./format";
   import PathInput from "./PathInput.svelte";
-  import SidePicker, { toSpec, type PickerValue } from "./SidePicker.svelte";
+  import SidePicker from "./SidePicker.svelte";
+  import { pickerFor, toSpec, type PickerValue, type PickerPreview, usable } from "./sourcePicker";
   import { notify } from "./toast.svelte";
 
   let {
@@ -58,7 +59,9 @@
   let busy = $state(false);
   let input = $state<HTMLInputElement>();
   let picking = $state(false);
-  let picker = $state<PickerValue>({ kind: "folder", path: "", rev: "", subpath: "" });
+  let picker = $state<PickerValue>({ path: "" });
+  let pickerPreview = $state<PickerPreview | null>(null);
+  let pickerError = $state("");
   let menu = $state(false);
   let bar = $state<HTMLDivElement>();
   let menuError = $state("");
@@ -152,20 +155,11 @@
     if (typeof picked === "string") await apply({ type: "local", path: picked });
   }
 
-  function pickerValue(spec: SourceSpec): PickerValue {
-    switch (spec.type) {
-      case "local":
-        return { kind: edit?.file || info.kind === "archive" ? "file" : "folder", path: spec.path, rev: "", subpath: "" };
-      case "gitRev":
-        return { kind: "gitRev", path: spec.repo, rev: spec.rev, subpath: spec.subpath ?? "" };
-      case "gitWorktree":
-        return { kind: "gitWorktree", path: spec.repo, rev: "", subpath: "" };
-    }
-  }
-
   async function openPicker(spec?: SourceSpec) {
     if (!edit || busy) return;
-    picker = pickerValue(spec ?? (await current()));
+    picker = pickerFor(spec ?? (await current()));
+    pickerError = "";
+    pickerPreview = null;
     editing = false;
     menu = false;
     picking = true;
@@ -244,7 +238,7 @@
     const list: Command[] = [
       { group, title: "Edit path…", run: startEdit },
       { group, title: info.kind === "gitRev" ? "Choose another revision…" : "Choose with the file dialog…", run: browse },
-      { group, title: "Change side: folder, file, Git ref or worktree…", run: () => openPicker() },
+      { group, title: "Change source…", run: () => openPicker() },
     ];
     if (edit.file) {
       list.push({
@@ -279,8 +273,12 @@
 
   async function submitPicker(e: SubmitEvent) {
     e.preventDefault();
-    if (!picker.path.trim()) return;
-    if (await apply(await toSpec(picker))) picking = false;
+    if (!usable(pickerPreview, picker) && !isPullRequestUrl(picker.path)) return;
+    pickerError = "";
+    try {
+      if (isPullRequestUrl(picker.path)) { if (await edit!.openPullRequest(picker.path)) picking = false; }
+      else if (await apply(await toSpec(picker))) picking = false;
+    } catch (e) { pickerError = String(e); }
   }
 </script>
 
@@ -387,10 +385,11 @@
         }
       }}
     >
-      <SidePicker title="{title} side" bind:value={picker} onEnter={() => bar?.querySelector<HTMLFormElement>("form.popover")?.requestSubmit()} />
+      <SidePicker title="{title} side" bind:value={picker} bind:preview={pickerPreview} onEnter={() => bar?.querySelector<HTMLFormElement>("form.popover")?.requestSubmit()} />
+      {#if pickerError}<p class="err" role="alert">{pickerError}</p>{/if}
       <footer>
         <button type="button" onclick={() => (picking = false)}>Cancel</button>
-        <button type="submit" class="primary" disabled={busy || !picker.path.trim()}>Compare</button>
+        <button type="submit" class="primary" disabled={busy || (!usable(pickerPreview, picker) && !isPullRequestUrl(picker.path))}>Compare</button>
       </footer>
     </form>
   {/if}

@@ -355,6 +355,15 @@ export interface PathInfo {
   gitRoot: string | null;
 }
 
+export interface SourcePreview {
+  kind: "empty" | "folder" | "file" | "archive" | "archivePath" | "gitRev" | "remote" | "needsRepository" | "error";
+  spec: SourceSpec | null;
+  gitRoot: string | null;
+  gitSubpath: string;
+  isFile: boolean | null;
+  message: string | null;
+}
+
 export interface StartupRequest {
   left: SourceSpec;
   right: SourceSpec;
@@ -378,6 +387,7 @@ export const api = {
   inspectPath: (path: string) => invoke<PathInfo>("inspect_path", { path }),
   gitRefs: (repo: string) => invoke<RefList>("git_refs", { repo }),
   parseSource: (text: string) => invoke<SourceSpec>("parse_source", { text }),
+  previewSource: (text: string, spec: SourceSpec | null = null) => invoke<SourcePreview>("preview_source", { text, spec }),
   resolvePullRequest: (url: string) => invoke<PullRequestComparison>("resolve_pull_request", { url }),
   sideSource: (id: number, left: boolean, rel: string) => invoke<SourceSpec>("side_source", { id, left, rel }),
   completePath: (text: string) => invoke<string[]>("complete_path", { text }),

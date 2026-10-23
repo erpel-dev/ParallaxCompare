@@ -512,7 +512,7 @@ pub fn open_pair(
 
 /// `~` and `~/…` (also `~\…`, and `~@rev` for the home folder at a Git revision)
 /// in the home folder, as a shell would expand them.
-fn expand_home(text: &str) -> String {
+pub(crate) fn expand_home(text: &str) -> String {
     let rest = match text.strip_prefix('~') {
         Some(rest) if rest.is_empty() || rest.starts_with(['/', '\\', '@']) => rest,
         _ => return text.to_string(),

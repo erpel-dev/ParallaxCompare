@@ -177,7 +177,7 @@
     clearErrors();
   }
 
-  async function start(request: Request, replaceKey?: number) {
+  async function start(request: Request, replaceKey?: number, inlineError = false) {
     try {
       const session = await api.openSession(request.left, request.right, request.options, request.mergeBase);
       const tab = sessionTab(session, request);
@@ -187,6 +187,7 @@
       active = tab.key;
       remember(request);
     } catch (e) {
+      if (inlineError) throw e;
       notify(String(e));
     }
   }
@@ -564,7 +565,7 @@
         {#if tab.kind === "new"}
           <NewCompare
             bind:this={pickers[tab.key]}
-            onCompare={(left, right, options, mergeBase, pullRequest) => start({ left, right, options, mergeBase, pullRequest }, tab.key)}
+            onCompare={(left, right, options, mergeBase, pullRequest) => start({ left, right, options, mergeBase, pullRequest }, tab.key, true)}
           />
         {:else if tab.kind === "folder"}
           <FolderView

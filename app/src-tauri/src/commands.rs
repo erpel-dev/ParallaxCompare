@@ -209,6 +209,18 @@ pub async fn parse_source(text: String) -> CmdResult<SourceSpec> {
 }
 
 #[tauri::command]
+pub async fn preview_source(
+    text: String,
+    spec: Option<SourceSpec>,
+) -> CmdResult<parallax_core::source_preview::SourcePreview> {
+    blocking(move || {
+        Ok(spec
+            .map_or_else(|| parallax_core::source_preview::inspect(&text), parallax_core::source_preview::inspect_spec))
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn resolve_pull_request(url: String) -> CmdResult<parallax_core::pull_request::PullRequestComparison> {
     blocking(move || parallax_core::pull_request::resolve(&url).map_err(err)).await
 }

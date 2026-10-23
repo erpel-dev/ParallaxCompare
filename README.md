@@ -161,7 +161,7 @@ Folder compares use every core: with 4 threads they run 3.5–3.8× faster, at a
 
 ### Desktop app
 
-Start `parallax-compare` and pick the two sides in the *New comparison* dialog. You can also pass both sides on the command line:
+Start `parallax-compare` and paste or browse for the two sources in the *New comparison* dialog. Files, folders, archives and Git revision syntax are detected automatically. A repository folder starts with its files on disk; **Choose revision…** selects a branch, tag or commit, with an optional file or subfolder. A bare revision such as `main` asks for its repository. Access errors stay beside the input, and known file/folder mismatches are blocked before comparing. You can also pass both sides on the command line:
 
 ```sh
 parallax-compare ~/src/shop@main ~/src/shop@feature/checkout --merge-base
@@ -181,8 +181,8 @@ To compare against something else without starting over, change a side from its 
 
 - click the path, type another one (any form from the table below, e.g. `repo@v1.4`) and press Enter; Esc cancels. While typing, recently compared paths and the entries of the folder typed so far are suggested: Tab completes (after `repo@`, branch and tag names), ↑/↓ choose
 - 📂 opens the file or folder dialog (⎇ the branch list for a Git side)
-- ▾ opens a menu: *Change side…* (folder, file, Git ref or worktree), *Git history of this file…* (pick the working tree or any commit that changed the file for this side), *Open in default app*, *Show in file manager*, *Copy path*
-- drop a file or folder from your file manager onto the left or right half of the window; drop two to replace both sides, or onto a *New comparison* tab to fill it in
+- ▾ opens a menu: *Change side…* (a path or repository link, detected automatically), *Git history of this file…* (pick the working tree or any commit that changed the file for this side), *Open in default app*, *Show in file manager*, *Copy path*
+- drop a file or folder from your file manager onto the left or right half of the window; drop two to replace both sides, or onto a *New comparison* tab to fill it in and review the detected sources before pressing Compare
 
 The tab keeps its options and the other side. If the new path cannot be opened, the old comparison stays. In a file opened from a folder comparison, changing one side compares that file with any other file, also one with a different name.
 
@@ -221,9 +221,9 @@ File context menus identify the clicked side and line, including copy, edit and 
 
 ![Right-side file context menu with copy to left and right-line editing actions](docs/screenshots/file-context-menu.png)
 
-Start with local paths, archives, Git revisions, worktrees or a GitHub pull request URL.
+Paste or browse for each source. Detected-type badges confirm files, folders and archives; Git folders offer a contextual revision chooser. Comparison options are collapsed, and merge base is offered for two Git revisions.
 
-![New comparison with source pickers and archive and Git options](docs/screenshots/new-comparison.png)
+![New comparison with automatic source detection and contextual Git revision controls](docs/screenshots/new-comparison.png)
 
 </details>
 
@@ -243,9 +243,11 @@ Keyboard: arrow keys, Enter (open or expand), ←/→ (collapse/expand), F5 (ref
 
 Remote repositories are read through the installed `git`, so its credential helpers, SSH keys and proxy settings apply (private repositories work as with `git clone`). Only the commit compared is fetched (`git fetch --depth 1`), into a cache folder (`ParallaxCompare/remotes` in the user's cache folder, or `PARALLAX_CACHE`); a branch is fetched again each time it is opened, a commit id only once. Branch names with `/` in web links are looked up on the remote.
 
-Paste a **GitHub pull request URL** such as `https://github.com/owner/repo/pull/123` into either path in **New comparison**, then press Compare (the other path may be empty). A PR URL pasted into an open comparison's path bar replaces both sides too. The left side is the PR's **merge base**, the right side its **head**, both read-only. Links to the PR's Files changed or Commits tabs also work. GitHub Enterprise hosts such as `https://github.company.example/team/project/pull/123` use the hostname in the URL.
+Paste a **GitHub pull request URL** such as `https://github.com/owner/repo/pull/123` into either path in **New comparison**, then choose **Resolve PR** to preview its merge base and head, followed by **Compare PR**. The PR supplies both sides; **Back to two sources** restores your previous pair. A PR URL pasted into an open comparison's path bar replaces both sides too. The left side is the PR's **merge base**, the right side its **head**, both read-only. Links to the PR's Files changed or Commits tabs also work. GitHub Enterprise hosts such as `https://github.company.example/team/project/pull/123` use the hostname in the URL.
 
 PRs need the installed **GitHub CLI (`gh`) and Git (`git`)** on the application's PATH. Authenticate beforehand with `gh auth login --hostname HOST`. The app uses `gh` for metadata and the merge base, and Git for file contents, respecting the host's `gh config` Git protocol (`https` or `ssh`). HTTPS fetches need a Git credential helper (for example `gh auth setup-git --hostname HOST`); SSH fetches use existing SSH credentials. Proxy and corporate certificate settings must work for both tools. Access failures are shown with the host/repository and authentication guidance; the app does not change your authentication configuration or check out a branch.
+
+Remote repository links are resolved on Compare; PR access is checked only on Resolve PR.
 
 An opened PR is pinned to exact commit IDs, including when the target branch advances or the PR is force-pushed. Recent comparisons reopen that snapshot, and Refresh compares the same snapshot again. Paste the PR URL again (or edit its recent entry) to resolve the current PR. All normal file and archive views remain available. Git LFS files remain their Git pointer files and submodules remain commit references; their external contents are not downloaded.
 
