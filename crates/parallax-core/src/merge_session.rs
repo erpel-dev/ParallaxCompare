@@ -512,6 +512,20 @@ impl MergeSession {
         out
     }
 
+    /// The first input row and first result row of every block, for scrolling the
+    /// two panes together.
+    pub fn block_rows(&self) -> Vec<(u32, u32)> {
+        let mut row = 0u32;
+        self.result_layout()
+            .into_iter()
+            .map(|(i, lines, header)| {
+                let at = (self.input_starts[i as usize], row);
+                row += lines.len() as u32 + header as u32;
+                at
+            })
+            .collect()
+    }
+
     /// The result row of a result line, and the first result row of a block.
     pub fn result_row_of_block(&self, block: usize) -> u32 {
         let mut row = 0u32;

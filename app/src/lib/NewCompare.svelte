@@ -16,6 +16,7 @@
     isPullRequestUrl,
     sourceName,
     sourceText,
+    type MergeRequest,
     type PullRequestComparison,
     type PullRequestInfo,
     type SourceOptions,
@@ -25,6 +26,8 @@
 
   let {
     onCompare,
+    onMerge,
+    onConflicts,
   }: {
     onCompare: (
       left: SourceSpec,
@@ -33,6 +36,10 @@
       mergeBase: boolean,
       pullRequest?: PullRequestInfo,
     ) => void | Promise<void>;
+    /** Opens a 3-way merge of files. */
+    onMerge: (request: MergeRequest) => void | Promise<void>;
+    /** Opens the list of conflicts in a repository. */
+    onConflicts: (dir: string) => void | Promise<void>;
   } = $props();
   const STORAGE_KEY = "parallax.newCompare";
   function load() {
@@ -82,6 +89,13 @@
   let prInput = $state<HTMLInputElement>(),
     compareButton = $state<HTMLButtonElement>();
   let optionsOpen = $state(false);
+  /** A 3-way merge of files, or a repository's conflicts, instead of a comparison. */
+  let extra = $state<"merge" | "conflicts" | null>(null);
+  let merge = $state({ local: "", base: "", remote: "", output: "" });
+  let conflictsDir = $state("");
+  const extraReady = $derived(
+    extra === "merge" ? !!(merge.local.trim() && merge.remote.trim()) : extra === "conflicts" ? !!conflictsDir.trim() : false,
+  );
   const mismatch = $derived(shapeMismatch(leftPreview, rightPreview));
   const ready = $derived(usable(leftPreview, left) && usable(rightPreview, right) && !mismatch);
   const bothGit = $derived(
@@ -214,7 +228,37 @@
     if (leftPath) left = { path: leftPath };
     if (rightPath) right = { path: rightPath };
   }
+  async function enterExtra(which: "merge" | "conflicts" | null) {
+    extra = which;
+    error = "";
+    await tick();
+    document.querySelector<HTMLInputElement>(".page:not([hidden]) .extra input")?.focus();
+  }
+  async function submitExtra() {
+    if (busy || !extraReady) return;
+    error = "";
+    busy = "compare";
+    const local = (path: string): SourceSpec => ({ type: "local", path: path.trim() });
+    try {
+      if (extra === "merge") {
+        await onMerge({
+          kind: "sources",
+          base: merge.base.trim() ? local(merge.base) : null,
+          local: local(merge.local),
+          remote: local(merge.remote),
+          output: (merge.output.trim() || merge.local).trim(),
+        });
+      } else {
+        await onConflicts(conflictsDir.trim());
+      }
+    } catch (e) {
+      error = String(e);
+    } finally {
+      busy = null;
+    }
+  }
   async function submit() {
+    if (extra) return submitExtra();
     if (busy || (prMode ? !prValid : !ready)) return;
     error = "";
     remember();
@@ -254,7 +298,36 @@
     }}
   >
     <fieldset disabled={!!busy}>
-      {#if prMode}
+      {#if extra}
+        <button type="button" class="link back" onclick={() => enterExtra(null)}>← Back to two sources</button>
+        {#if extra === "merge"}
+          <header class="heading">
+            <div>
+              <h2>Merge three files</h2>
+              <p>Combine the changes local and remote made to a common base, and resolve what conflicts.</p>
+            </div>
+            <span class="auto">3-way merge</span>
+          </header>
+          <div class="extra grid">
+            <div class="field"><span>Local</span><PathInput bind:value={merge.local} label="Local" placeholder="Local file (yours)" onEnter={submit} /></div>
+            <div class="field"><span>Base</span><PathInput bind:value={merge.base} label="Base" placeholder="Common ancestor (optional)" onEnter={submit} /></div>
+            <div class="field"><span>Remote</span><PathInput bind:value={merge.remote} label="Remote" placeholder="Remote file (theirs)" onEnter={submit} /></div>
+            <div class="field wide"><span>Result</span><PathInput bind:value={merge.output} label="Result" placeholder="Where the result goes; the local file when empty" onEnter={submit} /></div>
+          </div>
+          <p class="note">Nothing is written until you save the result. Without a base, every difference is a conflict.</p>
+        {:else}
+          <header class="heading">
+            <div>
+              <h2>Resolve conflicts</h2>
+              <p>List the conflicted files of a merge, rebase, cherry-pick or revert in progress.</p>
+            </div>
+            <span class="auto">Git</span>
+          </header>
+          <div class="extra">
+            <div class="field"><span>Repository</span><PathInput bind:value={conflictsDir} label="Repository" placeholder="A folder in the repository" onEnter={submit} /></div>
+          </div>
+        {/if}
+      {:else if prMode}
         <button type="button" class="link back" onclick={backToPair}>← Back to two sources</button>
         <header class="heading">
           <div>
@@ -346,8 +419,12 @@
             These sources have different shapes: one is a file and the other is a folder or archive. Choose two files or
             two containers.
           </p>{/if}
+        <div class="modes">
+          <button type="button" class="link" onclick={() => enterExtra("merge")}>Merge three files…</button>
+          <button type="button" class="link" onclick={() => enterExtra("conflicts")}>Resolve conflicts in a repository…</button>
+        </div>
       {/if}
-      <details class="options" bind:open={optionsOpen}>
+      {#if !extra}<details class="options" bind:open={optionsOpen}>
         <summary
           >Comparison options <span
             >· {options.expandArchives ? "Archives expanded" : "Archives kept as files"} · {options.respectGitignore
@@ -362,11 +439,15 @@
             <small>for files on disk</small></label
           >
         </div>
-      </details>
+      </details>{/if}
       {#if error}<p class="form-error" role="alert">{error}</p>{/if}
       <footer class="form-footer">
         <span class="tip"
-          >{prMode
+          >{extra
+            ? extra === "merge"
+              ? "Local and remote are required."
+              : "The list reads Git's index; nothing changes until you resolve a file."
+            : prMode
             ? resolved
               ? "Both revisions are ready to compare."
               : "Access is checked when you choose Resolve PR."
@@ -375,8 +456,14 @@
           type="submit"
           class="primary"
           bind:this={compareButton}
-          disabled={!!busy || (prMode ? !prValid : !ready)}
-          >{busy === "resolve"
+          disabled={!!busy || (extra ? !extraReady : prMode ? !prValid : !ready)}
+          >{extra
+            ? busy
+              ? "Opening…"
+              : extra === "merge"
+                ? "Merge →"
+                : "Show conflicts →"
+            : busy === "resolve"
             ? "Resolving…"
             : busy
               ? "Opening…"
@@ -566,6 +653,34 @@
     border: 1px solid var(--line);
     padding: 10px;
     border-radius: 6px;
+  }
+  .extra {
+    display: grid;
+    gap: 10px;
+  }
+  .extra.grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .extra .wide {
+    grid-column: 1 / -1;
+  }
+  .field > span {
+    display: block;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--dim);
+    margin-bottom: 4px;
+  }
+  .note {
+    color: var(--dim);
+    font-size: 12px;
+    margin: 10px 0 0;
+  }
+  .modes {
+    display: flex;
+    gap: 18px;
+    margin-top: 14px;
+    font-size: 12px;
   }
   .link {
     border: none;

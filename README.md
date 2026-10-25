@@ -24,6 +24,7 @@ The design rationale, the GUI mockups and a comparison with existing tools are i
 | **Content views** | Each file type is shown in the form that makes its changes readable, with raw text or a hex dump always one click away. See the table below. |
 | **Text compare** | Line diff (Myers, or histogram as an option) with aligned rows and placeholders · changed words marked within each line · clickable count filters for changed, added, removed, same and ignored rows, preserving original line numbers · whitespace and case rules · overview strip · previous/next difference (F7/F8) · find in both files (Ctrl+F; match case, whole words, regular expressions; Enter/F3 for the next match, matches marked in the overview strip) · line-detail pane · encoding (UTF-8/16, legacy code pages) and line-ending detection; when the line endings differ, one click converts either side to the other's · changes in very long lines (minified files) are found and scrolled into view · ≈ similar files open in the view where they are equal, with a note saying why; *Text* still shows every byte difference · binary detection |
 | **Editing** | Copy a difference to the other side with the arrows next to it or Alt+←/→ · click into a line to edit it, like in an editor (the caret goes where you click; arrow keys move across lines; Enter splits, Backspace/Delete join, multi-line paste; typing on a selected line edits it from its end) · select lines by clicking the line number, with Shift+click or with Shift+↑/↓ (Ctrl+A all), then Ctrl+C / Ctrl+X to copy or cut them, Delete to remove them, Ctrl+V to replace them; with one line current, Ctrl+V inserts above it · undo/redo (Ctrl+Z/Ctrl+Y) · save a side with the 💾 button next to its "● modified" mark, or all changed sides with Ctrl+S, also into archives · the file's encoding, BOM and line endings are kept; files that would not save back byte for byte are not editable · the ECUC values view of ARXML files can be edited and saved as well (written back into the ARXML) · unsaved changes are kept through whitespace and syntax changes, and closing asks first |
+| **3-way merge** | Merge two versions of a file against their common base, as a `git mergetool` or for any three files: local, base and remote above the result, which scrolls along · changes on one side are taken automatically, by the same rules as Git, so the result matches `git merge` · per conflict: take local, take remote, take both (either one first), keep the base, or edit the result by hand · undo/redo · save with or without Git's conflict markers · **conflicts of a repository**: the files a merge, rebase, cherry-pick or revert left conflicted, with the branch names; binary and deleted-on-one-side files are resolved as a whole; resolved files are staged on request |
 | **Syntax highlighting** | ~190 languages via the syntect grammars bundled with `bat`, plus A2L, DBC, Intel HEX, S-record, Conan files, Xpand, Xtend and Check (oAW) and FreeMarker templates (over HTML for `.ftl`/`.ftlh`, over XML for `.ftlx`, also inside attributes); ARXML, ODX, CDD, MWE workflows and other XML dialects are recognised as XML. Detected by file name, extension or shebang line, with a manual override |
 | **CLI** | `parallax` for scripts and CI: tree or unified-diff output, JSON, `diff`-style exit codes |
 
@@ -177,6 +178,30 @@ git config --global diff.tool parallax
 git difftool --dir-diff main feature/x     # or simply: parallax-compare .@main .@feature/x
 ```
 
+### Merging and Git conflicts
+
+As a Git mergetool:
+
+```sh
+git config --global mergetool.parallax.cmd 'parallax-compare --merge "$BASE" "$LOCAL" "$REMOTE" --output "$MERGED"'
+git config --global mergetool.parallax.trustExitCode true
+git config --global merge.tool parallax
+git mergetool
+```
+
+The merge view shows local, base and remote side by side, with the result below them; drag the bar between them to share the height. Lines are tinted by where they come from (local, remote, the same change on both, edited), and changed characters are marked against the base. Everything that changed on one side only is merged already, by the rules `git merge` uses, so the result starts out as Git's file with its conflict markers, and the markers use the branch names Git uses. Each conflict has a bar above it in the result:
+
+- **Take local**, **Take remote** (Alt+← / Alt+→), **Take both** (Alt+↓, local first), **Both, remote first** (Alt+Shift+↓), **Keep base** (Alt+↑)
+- click any line of the result to edit it, as in the file comparison (Enter splits a line, Backspace/Delete join lines, multi-line paste); a conflict edited by hand counts as resolved
+- **Undo choice** puts a conflict's markers back; Ctrl+Z / Ctrl+Y undo and redo any change
+- F7/F8 go to the previous/next conflict; after a choice, the next open conflict is selected
+
+**Save result** (Ctrl+S) writes the file. With conflicts left, it asks whether to save with Git's conflict markers, so you can finish later. Under `git mergetool` the window has a **Close** button: the exit status tells Git whether the merge is done (the result was saved without conflicts) or not, so Git keeps the file marked as conflicted. If the file in the work tree is not what the merge gives (a merge driver or `git rerere` resolved more), **Start from Git's result** loads it instead. `merge.conflictStyle` (`diff3`, `zdiff3`) is respected.
+
+**Conflicts of a repository:** `parallax-compare .` in a repository with conflicts, or *Resolve conflicts in a repository…* in *New comparison*, lists the conflicted files with what went on (*Merging feature/x into main*, *Rebasing …*, *Cherry-picking …*, *Reverting …*) and which branch is local and which is remote; in a rebase, local is the branch being rebased onto. Text files open in the merge view; saving one without conflicts marks it resolved. **Keep local** and **Take remote** resolve any file as a whole, also binary files and files deleted on one side (then the choice is to keep or delete it). Nothing is staged until **Stage resolved files** runs `git add` (or `git rm`) for the files resolved here; then continue with `git commit`, `git rebase --continue` and so on.
+
+*Merge three files…* in *New comparison* merges any three files (the base is optional; without it every difference is a conflict) into a result file of your choice.
+
 To compare against something else without starting over, change a side from its path bar above the panes:
 
 - click the path, type another one (any form from the table below, e.g. `repo@v1.4`) and press Enter; Esc cancels. While typing, recently compared paths and the entries of the folder typed so far are suggested: Tab completes (after `repo@`, branch and tag names), ↑/↓ choose
@@ -274,6 +299,8 @@ $ parallax ~/src/shop@main ~/src/shop@feature/checkout
 
 Files are compared through their content view, so `parallax old.docx new.docx` prints a diff of the document text, and two images report their differing pixels. `--raw` compares the plain bytes as text instead, and `--bytes` turns off the ≈ similar status in folder compares.
 
+`parallax merge BASE LOCAL REMOTE [-o OUT]` merges three versions of a file without a window, like `git merge-file`, and writes the result with conflict markers where needed (to standard output without `-o`). The sources can be any of the forms above, such as `repo@main:src/a.c`. `--style diff3|zdiff3` adds the base to the markers, `-L` sets the labels, `--level` chooses how hard to make conflicts small. `parallax merge --repo .` merges every conflicted file of a repository again and writes those that merge cleanly (useful when Git's diff left a conflict that a different alignment avoids); nothing is staged. Exit status: 0 merged, 1 conflicts left, 2 error.
+
 `parallax --help` lists all options (`--merge-base`, `--quick`, `--strict-eol`, `--verify-archives`, `--include`, `-x/--exclude`, `--json`, `--whitespace`, `--histogram`, `-U` …). Exit status: 0 identical or only similar, 1 different, 2 error.
 
 ## Building
@@ -319,7 +346,7 @@ The key abstraction is `trait Vfs { list, stat, read }`. Each entry can carry a 
 
 This is the first version of the MVP described in the concept. Not done yet:
 
-- 3-way merge (as a `git mergetool`)
+- 3-way merge of folders, and of content views (documents, models) rather than text
 - byte-aligned hex compare (the hex dump view is line-based, so an inserted byte shifts the rest of the file)
 - table compare for CSV/XLSX with key columns, so moved rows are recognised
 - RAR archives, Git LFS pointer resolution, submodule contents

@@ -364,10 +364,78 @@ export interface SourcePreview {
   message: string | null;
 }
 
-export interface StartupRequest {
-  left: SourceSpec;
-  right: SourceSpec;
-  mergeBase: boolean;
+/** What the command line asked for: a comparison (`git difftool`), a merge (`git mergetool`) or a repository's conflicts. */
+export type StartupRequest =
+  | { kind: "compare"; left: SourceSpec; right: SourceSpec; mergeBase: boolean }
+  | { kind: "merge" }
+  | { kind: "conflicts"; dir: string };
+
+export type BlockKind = "unchanged" | "local" | "remote" | "same" | "conflict";
+/** What a block of the merge result holds. */
+export type Choice = "auto" | "unresolved" | "local" | "remote" | "localRemote" | "remoteLocal" | "base" | "edited";
+
+export type MergeRequest =
+  | { kind: "sources"; base: SourceSpec | null; local: SourceSpec; remote: SourceSpec; output: string }
+  | { kind: "repo"; workdir: string; path: string }
+  | { kind: "startup" };
+
+export interface ConflictInfo {
+  block: number;
+  choice: Choice;
+  inputRow: number;
+  resultRow: number;
+}
+
+export interface MergeInfo {
+  id: number;
+  title: string;
+  output: string;
+  /** Local, base, remote. */
+  labels: [string, string, string];
+  syntax: string | null;
+  inputRows: number;
+  resultRows: number;
+  stats: { automatic: number; conflicts: number; unresolved: number };
+  conflicts: ConflictInfo[];
+  /** First input row and first result row of each block. */
+  blockRows: [number, number][];
+  dirty: boolean;
+  clean: boolean;
+  canUndo: boolean;
+  canRedo: boolean;
+  /** Git's own result is in the work tree and differs from this merge. */
+  gitResult: boolean;
+  /** Started as `git mergetool`. */
+  startup: boolean;
+  repo: [string, string] | null;
+  encoding: string;
+  changed?: number;
+}
+
+/** A row of the inputs: base, local and remote lines side by side. */
+export interface InputRowView {
+  k: BlockKind;
+  i: number;
+  b: LineView | null;
+  l: LineView | null;
+  r: LineView | null;
+}
+
+/** A row of the result: a line, or (l = null) the header above a conflict. */
+export interface ResultRowView {
+  k: BlockKind;
+  c: Choice;
+  i: number;
+  l: LineView | null;
+}
+
+export type ConflictKind = "bothModified" | "bothAdded" | "deletedByUs" | "deletedByThem" | "addedByUs" | "addedByThem" | "bothDeleted";
+
+export interface RepoConflicts {
+  workdir: string;
+  summary: string;
+  labels: { local: string; base: string; remote: string };
+  files: { path: string; kind: ConflictKind; text: boolean }[];
 }
 
 export const defaultCompareOptions = (): CompareOptions => ({
@@ -384,6 +452,23 @@ export const defaultDiffOptions = (): DiffOptions => ({ whitespace: "exact", ign
 
 export const api = {
   startupRequest: () => invoke<StartupRequest | null>("startup_request"),
+  openMerge: (request: MergeRequest) => invoke<MergeInfo>("open_merge", { request }),
+  closeMerge: (id: number) => invoke<void>("close_merge", { id }),
+  mergeInfo: (id: number) => invoke<MergeInfo>("merge_info", { id }),
+  mergeInputRows: (id: number, start: number, count: number) =>
+    invoke<InputRowView[]>("merge_input_rows", { id, start, count, theme: theme() }),
+  mergeResultRows: (id: number, start: number, count: number) =>
+    invoke<ResultRowView[]>("merge_result_rows", { id, start, count, theme: theme() }),
+  mergeResolve: (id: number, block: number, choice: Choice) => invoke<MergeInfo>("merge_resolve", { id, block, choice }),
+  mergeEdit: (id: number, from: { line: number; col: number }, to: { line: number; col: number }, text: string) =>
+    invoke<MergeInfo>("merge_edit", { id, from, to, text }),
+  mergeResultText: (id: number, start: number, end: number) => invoke<string>("merge_result_text", { id, start, end }),
+  mergeUndo: (id: number, redo: boolean) => invoke<MergeInfo>("merge_undo", { id, redo }),
+  mergeUseGitResult: (id: number) => invoke<MergeInfo>("merge_use_git_result", { id }),
+  mergeSave: (id: number, withMarkers: boolean) => invoke<{ info: MergeInfo; clean: boolean }>("merge_save", { id, withMarkers }),
+  repoConflicts: (dir: string) => invoke<RepoConflicts>("repo_conflicts", { dir }),
+  takeConflictSide: (workdir: string, path: string, remote: boolean) => invoke<boolean>("take_conflict_side", { workdir, path, remote }),
+  stageConflicts: (workdir: string, paths: [string, boolean][]) => invoke<void>("stage_conflicts", { workdir, paths }),
   inspectPath: (path: string) => invoke<PathInfo>("inspect_path", { path }),
   gitRefs: (repo: string) => invoke<RefList>("git_refs", { repo }),
   parseSource: (text: string) => invoke<SourceSpec>("parse_source", { text }),

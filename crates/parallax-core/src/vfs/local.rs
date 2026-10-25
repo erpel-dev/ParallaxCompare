@@ -336,7 +336,7 @@ impl Vfs for LocalFs {
 /// the old one, so a failed write leaves the old file intact, and a symlink at
 /// `path` is replaced rather than written through. The file gets `permissions`,
 /// or else those of the file it replaces.
-pub(crate) fn replace_file(
+pub fn replace_file(
     path: &Path,
     data: &[u8],
     mtime: Option<i64>,

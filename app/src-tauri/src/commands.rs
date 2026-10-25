@@ -24,9 +24,9 @@ use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
-type CmdResult<T> = Result<T, String>;
+pub(crate) type CmdResult<T> = Result<T, String>;
 
-fn err(e: impl std::fmt::Display) -> String {
+pub(crate) fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
@@ -47,29 +47,56 @@ fn check_writable_paths(paths: &[String]) -> CmdResult<()> {
     Ok(())
 }
 
-/// Two sources given on the command line, e.g. when started as `git difftool`.
+/// What the command line asks for: two sources to compare (`git difftool`), a
+/// merge (`git mergetool`), or the conflicted files of a repository.
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StartupRequest {
-    left: SourceSpec,
-    right: SourceSpec,
-    merge_base: bool,
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum StartupRequest {
+    #[serde(rename_all = "camelCase")]
+    Compare { left: SourceSpec, right: SourceSpec, merge_base: bool },
+    /// `--merge BASE LOCAL REMOTE --output MERGED`; the files stay in the backend.
+    Merge {
+        #[serde(skip)]
+        args: crate::merge::MergeArgs,
+    },
+    /// One folder of a repository with conflicted files.
+    Conflicts { dir: String },
 }
 
 impl StartupRequest {
     pub fn from_args(args: impl Iterator<Item = String>) -> Option<Self> {
         let mut merge_base = false;
+        let mut merge = false;
+        let mut output: Option<String> = None;
         let mut paths = Vec::new();
-        for arg in args {
+        let mut args = args.peekable();
+        while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--merge-base" => merge_base = true,
+                "--merge" => merge = true,
+                "--output" | "-o" => output = args.next(),
                 a if a.starts_with('-') => {}
                 a => paths.push(a.to_string()),
             }
         }
+        if merge {
+            // Git passes $BASE empty when there is none (an add/add conflict).
+            let [base, local, remote] = <[String; 3]>::try_from(paths).ok()?;
+            let output = output.unwrap_or_else(|| local.clone());
+            return Some(StartupRequest::Merge { args: crate::merge::MergeArgs { base, local, remote, output } });
+        }
         match paths.as_slice() {
-            [left, right] => {
-                Some(StartupRequest { left: SourceSpec::parse(left), right: SourceSpec::parse(right), merge_base })
+            [left, right] => Some(StartupRequest::Compare {
+                left: SourceSpec::parse(left),
+                right: SourceSpec::parse(right),
+                merge_base,
+            }),
+            [dir]
+                if std::path::Path::new(dir).is_dir()
+                    && parallax_core::conflicts::repo_conflicts(std::path::Path::new(dir))
+                        .is_ok_and(|c| !c.files.is_empty()) =>
+            {
+                Some(StartupRequest::Conflicts { dir: dir.clone() })
             }
             _ => None,
         }
@@ -136,20 +163,37 @@ pub struct AppState {
     startup: Mutex<Option<StartupRequest>>,
     sessions: Mutex<HashMap<u64, Arc<Session>>>,
     diffs: Mutex<HashMap<u64, Arc<Mutex<FileDiff>>>>,
+    pub(crate) merges: Mutex<HashMap<u64, Arc<Mutex<crate::merge::MergeTab>>>>,
+    /// The merge given on the command line (`git mergetool`), until it is opened.
+    pub(crate) startup_merge: Mutex<Option<crate::merge::MergeArgs>>,
+    /// Exit status of the process: for a `git mergetool` merge, 0 only once the
+    /// result was saved without conflicts.
+    pub(crate) exit_code: std::sync::atomic::AtomicI32,
     next_id: AtomicU64,
 }
 
 impl AppState {
     pub fn new(startup: Option<StartupRequest>) -> Self {
+        let merge = match &startup {
+            Some(StartupRequest::Merge { args }) => Some(args.clone()),
+            _ => None,
+        };
         AppState {
+            exit_code: std::sync::atomic::AtomicI32::new(if merge.is_some() { 1 } else { 0 }),
+            startup_merge: Mutex::new(merge),
             startup: Mutex::new(startup),
             sessions: Mutex::new(HashMap::new()),
             diffs: Mutex::new(HashMap::new()),
+            merges: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
         }
     }
 
-    fn id(&self) -> u64 {
+    pub fn exit_code(&self) -> i32 {
+        self.exit_code.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn id(&self) -> u64 {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
@@ -162,7 +206,7 @@ impl AppState {
     }
 }
 
-async fn blocking<T: Send + 'static>(f: impl FnOnce() -> CmdResult<T> + Send + 'static) -> CmdResult<T> {
+pub(crate) async fn blocking<T: Send + 'static>(f: impl FnOnce() -> CmdResult<T> + Send + 'static) -> CmdResult<T> {
     tauri::async_runtime::spawn_blocking(f).await.map_err(err)?
 }
 
@@ -1114,7 +1158,7 @@ pub struct LineView {
 }
 
 impl LineView {
-    fn new(n: u32, line: &str, spans: Vec<Span>, marks: Vec<(u32, u32)>) -> Self {
+    pub(crate) fn new(n: u32, line: &str, spans: Vec<Span>, marks: Vec<(u32, u32)>) -> Self {
         let total = text::utf16_len(line) as u32;
         if total <= MAX_SHOWN_LINE {
             return LineView { n, t: line.to_string(), s: spans, m: marks, x: None, o: None, nn: false };

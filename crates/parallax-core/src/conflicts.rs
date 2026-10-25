@@ -84,6 +84,17 @@ fn git_text(dir: &Path, args: &[&str]) -> Result<String> {
     git(dir, args).map(|out| String::from_utf8_lossy(&out).trim().to_string())
 }
 
+/// The conflict style the repository is configured for (`merge.conflictStyle`),
+/// so a merge writes the markers Git would.
+pub fn conflict_style(dir: &Path) -> crate::merge::MarkerStyle {
+    use crate::merge::MarkerStyle;
+    match git_text(dir, &["config", "--get", "merge.conflictStyle"]).as_deref() {
+        Ok("diff3") => MarkerStyle::Diff3,
+        Ok("zdiff3") => MarkerStyle::Zdiff3,
+        _ => MarkerStyle::Merge,
+    }
+}
+
 /// The work tree containing `dir`, or `None` when it is not in a Git work tree.
 pub fn workdir(dir: &Path) -> Option<PathBuf> {
     git_text(dir, &["rev-parse", "--show-toplevel"]).ok().filter(|s| !s.is_empty()).map(PathBuf::from)

@@ -3,11 +3,13 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { ask } from "@tauri-apps/plugin-dialog";
+  import ConflictsView from "./lib/ConflictsView.svelte";
   import FolderView from "./lib/FolderView.svelte";
+  import MergeView from "./lib/MergeView.svelte";
   import NewCompare from "./lib/NewCompare.svelte";
   import type { SideEdit } from "./lib/PathBar.svelte";
   import TextView from "./lib/TextView.svelte";
-  import { api, isPullRequestUrl, sourceName, sourceText, type PullRequestInfo, type SessionInfo, type SourceOptions, type SourceSpec } from "./lib/api";
+  import { api, isPullRequestUrl, sourceName, sourceText, type MergeRequest, type PullRequestInfo, type SessionInfo, type SourceOptions, type SourceSpec } from "./lib/api";
   import type { NavActions } from "./lib/Nav.svelte";
   import type { Command } from "./lib/commands";
   import Palette from "./lib/Palette.svelte";
@@ -47,8 +49,12 @@
     request?: Request;
     dirty?: boolean;
   } & Shared;
-  type Tab = { key: number; kind: "new"; title: string } | FolderTab | TextTab;
+  type MergeTab = { key: number; kind: "merge"; title: string; request: MergeRequest; dirty?: boolean };
+  type ConflictsTab = { key: number; kind: "conflicts"; title: string; dir: string };
+  type Tab = { key: number; kind: "new"; title: string } | FolderTab | TextTab | MergeTab | ConflictsTab;
   type SessionTab = FolderTab | TextTab;
+  const isSession = (t: Tab | undefined): t is SessionTab => t?.kind === "folder" || t?.kind === "text";
+  const icons: Record<Tab["kind"], string> = { new: "＋", folder: "📁", text: "📄", merge: "⑂", conflicts: "⚠" };
   type SideName = "left" | "right";
 
   let tabs = $state<Tab[]>([]);
@@ -167,7 +173,7 @@
       () => [null, null],
     );
     const tab = tabs.find((t) => t.key === key);
-    if (tab && tab.kind !== "new") tab.up = left && right ? { ...request, left, right } : null;
+    if (isSession(tab)) tab.up = left && right ? { ...request, left, right } : null;
   }
 
   function remember(request: Request) {
@@ -358,9 +364,36 @@
     }
   }
 
+  /** Opens a 3-way merge in a new tab, or shows the one already open for that file. */
+  function openMerge(request: MergeRequest, title: string, replaceKey?: number) {
+    const same = (t: Tab) =>
+      t.kind === "merge" && request.kind === "repo" && t.request.kind === "repo" && t.request.workdir === request.workdir && t.request.path === request.path;
+    const existing = tabs.find(same);
+    if (existing) {
+      active = existing.key;
+      return;
+    }
+    const tab: MergeTab = { key: nextKey++, kind: "merge", title, request };
+    const index = tabs.findIndex((t) => t.key === replaceKey);
+    if (index >= 0) tabs[index] = tab;
+    else tabs.push(tab);
+    active = tab.key;
+    clearErrors();
+  }
+
+  function openConflicts(dir: string, replaceKey?: number) {
+    const tab: ConflictsTab = { key: nextKey++, kind: "conflicts", title: `Conflicts · ${baseName(dir)}`, dir };
+    const index = tabs.findIndex((t) => t.key === replaceKey);
+    if (index >= 0) tabs[index] = tab;
+    else tabs.push(tab);
+    active = tab.key;
+    rememberPaths(dir);
+    clearErrors();
+  }
+
   /** File tabs with unsaved edits among those that closing `tab` closes. */
   function unsaved(tab: Tab): Tab[] {
-    if (tab.kind === "text") return tab.dirty ? [tab] : [];
+    if (tab.kind === "text" || tab.kind === "merge") return tab.dirty ? [tab] : [];
     if (tab.kind !== "folder") return [];
     return tabs.filter((t) => t.kind === "text" && t.dirty && !t.request && t.session.id === tab.session.id);
   }
@@ -376,7 +409,7 @@
     if (index < 0) return;
     const tab = tabs[index];
     if (!(await confirmDiscard(unsaved(tab)))) return;
-    if (tab.kind !== "new") release(tab);
+    if (isSession(tab)) release(tab);
     tabs = tabs.filter((t) => t.key !== key);
     if (active === key) active = tabs[Math.min(index, tabs.length - 1)]?.key ?? 0;
     if (!tabs.length) newTab();
@@ -395,7 +428,7 @@
   function onMouseUp(e: MouseEvent) {
     if (e.button !== 3 && e.button !== 4) return;
     const tab = tabs.find((t) => t.key === active);
-    if (!tab || tab.kind === "new") return;
+    if (!isSession(tab)) return;
     const nav = navFor(tab);
     (e.button === 3 ? nav.back : nav.forward)?.();
     e.preventDefault();
@@ -425,6 +458,7 @@
       else form?.fill(side === "left" ? paths[0] : undefined, side === "right" ? paths[0] : undefined);
       return;
     }
+    if (!isSession(tab)) return;
     if (side === "both") await changeSides(tab, { left: spec(paths[0]), right: spec(paths[1]) });
     else await changeSides(tab, { [side]: spec(paths[0]) });
   }
@@ -444,7 +478,7 @@
       { group, title: "Previous tab", keys: "Ctrl+Shift+Tab", enabled: tabs.length > 1, run: () => cycle(-1) },
     ];
     const tab = tabs.find((t) => t.key === active);
-    if (tab && tab.kind !== "new") {
+    if (isSession(tab)) {
       const nav = navFor(tab);
       list.push(
         { group: "Navigate", title: nav.back ? nav.backTitle : "Back", keys: "Mouse back", enabled: !!nav.back, run: () => nav.back?.() },
@@ -505,16 +539,20 @@
       }
     });
     getCurrentWindow().onCloseRequested(async (e) => {
-      if (!(await confirmDiscard(tabs.filter((t) => t.kind === "text" && t.dirty)))) e.preventDefault();
+      if (!(await confirmDiscard(tabs.filter((t) => (t.kind === "text" || t.kind === "merge") && t.dirty)))) e.preventDefault();
     });
     const startup = await api.startupRequest().catch(() => null);
-    if (startup) {
+    if (startup?.kind === "compare") {
       await start({
         left: startup.left,
         right: startup.right,
         mergeBase: startup.mergeBase,
         options: { expandArchives: true, respectGitignore: true },
       });
+    } else if (startup?.kind === "merge") {
+      openMerge({ kind: "startup" }, "Merge");
+    } else if (startup?.kind === "conflicts") {
+      openConflicts(startup.dir);
     }
     if (!tabs.length) newTab();
   });
@@ -551,7 +589,7 @@
         onpointercancel={tabUp}
       >
         <button class="label" onclick={() => !justDragged && (active = tab.key)} title={`${tab.title}\nDrag to move the tab`}>
-          <span>{tab.kind === "folder" ? "📁" : tab.kind === "text" ? "📄" : "＋"}</span><span class="name">{tab.title}</span>{tab.kind === "text" && tab.dirty ? " ●" : ""}
+          <span>{icons[tab.kind]}</span><span class="name">{tab.title}</span>{(tab.kind === "text" || tab.kind === "merge") && tab.dirty ? " ●" : ""}
         </button>
         <button class="x" onclick={() => close(tab.key)} title="Close (Ctrl+W)">×</button>
       </div>
@@ -566,6 +604,16 @@
           <NewCompare
             bind:this={pickers[tab.key]}
             onCompare={(left, right, options, mergeBase, pullRequest) => start({ left, right, options, mergeBase, pullRequest }, tab.key, true)}
+            onMerge={(request) => openMerge(request, request.kind === "sources" ? `Merge · ${sourceName(request.local)}` : "Merge", tab.key)}
+            onConflicts={(dir) => openConflicts(dir, tab.key)}
+          />
+        {:else if tab.kind === "merge"}
+          <MergeView request={tab.request} onInfo={(info) => (tab.title = `Merge · ${info.title}`)} onDirty={(d) => (tab.dirty = d)} />
+        {:else if tab.kind === "conflicts"}
+          <ConflictsView
+            dir={tab.dir}
+            onOpenMerge={(workdir, path) => openMerge({ kind: "repo", workdir, path }, `Merge · ${baseName(path)}`)}
+            onLoaded={(state) => (tab.title = `Conflicts · ${baseName(state.workdir)}${state.files.length ? ` (${state.files.length})` : ""}`)}
           />
         {:else if tab.kind === "folder"}
           <FolderView

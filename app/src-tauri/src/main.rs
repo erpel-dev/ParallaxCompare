@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod merge;
 
 fn main() {
     let startup = commands::StartupRequest::from_args(std::env::args().skip(1));
@@ -48,7 +49,28 @@ fn main() {
             commands::update_diff,
             commands::save_side,
             commands::syntax_names,
+            merge::open_merge,
+            merge::close_merge,
+            merge::merge_info,
+            merge::merge_input_rows,
+            merge::merge_result_rows,
+            merge::merge_resolve,
+            merge::merge_edit,
+            merge::merge_result_text,
+            merge::merge_undo,
+            merge::merge_use_git_result,
+            merge::merge_save,
+            merge::repo_conflicts,
+            merge::take_conflict_side,
+            merge::stage_conflicts,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running ParallaxCompare");
+        .build(tauri::generate_context!())
+        .expect("error while running ParallaxCompare")
+        .run(|app, event| {
+            // As `git mergetool`: 0 only when the merge was saved without conflicts.
+            if let tauri::RunEvent::Exit = event {
+                use tauri::Manager;
+                std::process::exit(app.state::<commands::AppState>().exit_code());
+            }
+        });
 }
