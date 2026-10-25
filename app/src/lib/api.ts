@@ -372,7 +372,7 @@ export type StartupRequest =
 
 export type BlockKind = "unchanged" | "local" | "remote" | "same" | "conflict";
 /** What a block of the merge result holds. */
-export type Choice = "auto" | "unresolved" | "local" | "remote" | "localRemote" | "remoteLocal" | "base" | "edited";
+export type Choice = "auto" | "unresolved" | "local" | "remote" | "localRemote" | "remoteLocal" | "base" | "edited" | "syntax";
 
 export type MergeRequest =
   | { kind: "sources"; base: SourceSpec | null; local: SourceSpec; remote: SourceSpec; output: string }
@@ -384,6 +384,28 @@ export interface ConflictInfo {
   choice: Choice;
   inputRow: number;
   resultRow: number;
+  /** mergiraf has a solution for it. */
+  suggestion: boolean;
+  /** That solution still holds smaller conflicts. */
+  partial: boolean;
+}
+
+/** What mergiraf, the syntax-aware merge, offered for a merge. */
+export interface StructuredMerge {
+  version: string;
+  /** Conflicts it solved; each is offered on its conflict. */
+  solved: number;
+  /** Conflicts it made smaller; offered the same way. */
+  narrowed: number;
+  /** Conflicts its result still has. */
+  conflicts: number;
+  /** Its result is offered as a whole only. */
+  whole: boolean;
+}
+
+export interface MergirafInfo {
+  path: string;
+  version: string;
 }
 
 export interface MergeInfo {
@@ -408,6 +430,9 @@ export interface MergeInfo {
   /** Started as `git mergetool`. */
   startup: boolean;
   repo: [string, string] | null;
+  structured: StructuredMerge | null;
+  /** mergiraf's solution by conflict block. */
+  suggestions: [number, string][];
   encoding: string;
   changed?: number;
 }
@@ -465,6 +490,11 @@ export const api = {
   mergeResultText: (id: number, start: number, end: number) => invoke<string>("merge_result_text", { id, start, end }),
   mergeUndo: (id: number, redo: boolean) => invoke<MergeInfo>("merge_undo", { id, redo }),
   mergeUseGitResult: (id: number) => invoke<MergeInfo>("merge_use_git_result", { id }),
+  mergirafInfo: (path: string | null) => invoke<MergirafInfo>("mergiraf_info", { path }),
+  mergeStructured: (id: number, mergiraf: string | null) => invoke<MergeInfo>("merge_structured", { id, mergiraf }),
+  mergeUseStructuredResult: (id: number) => invoke<MergeInfo>("merge_use_structured_result", { id }),
+  structuredMergeConflict: (workdir: string, path: string, mergiraf: string | null, write: boolean) =>
+    invoke<number>("structured_merge_conflict", { workdir, path, mergiraf, write }),
   mergeSave: (id: number, withMarkers: boolean) => invoke<{ info: MergeInfo; clean: boolean }>("merge_save", { id, withMarkers }),
   repoConflicts: (dir: string) => invoke<RepoConflicts>("repo_conflicts", { dir }),
   takeConflictSide: (workdir: string, path: string, remote: boolean) => invoke<boolean>("take_conflict_side", { workdir, path, remote }),

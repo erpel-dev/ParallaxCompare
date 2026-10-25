@@ -21,6 +21,7 @@ pub mod remote;
 pub mod search;
 pub mod source;
 pub mod source_preview;
+pub mod syntax_merge;
 pub mod text;
 pub mod textdiff;
 pub mod vfs;

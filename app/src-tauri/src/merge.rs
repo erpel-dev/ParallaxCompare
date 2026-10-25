@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use parallax_core::conflicts::{self, ConflictKind, RepoConflicts, Resolution};
 use parallax_core::edit::Pos;
@@ -10,6 +11,7 @@ use parallax_core::highlight::{self, DocHighlighter, ThemeKind};
 use parallax_core::merge::{BlockKind, MarkerStyle, MergeOptions};
 use parallax_core::merge_session::{Choice, ConflictInfo, MergeSession, MergeStats};
 use parallax_core::source::{SourceOptions, SourceSpec};
+use parallax_core::syntax_merge::Mergiraf;
 use parallax_core::text::{self, TextDoc};
 use parallax_core::textdiff;
 use parking_lot::Mutex;
@@ -40,6 +42,24 @@ pub struct MergeTab {
     startup: bool,
     /// A conflicted file of a repository: the work tree and the path in it.
     repo: Option<(PathBuf, String)>,
+    /// What mergiraf offered, and its whole result when that is offered as a whole.
+    structured: Option<(StructuredView, Option<String>)>,
+}
+
+/// The syntax-aware merge (mergiraf) of a merge tab.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StructuredView {
+    version: String,
+    /// Conflicts it solved; each is offered on its conflict.
+    solved: u32,
+    /// Conflicts it made smaller; offered the same way.
+    narrowed: u32,
+    /// Conflicts its result still has.
+    conflicts: u32,
+    /// Its result is offered as a whole: it changed text the line merge had merged,
+    /// or found conflicts where the line merge has none.
+    whole: bool,
 }
 
 #[derive(Deserialize)]
@@ -77,6 +97,9 @@ pub struct MergeInfo {
     git_result: bool,
     startup: bool,
     repo: Option<(String, String)>,
+    structured: Option<StructuredView>,
+    /// mergiraf's solution of each conflict that has one, by block.
+    suggestions: Vec<(u32, String)>,
     encoding: &'static str,
     /// The first result line an edit changed, for placing the caret.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -104,6 +127,12 @@ impl MergeTab {
             git_result: self.git_result.is_some(),
             startup: self.startup,
             repo: self.repo.as_ref().map(|(w, p)| (w.display().to_string(), p.clone())),
+            structured: self.structured.as_ref().map(|s| s.0.clone()),
+            suggestions: s
+                .conflicts()
+                .iter()
+                .filter_map(|c| s.syntax_suggestion(c.block as usize).map(|t| (c.block, t.to_string())))
+                .collect(),
             encoding: s.result().encoding,
             changed: changed.map(|l| l as u32),
         }
@@ -183,7 +212,7 @@ fn new_tab(
         .filter(|d| !text::is_binary(d))
         .map(|d| text::decode(&d).text)
         .filter(|t| !same_but_labels(t, session.result_text()));
-    Ok(MergeTab { session, output, labels, syntax, highlighters: None, git_result, startup, repo })
+    Ok(MergeTab { session, output, labels, syntax, highlighters: None, git_result, startup, repo, structured: None })
 }
 
 #[tauri::command]
@@ -380,12 +409,16 @@ pub async fn merge_result_rows(
                 i: row.block,
                 l: row.line.map(|n| {
                     // Between conflict markers the syntax colouring goes astray.
-                    let colours = if row.choice == Choice::Unresolved {
+                    let markers = row.choice == Choice::Unresolved
+                        || (row.choice == Choice::Syntax && session.syntax_left(row.block as usize) > 0);
+                    let line = doc.line(n as usize);
+                    let marker_line = ["<<<<<<<", "|||||||", "=======", ">>>>>>>"].iter().any(|m| line.starts_with(m));
+                    let colours = if markers || marker_line {
                         Vec::new()
                     } else {
                         all.get(n as usize - first).cloned().unwrap_or_default()
                     };
-                    LineView::new(n, doc.line(n as usize), colours, Vec::new())
+                    LineView::new(n, line, colours, Vec::new())
                 }),
             })
             .collect())
@@ -450,6 +483,123 @@ pub async fn merge_use_git_result(state: State<'_, AppState>, id: u64) -> CmdRes
         tab.session.replace_all(&text);
         tab.edited(Some(0));
         Ok(tab.info(id, Some(0)))
+    })
+    .await
+}
+
+/// How long mergiraf may take in the app before it falls back to a line merge.
+const MERGIRAF_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn find_mergiraf(path: Option<String>) -> CmdResult<Mergiraf> {
+    Mergiraf::find(path.as_deref().map(Path::new)).map_err(|e| match e {
+        parallax_core::Error::Unsupported(message) => message,
+        e => e.to_string(),
+    })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergirafView {
+    path: String,
+    version: String,
+}
+
+/// The installed mergiraf: at `path`, else from `PARALLAX_MERGIRAF` or `PATH`.
+#[tauri::command]
+pub async fn mergiraf_info(path: Option<String>) -> CmdResult<MergirafView> {
+    blocking(move || {
+        let m = find_mergiraf(path)?;
+        Ok(MergirafView { path: m.path.display().to_string(), version: m.version })
+    })
+    .await
+}
+
+/// Runs mergiraf on the merge's three versions and offers its solutions: per
+/// conflict where its result lines up with this merge, else as a whole. The
+/// result is not changed.
+#[tauri::command]
+pub async fn merge_structured(state: State<'_, AppState>, id: u64, mergiraf: Option<String>) -> CmdResult<MergeInfo> {
+    let tab = merge(&state, id)?;
+    blocking(move || {
+        let m = find_mergiraf(mergiraf)?;
+        // The lock is not held while mergiraf runs.
+        let (base, local, remote, name, labels) = {
+            let t = tab.lock();
+            let s = &t.session;
+            (s.base.text.clone(), s.local.text.clone(), s.remote.text.clone(), t.output.clone(), t.labels.clone())
+        };
+        let labels = [labels[0].as_str(), labels[1].as_str(), labels[2].as_str()];
+        let out = m
+            .merge(
+                base.as_bytes(),
+                local.as_bytes(),
+                remote.as_bytes(),
+                &name.to_string_lossy(),
+                labels,
+                MERGIRAF_TIMEOUT,
+            )
+            .map_err(err)?;
+        let text = String::from_utf8_lossy(&out.data).into_owned();
+        let mut t = tab.lock();
+        let outcome = t.session.set_syntax_result(&text);
+        let whole = !outcome.mapped || (t.session.stats().conflicts == 0 && outcome.conflicts > 0);
+        let view = StructuredView {
+            version: m.version,
+            solved: outcome.solved,
+            narrowed: outcome.narrowed,
+            conflicts: outcome.conflicts,
+            whole,
+        };
+        t.structured = Some((view, whole.then_some(text)));
+        Ok(t.info(id, None))
+    })
+    .await
+}
+
+/// Replaces the result by mergiraf's whole result.
+#[tauri::command]
+pub async fn merge_use_structured_result(state: State<'_, AppState>, id: u64) -> CmdResult<MergeInfo> {
+    let tab = merge(&state, id)?;
+    blocking(move || {
+        let mut tab = tab.lock();
+        let text = tab.structured.as_ref().and_then(|s| s.1.clone()).ok_or("mergiraf offers no whole result.")?;
+        tab.session.replace_all(&text);
+        tab.edited(Some(0));
+        Ok(tab.info(id, Some(0)))
+    })
+    .await
+}
+
+/// Merges a conflicted file of a repository with mergiraf, from the versions in
+/// the index. With `write`, a result without conflicts goes into the work tree
+/// (not staged). Returns the number of conflicts mergiraf left.
+#[tauri::command]
+pub async fn structured_merge_conflict(
+    workdir: String,
+    path: String,
+    mergiraf: Option<String>,
+    write: bool,
+) -> CmdResult<u32> {
+    blocking(move || {
+        let m = find_mergiraf(mergiraf)?;
+        let state = conflicts::repo_conflicts(Path::new(&workdir)).map_err(err)?;
+        let file = state.files.iter().find(|f| f.path == path).ok_or_else(|| format!("{path} is not conflicted"))?;
+        let [base, Some(local), Some(remote)] = &file.stages else {
+            return Err(format!("{path} was deleted on one side; keep or delete it as a whole file."));
+        };
+        let read = |s: &conflicts::Stage| conflicts::stage_content(&state.workdir, s).map_err(err);
+        let base = match base {
+            Some(b) => read(b)?,
+            None => Vec::new(),
+        };
+        let l = &state.labels;
+        let labels = [l.local.as_str(), l.base.as_str(), l.remote.as_str()];
+        let out = m.merge(&base, &read(local)?, &read(remote)?, &path, labels, MERGIRAF_TIMEOUT).map_err(err)?;
+        if write && out.conflicts == 0 {
+            let target = state.workdir.join(&file.path);
+            parallax_core::vfs::local::replace_file(&target, &out.data, None, None).map_err(err)?;
+        }
+        Ok(out.conflicts as u32)
     })
     .await
 }

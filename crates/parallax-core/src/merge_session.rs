@@ -34,6 +34,8 @@ pub enum Choice {
     Base,
     /// Changed by typing.
     Edited,
+    /// The syntax-aware merge's solution (mergiraf).
+    Syntax,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +92,26 @@ pub struct ConflictInfo {
     pub choice: Choice,
     pub input_row: u32,
     pub result_row: u32,
+    /// The syntax-aware merge has a solution for it.
+    pub suggestion: bool,
+    /// That solution still holds conflicts, smaller ones.
+    pub partial: bool,
+}
+
+/// What a syntax-aware merge offers, once mapped onto the blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyntaxOutcome {
+    /// Conflicts it solved, each offered as the conflict's syntax-aware choice.
+    pub solved: u32,
+    /// Conflicts it made smaller without solving them, offered the same way.
+    pub narrowed: u32,
+    /// Conflicts it left; with `mapped`, also conflicts it found where the line
+    /// merge has none (a key added twice).
+    pub conflicts: u32,
+    /// Its result lines up with this merge outside the conflicts. Otherwise it
+    /// changed text the line merge had merged, and only the whole result is offered.
+    pub mapped: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]
@@ -114,6 +136,9 @@ pub struct MergeSession {
     undo: Vec<Step>,
     redo: Vec<Step>,
     saved: u64,
+    /// The syntax-aware solution of each block, where there is one, and the
+    /// conflicts it still holds.
+    syntax: Vec<Option<(String, u32)>>,
 }
 
 fn hash(text: &str) -> u64 {
@@ -163,6 +188,7 @@ impl MergeSession {
             undo: Vec::new(),
             redo: Vec::new(),
             saved: 0,
+            syntax: Vec::new(),
         };
         let mut text = String::new();
         let mut row = 0;
@@ -226,6 +252,10 @@ impl MergeSession {
             Choice::RemoteLocal => join(&[&rp, &lp], nl),
             Choice::Base => join(&[&bp], nl),
             Choice::Edited => self.block_text(i),
+            Choice::Syntax => match self.syntax.get(i) {
+                Some(Some((text, _))) => text.clone(),
+                _ => self.block_text(i),
+            },
         }
     }
 
@@ -253,11 +283,13 @@ impl MergeSession {
 
     pub fn stats(&self) -> MergeStats {
         let mut s = MergeStats::default();
-        for (block, state) in self.blocks.iter().zip(&self.state) {
+        for (i, (block, state)) in self.blocks.iter().zip(&self.state).enumerate() {
             match block.kind {
                 BlockKind::Conflict => {
                     s.conflicts += 1;
-                    if state.choice == Choice::Unresolved {
+                    // A narrowed conflict from mergiraf is still one.
+                    let narrowed = state.choice == Choice::Syntax && self.syntax_left(i) > 0;
+                    if state.choice == Choice::Unresolved || narrowed {
                         s.unresolved += 1;
                     }
                 }
@@ -292,7 +324,10 @@ impl MergeSession {
 
     /// Puts a choice into a conflict (or any block). Returns the first result line changed.
     pub fn resolve(&mut self, block: usize, choice: Choice) -> Option<usize> {
-        if block >= self.blocks.len() || choice == Choice::Edited {
+        if block >= self.blocks.len()
+            || choice == Choice::Edited
+            || (choice == Choice::Syntax && self.syntax_suggestion(block).is_none())
+        {
             return None;
         }
         let choice = if choice == Choice::Auto && self.blocks[block].kind == BlockKind::Conflict {
@@ -505,6 +540,8 @@ impl MergeSession {
                     choice: self.state[i as usize].choice,
                     input_row: self.input_starts[i as usize],
                     result_row: row,
+                    suggestion: self.syntax_suggestion(i as usize).is_some(),
+                    partial: self.syntax_left(i as usize) > 0,
                 });
             }
             row += lines.len() as u32 + header as u32;
@@ -542,10 +579,121 @@ impl MergeSession {
         self.input_starts.get(block).copied().unwrap_or(0)
     }
 
+    /// The syntax-aware solution of a block.
+    pub fn syntax_suggestion(&self, block: usize) -> Option<&str> {
+        self.syntax.get(block)?.as_ref().map(|(text, _)| text.as_str())
+    }
+
+    /// The conflicts left in a block's syntax-aware solution.
+    pub fn syntax_left(&self, block: usize) -> u32 {
+        self.syntax.get(block).and_then(|s| s.as_ref()).map_or(0, |(_, left)| *left)
+    }
+
+    /// Takes in a syntax-aware merge of the same three texts (mergiraf's result).
+    /// Where it agrees with this merge outside the conflicts, the text it has in
+    /// place of each conflict becomes that conflict's syntax-aware choice: a
+    /// solution, or smaller conflicts (when the line merge joined two conflicts and
+    /// mergiraf solves one). Changes nothing in the result.
+    pub fn set_syntax_result(&mut self, merged: &str) -> SyntaxOutcome {
+        let conflicts = merge::split_lines(merged).iter().filter(|l| l.starts_with("<<<<<<<")).count() as u32;
+        self.syntax = vec![None; self.blocks.len()];
+        let Some(gaps) = self.syntax_gaps(merged) else {
+            return SyntaxOutcome { solved: 0, narrowed: 0, conflicts, mapped: false };
+        };
+        let (mut solved, mut narrowed) = (0, 0);
+        for (block, text) in gaps {
+            let (left, sides) = conflicting_lines(&text);
+            let b = &self.blocks[block];
+            if left == 0 {
+                solved += 1;
+            } else if (sides as usize) < b.local.len() + b.remote.len() {
+                narrowed += 1;
+            } else {
+                continue;
+            }
+            self.syntax[block] = Some((text, left));
+        }
+        SyntaxOutcome { solved, narrowed, conflicts, mapped: true }
+    }
+
+    /// The text `merged` has in place of each conflict block, or `None` when it
+    /// differs from this merge anywhere else.
+    fn syntax_gaps(&self, merged: &str) -> Option<Vec<(usize, String)>> {
+        // This merge without its conflicts: the lines of the automatic blocks, and
+        // where each conflict sits among them.
+        let mut skeleton: Vec<String> = Vec::new();
+        let mut gaps: Vec<(usize, usize)> = Vec::new();
+        for (i, block) in self.blocks.iter().enumerate() {
+            if block.kind == BlockKind::Conflict {
+                gaps.push((i, skeleton.len()));
+            } else {
+                let text = self.content(i, Choice::Auto);
+                skeleton.extend(merge::split_lines(&text).iter().map(|l| l.to_string()));
+            }
+        }
+        let theirs = merge::split_lines(merged);
+        // Line terminators may differ (mergiraf writes those of local throughout).
+        let key = |l: &str| l.trim_end_matches(['\r', '\n']).to_string();
+        let a: Vec<String> = skeleton.iter().map(|l| key(l)).collect();
+        let b: Vec<String> = theirs.iter().map(|l| key(l)).collect();
+        // Where each skeleton line is in `merged`; every one must be there.
+        let mut at = vec![usize::MAX; a.len()];
+        for op in similar::capture_diff_slices(similar::Algorithm::Myers, &a, &b) {
+            if let similar::DiffOp::Equal { old_index, new_index, len } = op {
+                for k in 0..len {
+                    at[old_index + k] = new_index + k;
+                }
+            }
+        }
+        if at.contains(&usize::MAX) {
+            return None;
+        }
+        // Between two skeleton lines with no conflict between them, nothing new.
+        let starts: std::collections::HashSet<usize> = gaps.iter().map(|g| g.1).collect();
+        for k in 0..=a.len() {
+            let prev = if k == 0 { 0 } else { at[k - 1] + 1 };
+            let next = if k == a.len() { b.len() } else { at[k] };
+            if next != prev && !starts.contains(&k) {
+                return None;
+            }
+        }
+        Some(
+            gaps.into_iter()
+                .map(|(block, k)| {
+                    let from = if k == 0 { 0 } else { at[k - 1] + 1 };
+                    let to = if k == a.len() { b.len() } else { at[k] };
+                    (block, theirs[from..to].concat())
+                })
+                .collect(),
+        )
+    }
+
     /// The text with Git's markers style for the result as saved now.
     pub fn result_text(&self) -> &str {
         &self.result.text
     }
+}
+
+/// The conflicts in a text, and the local and remote lines inside them (the base
+/// section and the markers not counted).
+fn conflicting_lines(text: &str) -> (u32, u32) {
+    let (mut conflicts, mut lines) = (0, 0);
+    let mut section = None;
+    for line in merge::split_lines(text) {
+        let marker = line.get(..7).filter(|m| ["<<<<<<<", "|||||||", "=======", ">>>>>>>"].contains(m));
+        match marker {
+            Some("<<<<<<<") => {
+                conflicts += 1;
+                section = Some(true);
+            }
+            Some("|||||||") => section = Some(false),
+            Some("=======") => section = Some(true),
+            Some(_) => section = None,
+            None if section == Some(true) => lines += 1,
+            None => {}
+        }
+    }
+    (conflicts, lines)
 }
 
 /// Decodes the three inputs of a merge.
@@ -570,6 +718,72 @@ mod tests {
 
     fn conflict(s: &MergeSession) -> usize {
         s.conflicts()[0].block as usize
+    }
+
+    /// Two conflicts far apart, and changes merged automatically around them.
+    const S_BASE: &str = "use a;\nstruct C {\n    x: u8,\n}\n\nconst P: u8 = 1;\nconst Q: u8 = 2;\n\nfn f() {\n    g(1)\n}\n\nfn h() {}\n";
+    const S_LOCAL: &str = "use a;\nstruct C {\n    x: u8,\n    y: u8,\n}\n\nconst P: u8 = 1;\nconst Q: u8 = 2;\n\nfn f() {\n    g(2)\n}\n\nfn h() {}\n";
+    const S_REMOTE: &str = "use a;\nuse b;\nstruct C {\n    x: u8,\n    z: u8,\n}\n\nconst P: u8 = 1;\nconst Q: u8 = 2;\n\nfn f() {\n    g(3)\n}\n\nfn h() {}\n";
+
+    #[test]
+    fn syntax_solutions_become_choices() {
+        let mut s = session(S_BASE, S_LOCAL, S_REMOTE);
+        assert_eq!(s.stats().conflicts, 2);
+        // What mergiraf gives: the fields of both sides, the call still a conflict.
+        let merged = "use a;\nuse b;\nstruct C {\n    x: u8,\n    y: u8,\n    z: u8,\n}\n\nconst P: u8 = 1;\nconst Q: u8 = 2;\n\nfn f() {\n<<<<<<< L\n    g(2)\n||||||| B\n    g(1)\n=======\n    g(3)\n>>>>>>> R\n}\n\nfn h() {}\n";
+        assert_eq!(s.set_syntax_result(merged), SyntaxOutcome { solved: 1, narrowed: 0, conflicts: 1, mapped: true });
+        let infos = s.conflicts();
+        assert_eq!(infos.iter().map(|c| c.suggestion).collect::<Vec<_>>(), [true, false]);
+        assert!(!s.is_dirty(), "offering solutions changes nothing");
+        assert_eq!(s.resolve(infos[1].block as usize, Choice::Syntax), None);
+        s.resolve(infos[0].block as usize, Choice::Syntax).unwrap();
+        assert_eq!(s.choice(infos[0].block as usize), Choice::Syntax);
+        assert!(s.result_text().contains("    y: u8,\n    z: u8,\n}"));
+        s.resolve(infos[1].block as usize, Choice::Local);
+        assert!(s.is_clean());
+        s.undo();
+        s.undo();
+        assert_eq!(s.choice(infos[0].block as usize), Choice::Unresolved);
+    }
+
+    /// Two conflicts the line merge joins into one; mergiraf solves the first.
+    #[test]
+    fn syntax_narrowed_conflicts_stay_unresolved() {
+        let base = "struct C {\n    x: u8,\n}\nfn f() {\n    g(1)\n}\n";
+        let local = "struct C {\n    x: u8,\n    y: u8,\n}\nfn f() {\n    g(2)\n}\n";
+        let remote = "struct C {\n    x: u8,\n    z: u8,\n}\nfn f() {\n    g(3)\n}\n";
+        let mut s = session(base, local, remote);
+        assert_eq!(s.stats().conflicts, 1);
+        let merged = "struct C {\n    x: u8,\n    y: u8,\n    z: u8,\n}\nfn f() {\n<<<<<<< L\n    g(2)\n||||||| B\n    g(1)\n=======\n    g(3)\n>>>>>>> R\n}\n";
+        let outcome = s.set_syntax_result(merged);
+        assert_eq!((outcome.solved, outcome.narrowed, outcome.mapped), (0, 1, true));
+        let c = s.conflicts()[0];
+        assert!(c.suggestion && c.partial);
+        s.resolve(c.block as usize, Choice::Syntax).unwrap();
+        assert_eq!(s.result_text(), merged);
+        assert_eq!(s.stats().unresolved, 1, "a smaller conflict is still a conflict");
+        assert!(!s.is_clean());
+    }
+
+    #[test]
+    fn syntax_result_changing_merged_text_is_not_mapped() {
+        let mut s = session(S_BASE, S_LOCAL, S_REMOTE);
+        let merged = "use a;\nuse b;\nstruct C { x: u8, y: u8, z: u8 }\n\nconst P: u8 = 1;\nconst Q: u8 = 2;\n\nfn f() {\n    g(2)\n}\n\nfn h() { }\n";
+        assert_eq!(s.set_syntax_result(merged), SyntaxOutcome { solved: 0, narrowed: 0, conflicts: 0, mapped: false });
+        assert!(s.conflicts().iter().all(|c| !c.suggestion));
+    }
+
+    #[test]
+    fn syntax_conflict_where_lines_merge_cleanly() {
+        let base = "{\n  \"a\": 1,\n  \"b\": 2\n}\n";
+        let local = "{\n  \"r\": 3,\n  \"a\": 1,\n  \"b\": 2\n}\n";
+        let remote = "{\n  \"a\": 1,\n  \"b\": 2,\n  \"r\": 5\n}\n";
+        let mut s = session(base, local, remote);
+        assert_eq!(s.stats().conflicts, 0);
+        let merged =
+            "{\n<<<<<<< L\n  \"r\": 3,\n||||||| B\n=======\n  \"r\": 5,\n>>>>>>> R\n  \"a\": 1,\n  \"b\": 2\n}\n";
+        let outcome = s.set_syntax_result(merged);
+        assert_eq!((outcome.solved, outcome.conflicts), (0, 1));
     }
 
     #[test]

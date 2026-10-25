@@ -171,3 +171,32 @@ fn three_way_merge() {
     fs::write(p("bin"), b"\0\x01").unwrap();
     assert_eq!(merge(&[&p("base"), &p("bin"), &p("remote")]).0, 2);
 }
+
+/// `--strategy syntax` takes mergiraf's result; a stand-in mergiraf here writes
+/// the remote side with a marker line, so its output is recognisable.
+#[cfg(unix)]
+#[test]
+fn syntax_strategy_uses_mergiraf() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let p = |n: &str| dir.path().join(n).to_str().unwrap().to_string();
+    fs::write(
+        p("mergiraf"),
+        "#!/bin/sh\n[ \"$1\" = --version ] && { echo 'mergiraf 9.9.9'; exit 0; }\n\
+         remote=$4; shift 4\nwhile [ $# -gt 0 ]; do [ \"$1\" = -o ] && out=$2; shift; done\n\
+         { echo solved; cat \"$remote\"; } > \"$out\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(p("mergiraf"), fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(p("base.rs"), "a\n").unwrap();
+    fs::write(p("local.rs"), "b\n").unwrap();
+    fs::write(p("remote.rs"), "c\n").unwrap();
+    let files = [p("base.rs"), p("local.rs"), p("remote.rs")];
+    let files: Vec<&str> = files.iter().map(String::as_str).collect();
+    assert_eq!(merge(&files).0, 1, "a conflict for the line merge");
+    let (code, out, _) = merge(&[&files[..], &["--strategy", "syntax", "--mergiraf", &p("mergiraf")]].concat());
+    assert_eq!((code, out.as_str()), (0, "solved\nc\n"));
+    let (code, _, err) = merge(&[&files[..], &["--strategy", "syntax", "--mergiraf", &p("missing")]].concat());
+    assert_eq!(code, 2);
+    assert!(err.contains("cargo install mergiraf"), "{err}");
+}

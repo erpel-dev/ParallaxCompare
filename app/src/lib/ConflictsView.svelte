@@ -3,6 +3,7 @@
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { api, type ConflictKind, type RepoConflicts } from "./api";
   import { notify } from "./toast.svelte";
+  import { mergiraf } from "./mergiraf.svelte";
 
   let {
     dir,
@@ -22,6 +23,13 @@
   /** Files resolved here but not staged yet: how, and whether staging removes them. */
   let resolved = $state<Record<string, { how: string; remove: boolean }>>({});
   let unlisten: UnlistenFn | undefined;
+  /** Conflicts mergiraf leaves in each text file (0: it solves the file), once checked. */
+  let syntaxLeft = $state<Record<string, number>>({});
+  let checking = $state(false);
+  let checkRun = 0;
+  const solvable = $derived(
+    mergiraf.enabled ? (repo?.files ?? []).filter((f) => syntaxLeft[f.path] === 0 && !resolved[f.path]).map((f) => f.path) : [],
+  );
 
   const kindLabel: Record<ConflictKind, string> = {
     bothModified: "both modified",
@@ -57,6 +65,7 @@
       repo = await api.repoConflicts(dir);
       error = "";
       onLoaded?.(repo);
+      checkSyntax(repo);
     } catch (e) {
       error = String(e);
     }
@@ -69,6 +78,37 @@
       resolved[path] = { how: removed ? `${remote ? "remote" : "local"} deletion kept` : `took ${remote ? "remote" : "local"}`, remove: removed };
     } catch (e) {
       notify(String(e));
+    }
+  }
+
+  /** Asks mergiraf, file by file, which conflicts it can solve; writes nothing. */
+  async function checkSyntax(state: RepoConflicts) {
+    const run = ++checkRun;
+    syntaxLeft = {};
+    if (!(await mergiraf.detect())) return;
+    checking = true;
+    try {
+      for (const f of state.files.filter((f) => f.text)) {
+        const left = await api.structuredMergeConflict(state.workdir, f.path, mergiraf.program, false).catch(() => null);
+        if (run !== checkRun) return;
+        if (left !== null) syntaxLeft[f.path] = left;
+      }
+    } finally {
+      if (run === checkRun) checking = false;
+    }
+  }
+
+  /** Writes mergiraf's results into the work tree; staging stays a separate step. */
+  async function solve(paths: string[]) {
+    if (!repo) return;
+    for (const path of paths) {
+      try {
+        const left = await api.structuredMergeConflict(repo.workdir, path, mergiraf.program, true);
+        if (left === 0) resolved[path] = { how: "solved by mergiraf, please review", remove: false };
+        else notify(`mergiraf left ${left} conflict${left === 1 ? "" : "s"} in ${path}.`, "info");
+      } catch (e) {
+        notify(String(e));
+      }
     }
   }
 
@@ -99,6 +139,12 @@
       {#if repo}<span class="path" title={repo.workdir}>{repo.workdir}</span>{/if}
     </div>
     <span class="grow"></span>
+    {#if checking}<span class="checking">✦ Asking mergiraf…</span>{/if}
+    {#if solvable.length}
+      <button class="sa" onclick={() => solve(solvable)} title="Write mergiraf's result into the work tree for each file it solves completely; nothing is staged">
+        ✦ Solve {solvable.length} with mergiraf
+      </button>
+    {/if}
     <button onclick={refresh} title="Read the conflicts from the index again">⟳ Refresh</button>
     <button class="primary" onclick={stage} disabled={busy || !ready.length} title="git add (or git rm) the files resolved here">
       Stage {ready.length || ""} resolved file{ready.length === 1 ? "" : "s"}
@@ -134,9 +180,10 @@
                   {f.path}
                 {/if}
               </td>
-              <td><span class="chip {f.kind}">{kindLabel[f.kind]}</span>{#if !f.text && (f.kind === "bothModified" || f.kind === "bothAdded")}<span class="chip">binary</span>{/if}</td>
+              <td><span class="chip {f.kind}">{kindLabel[f.kind]}</span>{#if !f.text && (f.kind === "bothModified" || f.kind === "bothAdded")}<span class="chip">binary</span>{/if}{#if mergiraf.enabled && syntaxLeft[f.path] === 0}<span class="chip sa" title="mergiraf merges this file by its syntax without conflicts">✦ mergiraf solves it</span>{/if}</td>
               <td class="state">{done ? `✓ ${done.how}` : "unresolved"}</td>
               <td class="actions">
+                {#if mergiraf.enabled && syntaxLeft[f.path] === 0 && !done}<button class="sa" onclick={() => solve([f.path])} title="Write mergiraf's result into the work tree">✦ Solve</button>{/if}
                 {#if f.text}<button onclick={() => onOpenMerge(repo!.workdir, f.path)}>Open merge</button>{/if}
                 <button onclick={() => takeSide(f.path, false)} title={missing(f.kind, false) ? "Delete the file, as local did" : "Use the local version of the whole file"}>
                   {missing(f.kind, false) ? "Delete (local)" : "Keep local"}
@@ -265,6 +312,18 @@
     border: 1px solid var(--line);
     margin-right: 4px;
     white-space: nowrap;
+  }
+  .chip.sa {
+    border-color: #1f9e7a;
+    color: #1f9e7a;
+  }
+  button.sa {
+    color: #1f9e7a;
+    border-color: #1f9e7a;
+  }
+  .checking {
+    color: var(--dim);
+    font-size: 12px;
   }
   .chip.deletedByUs,
   .chip.deletedByThem,

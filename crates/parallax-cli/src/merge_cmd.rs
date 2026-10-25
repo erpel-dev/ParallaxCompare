@@ -5,12 +5,14 @@
 
 use std::io::Write;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use parallax_core::conflicts::{self, ConflictKind};
 use parallax_core::merge::{self, Level, MarkerStyle, MergeOptions};
 use parallax_core::source::{SourceOptions, SourceSpec};
+use parallax_core::syntax_merge::Mergiraf;
 use parallax_core::text::{self, TextDoc};
 
 #[derive(Parser)]
@@ -18,7 +20,7 @@ use parallax_core::text::{self, TextDoc};
     name = "parallax merge",
     bin_name = "parallax merge",
     about = "Merge three versions of a file, or the conflicted files of a repository",
-    after_help = "EXAMPLES:\n  parallax merge base.c local.c remote.c -o merged.c\n  parallax merge repo@main~3:a.c repo@main:a.c repo@feature/x:a.c\n  parallax merge --repo .     # merge every conflicted file again, keep only clean results\n\nExit status: 0 merged, 1 conflicts left, 2 error."
+    after_help = "EXAMPLES:\n  parallax merge base.c local.c remote.c -o merged.c\n  parallax merge repo@main~3:a.c repo@main:a.c repo@feature/x:a.c\n  parallax merge --repo .     # merge every conflicted file again, keep only clean results\n  parallax merge --repo . --strategy syntax   # the same with mergiraf\n\nExit status: 0 merged, 1 conflicts left, 2 error."
 )]
 pub struct MergeCli {
     /// The common ancestor (any source: a path, repo@rev:path, an archive entry)
@@ -51,6 +53,15 @@ pub struct MergeCli {
     #[arg(long)]
     histogram: bool,
 
+    /// line: merge lines as Git does. syntax: let mergiraf (installed separately)
+    /// solve conflicts by the syntax of the file; its markers always show the base
+    #[arg(long, value_enum, default_value_t = Strategy::Line)]
+    strategy: Strategy,
+
+    /// The mergiraf program for --strategy syntax (default: $PARALLAX_MERGIRAF, then PATH)
+    #[arg(long, value_name = "PATH")]
+    mergiraf: Option<PathBuf>,
+
     /// Merge every conflicted file of the repository at this folder again: files
     /// that merge without conflicts are written to the work tree (not staged),
     /// the others are left as Git wrote them
@@ -63,6 +74,12 @@ enum Style {
     Merge,
     Diff3,
     Zdiff3,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Strategy {
+    Line,
+    Syntax,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -99,15 +116,51 @@ fn read_source(text: &str) -> Result<Vec<u8>> {
     Ok(source.vfs.read(&source.root).with_context(|| format!("reading {text}"))?.to_vec())
 }
 
+/// mergiraf and the file name it picks the language from, for --strategy syntax.
+type Syntax<'a> = Option<(&'a Mergiraf, &'a str)>;
+
+impl MergeCli {
+    fn mergiraf(&self) -> Result<Option<Mergiraf>> {
+        if self.strategy == Strategy::Line {
+            return Ok(None);
+        }
+        match Mergiraf::find(self.mergiraf.as_deref()) {
+            Ok(m) => Ok(Some(m)),
+            Err(parallax_core::Error::Unsupported(message)) => bail!(message),
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
 /// The merged text in the local file's encoding, and the number of conflicts.
-fn merge_bytes(base: &[u8], local: &[u8], remote: &[u8], opts: &MergeOptions) -> Result<(Vec<u8>, usize)> {
+fn merge_bytes(
+    base: &[u8],
+    local: &[u8],
+    remote: &[u8],
+    opts: &MergeOptions,
+    syntax: Syntax,
+) -> Result<(Vec<u8>, usize)> {
     for (name, data) in [("base", base), ("local", local), ("remote", remote)] {
         if text::is_binary(data) {
             bail!("the {name} version is binary; binary files cannot be merged line by line");
         }
     }
     let (b, l, r) = (text::decode(base), text::decode(local), text::decode(remote));
-    let (merged, conflicts) = merge::merge_text(&b.text, &l.text, &r.text, opts);
+    let (mut merged, mut conflicts) = merge::merge_text(&b.text, &l.text, &r.text, opts);
+    if let Some((mergiraf, name)) = syntax {
+        // mergiraf gets the decoded text, so any encoding works; the result is
+        // encoded like local again below.
+        let label = |i: usize, default: &'static str| opts.labels[i].as_deref().unwrap_or(default);
+        let labels = [label(0, "local"), label(1, "base"), label(2, "remote")];
+        let timeout = Duration::from_secs(10);
+        match mergiraf.merge(b.text.as_bytes(), l.text.as_bytes(), r.text.as_bytes(), name, labels, timeout) {
+            Ok(out) => {
+                merged = String::from_utf8_lossy(&out.data).into_owned();
+                conflicts = out.conflicts;
+            }
+            Err(e) => eprintln!("parallax merge: mergiraf failed, using the line merge: {e}"),
+        }
+    }
     let mut doc = TextDoc::empty_like(&l);
     doc.splice(0..0, &merged);
     Ok((doc.encode().map_err(anyhow::Error::msg)?, conflicts))
@@ -124,8 +177,11 @@ pub fn run(cli: &MergeCli) -> Result<bool> {
         cli.remote.as_deref().unwrap_or_default(),
     );
     let labels = [0, 1, 2].map(|i| cli.label.get(i).cloned().or_else(|| Some([local, base, remote][i].to_string())));
+    let mergiraf = cli.mergiraf()?;
+    let name = cli.output.as_ref().map_or(local.to_string(), |p| p.display().to_string());
+    let syntax = mergiraf.as_ref().map(|m| (m, name.as_str()));
     let (data, conflicts) =
-        merge_bytes(&read_source(base)?, &read_source(local)?, &read_source(remote)?, &cli.options(labels))?;
+        merge_bytes(&read_source(base)?, &read_source(local)?, &read_source(remote)?, &cli.options(labels), syntax)?;
     match &cli.output {
         Some(path) => std::fs::write(path, &data).with_context(|| format!("writing {}", path.display()))?,
         None => std::io::stdout().write_all(&data)?,
@@ -145,6 +201,7 @@ fn merge_repo(cli: &MergeCli, dir: &std::path::Path) -> Result<bool> {
     println!("{}", state.summary);
     let labels = [Some(state.labels.local.clone()), Some(state.labels.base.clone()), Some(state.labels.remote.clone())];
     let opts = cli.options(labels);
+    let mergiraf = cli.mergiraf()?;
     let mut clean = true;
     for file in &state.files {
         let outcome = match (file.kind, &file.stages) {
@@ -154,7 +211,8 @@ fn merge_repo(cli: &MergeCli, dir: &std::path::Path) -> Result<bool> {
                     Some(b) => read(b)?,
                     None => Vec::new(),
                 };
-                match merge_bytes(&base, &read(local)?, &read(remote)?, &opts) {
+                let syntax = mergiraf.as_ref().map(|m| (m, file.path.as_str()));
+                match merge_bytes(&base, &read(local)?, &read(remote)?, &opts, syntax) {
                     Ok((data, 0)) => {
                         let path = state.workdir.join(&file.path);
                         std::fs::write(&path, data).with_context(|| format!("writing {}", path.display()))?;

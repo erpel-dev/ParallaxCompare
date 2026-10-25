@@ -2,7 +2,7 @@
 
 use std::{
     io::Read,
-    process::{Command, Stdio},
+    process::{Command, ExitStatus, Stdio},
     sync::{Arc, mpsc},
     time::{Duration, Instant},
 };
@@ -60,6 +60,27 @@ pub(crate) fn run(cmd: &mut Command, program: &str, operation: &str, limit: Dura
 
 /// Like [`run`], with the output as bytes (file contents from `git cat-file`).
 pub(crate) fn run_bytes(cmd: &mut Command, program: &str, operation: &str, limit: Duration) -> Result<Vec<u8>> {
+    let (status, out, err) = run_status(cmd, program, operation, limit)?;
+    if status.success() {
+        Ok(out)
+    } else {
+        let detail = String::from_utf8_lossy(&err);
+        let detail = detail.trim();
+        Err(Error::Unsupported(format!(
+            "{operation}: {}",
+            if detail.is_empty() { status.to_string() } else { detail.to_string() }
+        )))
+    }
+}
+
+/// Runs a command to its end, whatever its exit status: the status, standard
+/// output and standard error. Only failing to start and the time limit are errors.
+pub(crate) fn run_status(
+    cmd: &mut Command,
+    program: &str,
+    operation: &str,
+    limit: Duration,
+) -> Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(windows)]
     {
@@ -95,16 +116,7 @@ pub(crate) fn run_bytes(cmd: &mut Command, program: &str, operation: &str, limit
     // a successful result would be worse than returning 1 s later.
     let deadline = Instant::now() + DRAIN_GRACE;
     let (out, err) = (stdout.until(deadline), stderr.until(deadline));
-    if status.success() {
-        Ok(out)
-    } else {
-        let detail = String::from_utf8_lossy(&err);
-        let detail = detail.trim();
-        Err(Error::Unsupported(format!(
-            "{operation}: {}",
-            if detail.is_empty() { status.to_string() } else { detail.to_string() }
-        )))
-    }
+    Ok((status, out, err))
 }
 
 #[cfg(test)]

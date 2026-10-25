@@ -5,6 +5,7 @@
   import { api, END, type Choice, type InputRowView, type LineView, type MergeInfo, type MergeRequest, type ResultRowView } from "./api";
   import { notify } from "./toast.svelte";
   import { RowPane, ROW } from "./rowPane.svelte";
+  import { mergiraf } from "./mergiraf.svelte";
   import { scaledWheel, spacerHeight, windowOffset } from "./vscroll";
 
   let {
@@ -47,6 +48,18 @@
   // Edits run one after another, in the order they were made.
   let queue: Promise<unknown> = Promise.resolve();
 
+  // The syntax-aware merge (mergiraf), when it is installed and turned on.
+  let structuredRunning = $state(false);
+  let structuredError = $state("");
+  let syntaxMenu = $state(false);
+  /** mergiraf's solution by block. */
+  const suggestionText = $derived(new Map(mergiraf.enabled ? (info?.suggestions ?? []) : []));
+  const conflictOf = $derived(new Map((info?.conflicts ?? []).map((c) => [c.block, c])));
+  /** Open conflicts mergiraf solved completely. */
+  const openSuggestions = $derived(
+    mergiraf.enabled ? (info?.conflicts ?? []).filter((c) => c.suggestion && !c.partial && c.choice === "unresolved") : [],
+  );
+
   /** Conflict number (1-based) by block. */
   const conflictNo = $derived(new Map((info?.conflicts ?? []).map((c, i) => [c.block, i + 1])));
   const anyDirty = $derived(!!info?.dirty || (editing !== null && draft !== original));
@@ -60,6 +73,7 @@
         return;
       }
       apply(opened, true);
+      runStructured();
       const first = opened.conflicts.find((c) => c.choice === "unresolved") ?? opened.conflicts[0];
       await tick();
       if (first) goTo(first.block);
@@ -111,6 +125,43 @@
         if (next) goTo(next.block);
       }
     });
+  }
+
+  // ---- syntax-aware merge ----
+
+  /** Asks mergiraf for solutions, in the background; the line merge stays as it is. */
+  async function runStructured(again = false) {
+    structuredError = "";
+    const found = await mergiraf.detect(again);
+    if (!found || !info || destroyed) return;
+    const id = info.id;
+    structuredRunning = true;
+    try {
+      await api.mergeStructured(id, mergiraf.program);
+      // Read back in order with any edit made meanwhile.
+      if (!destroyed) await change(() => api.mergeInfo(id));
+    } catch (e) {
+      structuredError = String(e);
+    } finally {
+      structuredRunning = false;
+    }
+  }
+
+  function applySuggestions() {
+    if (!info) return;
+    const id = info.id;
+    for (const c of openSuggestions) change(() => api.mergeResolve(id, c.block, "syntax"));
+  }
+
+  function useStructured() {
+    if (!info) return;
+    const id = info.id;
+    change(() => api.mergeUseStructuredResult(id));
+  }
+
+  function settingsChanged() {
+    mergiraf.save();
+    if (mergiraf.enabled) runStructured(true);
   }
 
   function goTo(block: number) {
@@ -374,7 +425,7 @@
       undo(true);
     } else if (e.altKey && current !== null && conflictNo.has(current)) {
       const choice: Choice | null =
-        e.key === "ArrowLeft" ? "local" : e.key === "ArrowRight" ? "remote" : e.key === "ArrowUp" ? "base" : e.key === "ArrowDown" ? (e.shiftKey ? "remoteLocal" : "localRemote") : null;
+        e.key === "ArrowLeft" ? "local" : e.key === "ArrowRight" ? "remote" : e.key === "ArrowUp" ? "base" : e.key === "ArrowDown" ? (e.shiftKey ? "remoteLocal" : "localRemote") : (e.key === "s" || e.key === "S") && suggestionText.has(current) ? "syntax" : null;
       if (choice) {
         e.preventDefault();
         choose(current, choice);
@@ -436,6 +487,8 @@
         return "from-b";
       case "edited":
         return "from-e";
+      case "syntax":
+        return "from-s";
     }
   }
 
@@ -448,6 +501,7 @@
     remoteLocal: "took both, remote first",
     base: "kept the base",
     edited: "edited by hand",
+    syntax: "took mergiraf's solution",
   };
 
   function rowsOf<T>(pane: RowPane<T>): [number, (T | undefined)[]] {
@@ -481,13 +535,18 @@
   }
 </script>
 
+<!-- Keys that reach no element (after the button that had focus went away) still count while this tab shows. -->
+<svelte:window onkeydown={(e) => e.target === document.body && root?.offsetParent && onKey(e)} />
+
 <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
 <div class="merge" bind:this={root} tabindex="0" onkeydown={onKey} role="application" aria-label="Merge">
   <div class="toolbar">
     <button onclick={() => step(false)} disabled={!info?.conflicts.length} title="Previous conflict (F7)">↑ Previous conflict</button>
     <button onclick={() => step(true)} disabled={!info?.conflicts.length} title="Next conflict (F8)">↓ Next conflict</button>
     {#if info}
-      {#if info.stats.conflicts === 0}
+      {#if !info.clean && !info.stats.unresolved}
+        <span class="counter open" title="Saving asks whether to keep them">Conflict markers in the result</span>
+      {:else if info.stats.conflicts === 0}
         <span class="counter done">No conflicts</span>
       {:else if info.stats.unresolved}
         <span class="counter open">{info.stats.unresolved} of {info.stats.conflicts} conflict{info.stats.conflicts > 1 ? "s" : ""} left</span>
@@ -498,6 +557,55 @@
     <span class="sep"></span>
     <button onclick={() => undo(false)} disabled={!info?.canUndo} title="Undo (Ctrl+Z)">↶ Undo</button>
     <button onclick={() => undo(true)} disabled={!info?.canRedo} title="Redo (Ctrl+Y)">↷ Redo</button>
+    <span class="sep"></span>
+    <div class="syntax">
+      <button
+        class="sa"
+        class:on={mergiraf.enabled && !!mergiraf.found}
+        onclick={() => (syntaxMenu = !syntaxMenu)}
+        aria-expanded={syntaxMenu}
+        title="Syntax-aware merging with mergiraf"
+      >✦ Syntax-aware{structuredRunning ? " …" : ""} ▾</button>
+      {#if syntaxMenu}
+        <div class="menu" role="dialog" aria-label="Syntax-aware merging">
+          <label><input type="checkbox" bind:checked={mergiraf.enabled} onchange={settingsChanged} /> Suggest solutions with mergiraf</label>
+          <label class="path">
+            <span>Program</span>
+            <input
+              bind:value={mergiraf.path}
+              onchange={settingsChanged}
+              placeholder="mergiraf on PATH"
+              spellcheck="false"
+              disabled={!mergiraf.enabled}
+            />
+          </label>
+          <p class="status">
+            {#if !mergiraf.enabled}
+              Off: conflicts are merged by lines only, as Git does.
+            {:else if structuredRunning}
+              Merging with mergiraf…
+            {:else if mergiraf.found}
+              mergiraf {mergiraf.found.version}{#if info?.structured}: solved {info.structured.solved}{info.structured.narrowed ? `, narrowed ${info.structured.narrowed}` : ""} of {info.stats.conflicts} conflict{info.stats.conflicts === 1 ? "" : "s"}{/if}
+            {:else if mergiraf.problem}
+              {mergiraf.problem}
+            {/if}
+          </p>
+          <p class="note">
+            mergiraf merges by the syntax of the file (struct fields, imports, keys, arguments) where lines conflict. It is a separate program:
+            <code>cargo install mergiraf</code> or your system's package.
+          </p>
+          <div class="row">
+            <button onclick={() => runStructured(true)} disabled={!mergiraf.enabled || structuredRunning}>Run again</button>
+            <button onclick={() => (syntaxMenu = false)}>Close</button>
+          </div>
+        </div>
+      {/if}
+    </div>
+    {#if openSuggestions.length}
+      <button class="sa-apply" onclick={applySuggestions} title="Take mergiraf's solution for every conflict it solved">
+        ✦ Apply {openSuggestions.length} solution{openSuggestions.length === 1 ? "" : "s"}
+      </button>
+    {/if}
     <span class="grow"></span>
     <button class="primary" onclick={save} disabled={!info} title="Write the result (Ctrl+S)">💾 Save result</button>
     {#if info?.startup}
@@ -510,6 +618,21 @@
     <div class="banner warn">
       The file in the work tree is not what this merge gives (a merge driver or a recorded resolution may have resolved more).
       <button onclick={useGitResult}>Start from Git's result</button>
+    </div>
+  {/if}
+  {#if structuredError && mergiraf.enabled}<div class="banner warn">mergiraf: {structuredError}</div>{/if}
+  {#if info?.structured?.whole && mergiraf.enabled}
+    <div class="banner warn">
+      {#if info.stats.conflicts === 0 && info.structured.conflicts > 0}
+        mergiraf found {info.structured.conflicts} conflict{info.structured.conflicts === 1 ? "" : "s"} the line merge did not, such as the same key or
+        declaration added on both sides.
+        <button onclick={useStructured}>Show mergiraf's result</button>
+      {:else}
+        mergiraf merged this file differently from the line merge, also outside the conflicts{info.structured.conflicts
+          ? `, and left ${info.structured.conflicts} conflict${info.structured.conflicts === 1 ? "" : "s"}`
+          : ""}.
+        <button onclick={useStructured}>Start from mergiraf's result</button>
+      {/if}
     </div>
   {/if}
   {#if loading}<div class="banner">Merging…</div>{/if}
@@ -555,7 +678,7 @@
     <div class="heads one">
       <div class="ph result">
         <span class="badge">RESULT</span><span class="name" title={info.output}>{info.output}</span>
-        <span class="legend"><i class="sw l"></i>from local <i class="sw r"></i>from remote <i class="sw both"></i>same on both <i class="sw e"></i>edited</span>
+        <span class="legend"><i class="sw l"></i>from local <i class="sw r"></i>from remote <i class="sw both"></i>same on both <i class="sw e"></i>edited{#if info.structured && mergiraf.enabled} <i class="sw s"></i>syntax-aware{/if}</span>
         {#if info.dirty}<span class="dirty">● unsaved</span>{/if}
       </div>
     </div>
@@ -572,7 +695,7 @@
             {#if !row}
               <div class="rrow loading"></div>
             {:else if !row.l}
-              <div class="rrow header" class:open={row.c === "unresolved"} class:current={row.i === current}>
+              <div class="rrow header" class:open={row.c === "unresolved" || (row.c === "syntax" && conflictOf.get(row.i)?.partial)} class:current={row.i === current}>
                 <span class="title">Conflict {conflictNo.get(row.i)} of {info.stats.conflicts}</span>
                 {#if row.c === "unresolved"}
                   <button class="l" onclick={() => choose(row.i, "local")} title="Alt+←">← Take local</button>
@@ -580,8 +703,15 @@
                   <button onclick={() => choose(row.i, "localRemote")} title="Alt+↓">Take both</button>
                   <button onclick={() => choose(row.i, "remoteLocal")} title="Alt+Shift+↓">Both, remote first</button>
                   <button onclick={() => choose(row.i, "base")} title="Alt+↑">Keep base</button>
+                  {#if suggestionText.has(row.i)}
+                    {#if conflictOf.get(row.i)?.partial}
+                      <button class="s" onclick={() => choose(row.i, "syntax")} title={`Alt+S · mergiraf solves part of this conflict and leaves a smaller one:\n${suggestionText.get(row.i)}`}>✦ Narrow down</button>
+                    {:else}
+                      <button class="s" onclick={() => choose(row.i, "syntax")} title={`Alt+S · mergiraf's solution:\n${suggestionText.get(row.i)}`}>✦ Syntax-aware</button>
+                    {/if}
+                  {/if}
                 {:else}
-                  <span class="state">{choiceLabel[row.c]}</span>
+                  <span class="state">{row.c === "syntax" && conflictOf.get(row.i)?.partial ? "mergiraf narrowed it; edit the rest by hand" : choiceLabel[row.c]}</span>
                   <button class="link" onclick={() => choose(row.i, "unresolved")}>Undo choice</button>
                 {/if}
               </div>
@@ -617,7 +747,7 @@
       <span>{info.encoding}{info.syntax ? ` · ${info.syntax}` : ""}</span>
       <span class="grow"></span>
       {#if savedNote}<span>{savedNote}</span>{/if}
-      <span>F7/F8 conflicts · Alt+←/→ take a side · Alt+↓ both · click a result line to edit</span>
+      <span>F7/F8 conflicts · Alt+←/→ take a side · Alt+↓ both{suggestionText.size ? " · Alt+S syntax-aware" : ""} · click a result line to edit</span>
     </div>
   {/if}
 </div>
@@ -635,6 +765,8 @@
     --t-conflict: color-mix(in srgb, var(--m-conflict) 17%, var(--bg));
     --t-both: color-mix(in srgb, var(--m-local) 9%, color-mix(in srgb, var(--m-remote) 12%, var(--bg)));
     --t-edited: color-mix(in srgb, var(--m-edited) 14%, var(--bg));
+    --m-syntax: #1f9e7a;
+    --t-syntax: color-mix(in srgb, var(--m-syntax) 15%, var(--bg));
     display: flex;
     flex-direction: column;
     height: 100%;
@@ -877,6 +1009,75 @@
   .from-e {
     background: var(--t-edited);
     box-shadow: inset 3px 0 0 var(--m-edited);
+  }
+  .from-s {
+    background: var(--t-syntax);
+    box-shadow: inset 3px 0 0 var(--m-syntax);
+  }
+  .sw.s {
+    background: var(--m-syntax);
+  }
+  .rrow.header button.s {
+    color: var(--m-syntax);
+    border-color: var(--m-syntax);
+    font-weight: 600;
+  }
+  .syntax {
+    position: relative;
+  }
+  .sa.on {
+    color: var(--m-syntax);
+    border-color: var(--m-syntax);
+  }
+  .sa-apply {
+    color: #fff;
+    background: var(--m-syntax);
+    border-color: var(--m-syntax);
+  }
+  .syntax .menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    z-index: 30;
+    width: 340px;
+    padding: 12px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    box-shadow: 0 6px 24px rgb(0 0 0 / 0.25);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    font-size: 12px;
+  }
+  .menu label {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+  .menu .path span {
+    color: var(--dim);
+    flex: none;
+  }
+  .menu .path input {
+    flex: 1;
+    min-width: 0;
+    font-family: var(--mono);
+  }
+  .menu p {
+    margin: 0;
+  }
+  .menu .status {
+    font-weight: 600;
+    overflow-wrap: anywhere;
+  }
+  .menu .note {
+    color: var(--dim);
+  }
+  .menu .row {
+    display: flex;
+    gap: 6px;
+    justify-content: flex-end;
   }
   .rrow.cf .code {
     color: var(--dim);
