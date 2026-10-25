@@ -384,15 +384,18 @@ export interface ConflictInfo {
   choice: Choice;
   inputRow: number;
   resultRow: number;
-  /** mergiraf has a solution for it. */
+  /** The syntax-aware merge has a solution for it. */
   suggestion: boolean;
   /** That solution still holds smaller conflicts. */
   partial: boolean;
 }
 
-/** What mergiraf, the syntax-aware merge, offered for a merge. */
+/** What the syntax-aware merge offered for a merge. */
 export interface StructuredMerge {
-  version: string;
+  /** The engine and its version: "weave 0.6.1". */
+  engine: string;
+  /** The engine has no result of its own for this file. */
+  declined: boolean;
   /** Conflicts it solved; each is offered on its conflict. */
   solved: number;
   /** Conflicts it made smaller; offered the same way. */
@@ -403,9 +406,10 @@ export interface StructuredMerge {
   whole: boolean;
 }
 
-export interface MergirafInfo {
-  path: string;
-  version: string;
+/** A syntax-aware merge engine: "weave 0.6.1", or mergiraf and its program. */
+export interface SyntaxEngine {
+  name: string;
+  path: string | null;
 }
 
 export interface MergeInfo {
@@ -431,7 +435,7 @@ export interface MergeInfo {
   startup: boolean;
   repo: [string, string] | null;
   structured: StructuredMerge | null;
-  /** mergiraf's solution by conflict block. */
+  /** The syntax-aware solution by conflict block. */
   suggestions: [number, string][];
   encoding: string;
   changed?: number;
@@ -490,11 +494,13 @@ export const api = {
   mergeResultText: (id: number, start: number, end: number) => invoke<string>("merge_result_text", { id, start, end }),
   mergeUndo: (id: number, redo: boolean) => invoke<MergeInfo>("merge_undo", { id, redo }),
   mergeUseGitResult: (id: number) => invoke<MergeInfo>("merge_use_git_result", { id }),
-  mergirafInfo: (path: string | null) => invoke<MergirafInfo>("mergiraf_info", { path }),
-  mergeStructured: (id: number, mergiraf: string | null) => invoke<MergeInfo>("merge_structured", { id, mergiraf }),
+  syntaxEngine: (engine: string, mergiraf: string | null) => invoke<SyntaxEngine>("syntax_engine", { engine, mergiraf }),
+  mergeStructured: (id: number, engine: string, mergiraf: string | null) =>
+    invoke<MergeInfo>("merge_structured", { id, engine, mergiraf }),
   mergeUseStructuredResult: (id: number) => invoke<MergeInfo>("merge_use_structured_result", { id }),
-  structuredMergeConflict: (workdir: string, path: string, mergiraf: string | null, write: boolean) =>
-    invoke<number>("structured_merge_conflict", { workdir, path, mergiraf, write }),
+  /** Conflicts left, or `null` when the engine declined the file. */
+  structuredMergeConflict: (workdir: string, path: string, engine: string, mergiraf: string | null, write: boolean) =>
+    invoke<number | null>("structured_merge_conflict", { workdir, path, engine, mergiraf, write }),
   mergeSave: (id: number, withMarkers: boolean) => invoke<{ info: MergeInfo; clean: boolean }>("merge_save", { id, withMarkers }),
   repoConflicts: (dir: string) => invoke<RepoConflicts>("repo_conflicts", { dir }),
   takeConflictSide: (workdir: string, path: string, remote: boolean) => invoke<boolean>("take_conflict_side", { workdir, path, remote }),

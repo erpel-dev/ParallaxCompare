@@ -11,7 +11,7 @@ use parallax_core::highlight::{self, DocHighlighter, ThemeKind};
 use parallax_core::merge::{BlockKind, MarkerStyle, MergeOptions};
 use parallax_core::merge_session::{Choice, ConflictInfo, MergeSession, MergeStats};
 use parallax_core::source::{SourceOptions, SourceSpec};
-use parallax_core::syntax_merge::Mergiraf;
+use parallax_core::syntax_merge::{Engine, Mergiraf};
 use parallax_core::text::{self, TextDoc};
 use parallax_core::textdiff;
 use parking_lot::Mutex;
@@ -42,15 +42,20 @@ pub struct MergeTab {
     startup: bool,
     /// A conflicted file of a repository: the work tree and the path in it.
     repo: Option<(PathBuf, String)>,
-    /// What mergiraf offered, and its whole result when that is offered as a whole.
+    /// What the syntax-aware merge offered, and its whole result when that is offered as a whole.
     structured: Option<(StructuredView, Option<String>)>,
 }
 
-/// The syntax-aware merge (mergiraf) of a merge tab.
+/// The syntax-aware merge of a merge tab.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(Default)]
 pub struct StructuredView {
-    version: String,
+    /// The engine and its version: "weave 0.6.1".
+    engine: String,
+    /// The engine has no result of its own for this file (weave declines files
+    /// it cannot parse into units).
+    declined: bool,
     /// Conflicts it solved; each is offered on its conflict.
     solved: u32,
     /// Conflicts it made smaller; offered the same way.
@@ -98,7 +103,7 @@ pub struct MergeInfo {
     startup: bool,
     repo: Option<(String, String)>,
     structured: Option<StructuredView>,
-    /// mergiraf's solution of each conflict that has one, by block.
+    /// The syntax-aware solution of each conflict that has one, by block.
     suggestions: Vec<(u32, String)>,
     encoding: &'static str,
     /// The first result line an edit changed, for placing the caret.
@@ -490,65 +495,80 @@ pub async fn merge_use_git_result(state: State<'_, AppState>, id: u64) -> CmdRes
 /// How long mergiraf may take in the app before it falls back to a line merge.
 const MERGIRAF_TIMEOUT: Duration = Duration::from_secs(5);
 
-fn find_mergiraf(path: Option<String>) -> CmdResult<Mergiraf> {
-    Mergiraf::find(path.as_deref().map(Path::new)).map_err(|e| match e {
-        parallax_core::Error::Unsupported(message) => message,
-        e => e.to_string(),
-    })
+/// The syntax-aware engine a request names: "builtin" (weave) or "mergiraf"
+/// (at `mergiraf`, else from `PARALLAX_MERGIRAF` or `PATH`).
+fn engine(kind: &str, mergiraf: Option<String>) -> CmdResult<Engine> {
+    match kind {
+        "builtin" => Ok(Engine::Builtin),
+        "mergiraf" => Mergiraf::find(mergiraf.as_deref().map(Path::new)).map(Engine::Mergiraf).map_err(|e| match e {
+            parallax_core::Error::Unsupported(message) => message,
+            e => e.to_string(),
+        }),
+        other => Err(format!("unknown merge engine: {other}")),
+    }
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct MergirafView {
-    path: String,
-    version: String,
+pub struct EngineView {
+    /// With its version: "weave 0.6.1".
+    name: String,
+    /// The program, for mergiraf.
+    path: Option<String>,
 }
 
-/// The installed mergiraf: at `path`, else from `PARALLAX_MERGIRAF` or `PATH`.
+/// The syntax-aware engine that would run, or why it cannot.
 #[tauri::command]
-pub async fn mergiraf_info(path: Option<String>) -> CmdResult<MergirafView> {
+pub async fn syntax_engine(engine: String, mergiraf: Option<String>) -> CmdResult<EngineView> {
     blocking(move || {
-        let m = find_mergiraf(path)?;
-        Ok(MergirafView { path: m.path.display().to_string(), version: m.version })
+        let e = self::engine(&engine, mergiraf)?;
+        let path = match &e {
+            Engine::Mergiraf(m) => Some(m.path.display().to_string()),
+            Engine::Builtin => None,
+        };
+        Ok(EngineView { name: e.name(), path })
     })
     .await
 }
 
-/// Runs mergiraf on the merge's three versions and offers its solutions: per
-/// conflict where its result lines up with this merge, else as a whole. The
-/// result is not changed.
+/// Runs the syntax-aware merge on the merge's three versions and offers its
+/// solutions: per conflict where its result lines up with this merge, else as a
+/// whole. The result is not changed.
 #[tauri::command]
-pub async fn merge_structured(state: State<'_, AppState>, id: u64, mergiraf: Option<String>) -> CmdResult<MergeInfo> {
+pub async fn merge_structured(
+    state: State<'_, AppState>,
+    id: u64,
+    engine: String,
+    mergiraf: Option<String>,
+) -> CmdResult<MergeInfo> {
     let tab = merge(&state, id)?;
     blocking(move || {
-        let m = find_mergiraf(mergiraf)?;
-        // The lock is not held while mergiraf runs.
+        let e = self::engine(&engine, mergiraf)?;
+        // The lock is not held while the engine runs.
         let (base, local, remote, name, labels) = {
             let t = tab.lock();
             let s = &t.session;
             (s.base.text.clone(), s.local.text.clone(), s.remote.text.clone(), t.output.clone(), t.labels.clone())
         };
         let labels = [labels[0].as_str(), labels[1].as_str(), labels[2].as_str()];
-        let out = m
-            .merge(
-                base.as_bytes(),
-                local.as_bytes(),
-                remote.as_bytes(),
-                &name.to_string_lossy(),
-                labels,
-                MERGIRAF_TIMEOUT,
-            )
-            .map_err(err)?;
-        let text = String::from_utf8_lossy(&out.data).into_owned();
+        let out =
+            e.merge_text(&base, &local, &remote, &name.to_string_lossy(), labels, MERGIRAF_TIMEOUT).map_err(err)?;
         let mut t = tab.lock();
+        let Some((text, _)) = out else {
+            t.session.clear_syntax();
+            let view = StructuredView { engine: e.name(), declined: true, ..Default::default() };
+            t.structured = Some((view, None));
+            return Ok(t.info(id, None));
+        };
         let outcome = t.session.set_syntax_result(&text);
         let whole = !outcome.mapped || (t.session.stats().conflicts == 0 && outcome.conflicts > 0);
         let view = StructuredView {
-            version: m.version,
+            engine: e.name(),
             solved: outcome.solved,
             narrowed: outcome.narrowed,
             conflicts: outcome.conflicts,
             whole,
+            declined: false,
         };
         t.structured = Some((view, whole.then_some(text)));
         Ok(t.info(id, None))
@@ -556,13 +576,13 @@ pub async fn merge_structured(state: State<'_, AppState>, id: u64, mergiraf: Opt
     .await
 }
 
-/// Replaces the result by mergiraf's whole result.
+/// Replaces the result by the syntax-aware merge's whole result.
 #[tauri::command]
 pub async fn merge_use_structured_result(state: State<'_, AppState>, id: u64) -> CmdResult<MergeInfo> {
     let tab = merge(&state, id)?;
     blocking(move || {
         let mut tab = tab.lock();
-        let text = tab.structured.as_ref().and_then(|s| s.1.clone()).ok_or("mergiraf offers no whole result.")?;
+        let text = tab.structured.as_ref().and_then(|s| s.1.clone()).ok_or("There is no whole result to take.")?;
         tab.session.replace_all(&text);
         tab.edited(Some(0));
         Ok(tab.info(id, Some(0)))
@@ -570,18 +590,20 @@ pub async fn merge_use_structured_result(state: State<'_, AppState>, id: u64) ->
     .await
 }
 
-/// Merges a conflicted file of a repository with mergiraf, from the versions in
-/// the index. With `write`, a result without conflicts goes into the work tree
-/// (not staged). Returns the number of conflicts mergiraf left.
+/// Merges a conflicted file of a repository by syntax, from the versions in the
+/// index. With `write`, a result without conflicts goes into the work tree (not
+/// staged). Returns the number of conflicts left, or `None` when the engine
+/// declined the file.
 #[tauri::command]
 pub async fn structured_merge_conflict(
     workdir: String,
     path: String,
+    engine: String,
     mergiraf: Option<String>,
     write: bool,
-) -> CmdResult<u32> {
+) -> CmdResult<Option<u32>> {
     blocking(move || {
-        let m = find_mergiraf(mergiraf)?;
+        let e = self::engine(&engine, mergiraf)?;
         let state = conflicts::repo_conflicts(Path::new(&workdir)).map_err(err)?;
         let file = state.files.iter().find(|f| f.path == path).ok_or_else(|| format!("{path} is not conflicted"))?;
         let [base, Some(local), Some(remote)] = &file.stages else {
@@ -594,12 +616,16 @@ pub async fn structured_merge_conflict(
         };
         let l = &state.labels;
         let labels = [l.local.as_str(), l.base.as_str(), l.remote.as_str()];
-        let out = m.merge(&base, &read(local)?, &read(remote)?, &path, labels, MERGIRAF_TIMEOUT).map_err(err)?;
+        let Some(out) =
+            e.merge_file(&base, &read(local)?, &read(remote)?, &path, labels, MERGIRAF_TIMEOUT).map_err(err)?
+        else {
+            return Ok(None);
+        };
         if write && out.conflicts == 0 {
             let target = state.workdir.join(&file.path);
             parallax_core::vfs::local::replace_file(&target, &out.data, None, None).map_err(err)?;
         }
-        Ok(out.conflicts as u32)
+        Ok(Some(out.conflicts as u32))
     })
     .await
 }

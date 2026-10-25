@@ -12,7 +12,7 @@ use clap::{Parser, ValueEnum};
 use parallax_core::conflicts::{self, ConflictKind};
 use parallax_core::merge::{self, Level, MarkerStyle, MergeOptions};
 use parallax_core::source::{SourceOptions, SourceSpec};
-use parallax_core::syntax_merge::Mergiraf;
+use parallax_core::syntax_merge::{Engine, Mergiraf};
 use parallax_core::text::{self, TextDoc};
 
 #[derive(Parser)]
@@ -20,7 +20,7 @@ use parallax_core::text::{self, TextDoc};
     name = "parallax merge",
     bin_name = "parallax merge",
     about = "Merge three versions of a file, or the conflicted files of a repository",
-    after_help = "EXAMPLES:\n  parallax merge base.c local.c remote.c -o merged.c\n  parallax merge repo@main~3:a.c repo@main:a.c repo@feature/x:a.c\n  parallax merge --repo .     # merge every conflicted file again, keep only clean results\n  parallax merge --repo . --strategy syntax   # the same with mergiraf\n\nExit status: 0 merged, 1 conflicts left, 2 error."
+    after_help = "EXAMPLES:\n  parallax merge base.c local.c remote.c -o merged.c\n  parallax merge repo@main~3:a.c repo@main:a.c repo@feature/x:a.c\n  parallax merge --repo .     # merge every conflicted file again, keep only clean results\n  parallax merge --repo . --strategy syntax   # the same, merging by syntax where lines conflict\n\nExit status: 0 merged, 1 conflicts left, 2 error."
 )]
 pub struct MergeCli {
     /// The common ancestor (any source: a path, repo@rev:path, an archive entry)
@@ -53,12 +53,13 @@ pub struct MergeCli {
     #[arg(long)]
     histogram: bool,
 
-    /// line: merge lines as Git does. syntax: let mergiraf (installed separately)
-    /// solve conflicts by the syntax of the file; its markers always show the base
+    /// line: merge lines as Git does. syntax: merge by the syntax of the file where
+    /// lines conflict (built in). mergiraf: the same with mergiraf, installed
+    /// separately. Both write the base into the markers
     #[arg(long, value_enum, default_value_t = Strategy::Line)]
     strategy: Strategy,
 
-    /// The mergiraf program for --strategy syntax (default: $PARALLAX_MERGIRAF, then PATH)
+    /// The mergiraf program for --strategy mergiraf (default: $PARALLAX_MERGIRAF, then PATH)
     #[arg(long, value_name = "PATH")]
     mergiraf: Option<PathBuf>,
 
@@ -80,6 +81,7 @@ enum Style {
 enum Strategy {
     Line,
     Syntax,
+    Mergiraf,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -116,18 +118,19 @@ fn read_source(text: &str) -> Result<Vec<u8>> {
     Ok(source.vfs.read(&source.root).with_context(|| format!("reading {text}"))?.to_vec())
 }
 
-/// mergiraf and the file name it picks the language from, for --strategy syntax.
-type Syntax<'a> = Option<(&'a Mergiraf, &'a str)>;
+/// The syntax-aware engine and the file name it picks the language from.
+type Syntax<'a> = Option<(&'a Engine, &'a str)>;
 
 impl MergeCli {
-    fn mergiraf(&self) -> Result<Option<Mergiraf>> {
-        if self.strategy == Strategy::Line {
-            return Ok(None);
-        }
-        match Mergiraf::find(self.mergiraf.as_deref()) {
-            Ok(m) => Ok(Some(m)),
-            Err(parallax_core::Error::Unsupported(message)) => bail!(message),
-            Err(e) => Err(e.into()),
+    fn engine(&self) -> Result<Option<Engine>> {
+        match self.strategy {
+            Strategy::Line => Ok(None),
+            Strategy::Syntax => Ok(Some(Engine::Builtin)),
+            Strategy::Mergiraf => match Mergiraf::find(self.mergiraf.as_deref()) {
+                Ok(m) => Ok(Some(Engine::Mergiraf(m))),
+                Err(parallax_core::Error::Unsupported(message)) => bail!(message),
+                Err(e) => Err(e.into()),
+            },
         }
     }
 }
@@ -147,18 +150,17 @@ fn merge_bytes(
     }
     let (b, l, r) = (text::decode(base), text::decode(local), text::decode(remote));
     let (mut merged, mut conflicts) = merge::merge_text(&b.text, &l.text, &r.text, opts);
-    if let Some((mergiraf, name)) = syntax {
-        // mergiraf gets the decoded text, so any encoding works; the result is
+    if let Some((engine, name)) = syntax {
+        // The engine gets the decoded text, so any encoding works; the result is
         // encoded like local again below.
         let label = |i: usize, default: &'static str| opts.labels[i].as_deref().unwrap_or(default);
         let labels = [label(0, "local"), label(1, "base"), label(2, "remote")];
         let timeout = Duration::from_secs(10);
-        match mergiraf.merge(b.text.as_bytes(), l.text.as_bytes(), r.text.as_bytes(), name, labels, timeout) {
-            Ok(out) => {
-                merged = String::from_utf8_lossy(&out.data).into_owned();
-                conflicts = out.conflicts;
-            }
-            Err(e) => eprintln!("parallax merge: mergiraf failed, using the line merge: {e}"),
+        match engine.merge_text(&b.text, &l.text, &r.text, name, labels, timeout) {
+            Ok(Some(out)) => (merged, conflicts) = out,
+            // The built-in engine declines files it cannot parse into units.
+            Ok(None) => {}
+            Err(e) => eprintln!("parallax merge: {} failed, using the line merge: {e}", engine.name()),
         }
     }
     let mut doc = TextDoc::empty_like(&l);
@@ -177,9 +179,9 @@ pub fn run(cli: &MergeCli) -> Result<bool> {
         cli.remote.as_deref().unwrap_or_default(),
     );
     let labels = [0, 1, 2].map(|i| cli.label.get(i).cloned().or_else(|| Some([local, base, remote][i].to_string())));
-    let mergiraf = cli.mergiraf()?;
+    let engine = cli.engine()?;
     let name = cli.output.as_ref().map_or(local.to_string(), |p| p.display().to_string());
-    let syntax = mergiraf.as_ref().map(|m| (m, name.as_str()));
+    let syntax = engine.as_ref().map(|m| (m, name.as_str()));
     let (data, conflicts) =
         merge_bytes(&read_source(base)?, &read_source(local)?, &read_source(remote)?, &cli.options(labels), syntax)?;
     match &cli.output {
@@ -201,7 +203,7 @@ fn merge_repo(cli: &MergeCli, dir: &std::path::Path) -> Result<bool> {
     println!("{}", state.summary);
     let labels = [Some(state.labels.local.clone()), Some(state.labels.base.clone()), Some(state.labels.remote.clone())];
     let opts = cli.options(labels);
-    let mergiraf = cli.mergiraf()?;
+    let engine = cli.engine()?;
     let mut clean = true;
     for file in &state.files {
         let outcome = match (file.kind, &file.stages) {
@@ -211,7 +213,7 @@ fn merge_repo(cli: &MergeCli, dir: &std::path::Path) -> Result<bool> {
                     Some(b) => read(b)?,
                     None => Vec::new(),
                 };
-                let syntax = mergiraf.as_ref().map(|m| (m, file.path.as_str()));
+                let syntax = engine.as_ref().map(|m| (m, file.path.as_str()));
                 match merge_bytes(&base, &read(local)?, &read(remote)?, &opts, syntax) {
                     Ok((data, 0)) => {
                         let path = state.workdir.join(&file.path);

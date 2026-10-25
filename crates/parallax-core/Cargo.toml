@@ -8,6 +8,8 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+# The built-in syntax-aware merge (MIT OR Apache-2.0). Pinned: its API changes between 0.x releases.
+weave-core = "=0.6.1"
 gix = { version = "0.89", default-features = false, features = ["revision", "max-performance-safe", "sha1"] }
 zip = { version = "9", default-features = false, features = ["deflate", "deflate64", "bzip2", "lzma", "time", "unreserved"] }
 sevenz-rust2 = { version = "0.24", default-features = false, features = ["bzip2", "ppmd", "util", "compress"] }

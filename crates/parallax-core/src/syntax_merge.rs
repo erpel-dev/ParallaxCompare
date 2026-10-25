@@ -1,10 +1,13 @@
-//! Syntax-aware merging through mergiraf (<https://mergiraf.org>), when it is
-//! installed. mergiraf is a separate program (GPL-3.0); it is run, never linked.
+//! Syntax-aware merging: merging by the structure of a file where Git's line
+//! merge leaves conflicts, such as both sides adding struct fields, imports or
+//! JSON keys at the same place.
 //!
-//! mergiraf parses the three versions with tree-sitter and merges their syntax
-//! trees where Git's line merge leaves conflicts: both sides adding struct
-//! fields, imports or JSON keys at the same place, or changing different
-//! arguments on the same line. Everything else it merges as Git does.
+//! Two engines do it:
+//! - built in: weave (`weave-core`, MIT OR Apache-2.0), which parses the three
+//!   versions with tree-sitter and merges functions, classes and keys as units;
+//! - mergiraf (<https://mergiraf.org>), when it is installed. It is a separate
+//!   program (GPL-3.0): it is run, never linked. It merges syntax trees node by
+//!   node and also solves changes to different arguments on one line.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -21,6 +24,124 @@ pub struct Mergiraf {
     pub path: PathBuf,
     /// As `mergiraf --version` prints it: "0.20.0".
     pub version: String,
+}
+
+/// The version of the built-in engine, as pinned in Cargo.toml.
+pub const WEAVE_VERSION: &str = "0.6.1";
+
+/// A syntax-aware merge engine.
+#[derive(Debug, Clone)]
+pub enum Engine {
+    /// weave, built in.
+    Builtin,
+    Mergiraf(Mergiraf),
+}
+
+impl Engine {
+    /// The engine and its version, for showing: "weave 0.6.1".
+    pub fn name(&self) -> String {
+        match self {
+            Engine::Builtin => format!("weave {WEAVE_VERSION}"),
+            Engine::Mergiraf(m) => format!("mergiraf {}", m.version),
+        }
+    }
+
+    /// Merges three texts. `name` is the file's name or path, from which the
+    /// language is found; `labels` (local, base, remote) go after the markers.
+    /// `None`: the engine has no result of its own for this file (weave declined).
+    pub fn merge_text(
+        &self,
+        base: &str,
+        local: &str,
+        remote: &str,
+        name: &str,
+        labels: [&str; 3],
+        timeout: Duration,
+    ) -> Result<Option<(String, usize)>> {
+        match self {
+            Engine::Builtin => weave_merge(base, local, remote, name, labels),
+            Engine::Mergiraf(m) => {
+                let out = m.merge(base.as_bytes(), local.as_bytes(), remote.as_bytes(), name, labels, timeout)?;
+                Ok(Some((String::from_utf8_lossy(&out.data).into_owned(), out.conflicts)))
+            }
+        }
+    }
+
+    /// Merges three versions of a file as stored: the text is decoded for the
+    /// built-in engine and the result encoded like `local` again.
+    pub fn merge_file(
+        &self,
+        base: &[u8],
+        local: &[u8],
+        remote: &[u8],
+        name: &str,
+        labels: [&str; 3],
+        timeout: Duration,
+    ) -> Result<Option<SyntaxMerge>> {
+        match self {
+            Engine::Mergiraf(m) => m.merge(base, local, remote, name, labels, timeout).map(Some),
+            Engine::Builtin => {
+                if [base, local, remote].iter().any(|d| crate::text::is_binary(d)) {
+                    return Err(Error::Unsupported("binary files are not merged by syntax".into()));
+                }
+                let (b, l, r) = (crate::text::decode(base), crate::text::decode(local), crate::text::decode(remote));
+                let Some((text, conflicts)) = weave_merge(&b.text, &l.text, &r.text, name, labels)? else {
+                    return Ok(None);
+                };
+                let mut doc = crate::text::TextDoc::empty_like(&l);
+                doc.splice(0..0, &text);
+                let data = doc.encode().map_err(Error::Unsupported)?;
+                Ok(Some(SyntaxMerge { data, conflicts }))
+            }
+        }
+    }
+}
+
+/// The built-in merge. weave writes "ours" and "theirs" after its markers; they
+/// are replaced by `labels`. It is new code from outside, so a panic in it is
+/// caught and reported instead of taking the app down.
+fn weave_merge(
+    base: &str,
+    local: &str,
+    remote: &str,
+    name: &str,
+    labels: [&str; 3],
+) -> Result<Option<(String, usize)>> {
+    let run = || {
+        let host = weave_core::host::Host::default();
+        let format = weave_core::MarkerFormat::standard(7);
+        weave_core::entity_merge_fmt(base, local, remote, name, &format, &host)
+    };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run))
+        .map_err(|_| Error::Unsupported("the built-in syntax-aware merge failed on this file".into()))?;
+    let conflicts = count_conflicts(result.content.as_bytes());
+    // Declined (an unknown language, a file it cannot key): it reports a conflict
+    // for the whole file and returns local unchanged, without markers.
+    if !result.is_clean() && conflicts == 0 {
+        return Ok(None);
+    }
+    let mut text = String::with_capacity(result.content.len());
+    for line in result.content.split_inclusive('\n') {
+        let body = line.trim_end_matches(['\r', '\n']);
+        let label = match body {
+            "<<<<<<< ours" => Some(("<<<<<<<", labels[0])),
+            "||||||| base" => Some(("|||||||", labels[1])),
+            ">>>>>>> theirs" => Some((">>>>>>>", labels[2])),
+            _ => None,
+        };
+        match label {
+            Some((marker, name)) => {
+                text.push_str(marker);
+                if !name.is_empty() {
+                    text.push(' ');
+                    text.push_str(name);
+                }
+                text.push_str(&line[body.len()..]);
+            }
+            None => text.push_str(line),
+        }
+    }
+    Ok(Some((text, conflicts)))
 }
 
 /// mergiraf's result for one file.
@@ -144,6 +265,54 @@ mod tests {
         assert_eq!(parse_version("mergiraf 0.20.0\n").as_deref(), Some("0.20.0"));
         assert_eq!(parse_version("git version 2.45"), None);
         assert_eq!(count_conflicts(b"a\n<<<<<<< l\nx\n=======\ny\n>>>>>>> r\n<<<<<<<\n"), 2);
+    }
+
+    #[test]
+    fn builtin_merges_struct_fields_and_keeps_real_conflicts() {
+        let base = "struct Config {\n    name: String,\n    port: u16,\n}\n\nfn untouched() -> u32 {\n    1\n}\n\nfn speed() -> u32 {\n    compute(4)\n}\n";
+        let local = base
+            .replace("    port: u16,\n", "    port: u16,\n    timeout_ms: u64,\n")
+            .replace("compute(4)", "compute_slow(4)");
+        let remote = base
+            .replace("    port: u16,\n", "    port: u16,\n    verbose: bool,\n")
+            .replace("compute(4)", "compute_fast(4)");
+        let labels = ["main", "base", "feature"];
+        let (text, conflicts) = Engine::Builtin
+            .merge_text(base, &local, &remote, "config.rs", labels, Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        assert_eq!(conflicts, 1);
+        assert!(text.contains("    timeout_ms: u64,\n    verbose: bool,\n}"), "{text}");
+        assert!(text.contains("<<<<<<< main\n") && text.contains(">>>>>>> feature\n"), "{text}");
+        // The session offers the struct as solved, the function as a conflict.
+        let (b, l, r) = crate::merge_session::decode3(base.as_bytes(), local.as_bytes(), remote.as_bytes());
+        let mut s = crate::merge_session::MergeSession::new(b, l, r, Default::default());
+        let outcome = s.set_syntax_result(&text);
+        assert_eq!((outcome.solved, outcome.conflicts, outcome.mapped), (1, 1, true));
+    }
+
+    #[test]
+    fn builtin_declines_unknown_formats_and_binary_files() {
+        let labels = ["l", "b", "r"];
+        let t = Duration::from_secs(5);
+        // A file type it has no parser for: no result of its own.
+        let out = Engine::Builtin.merge_text("a\n", "b\n", "c\n", "notes.unknownext", labels, t).unwrap();
+        assert!(out.as_ref().is_none_or(|(text, n)| *n > 0 && text.contains("<<<<<<<")), "{out:?}");
+        assert!(Engine::Builtin.merge_file(b"a", b"\0b", b"c", "x.bin", labels, t).is_err());
+    }
+
+    #[test]
+    fn builtin_keeps_the_local_encoding() {
+        // Latin-1 local file: decoded for weave, written back in Latin-1.
+        let base = b"struct A {\n    x: u8, // caf\xe9\n}\n";
+        let local = b"struct A {\n    x: u8, // caf\xe9\n    y: u8,\n}\n";
+        let remote = b"struct A {\n    x: u8, // caf\xe9\n    z: u8,\n}\n";
+        let out = Engine::Builtin
+            .merge_file(base, local, remote, "a.rs", ["l", "b", "r"], Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        assert_eq!(out.conflicts, 0);
+        assert_eq!(out.data, b"struct A {\n    x: u8, // caf\xe9\n    y: u8,\n    z: u8,\n}\n".to_vec());
     }
 
     #[test]

@@ -59,7 +59,7 @@ fn main() {
             merge::merge_result_text,
             merge::merge_undo,
             merge::merge_use_git_result,
-            merge::mergiraf_info,
+            merge::syntax_engine,
             merge::merge_structured,
             merge::merge_use_structured_result,
             merge::structured_merge_conflict,

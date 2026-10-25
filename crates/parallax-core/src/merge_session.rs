@@ -584,6 +584,11 @@ impl MergeSession {
         self.syntax.get(block)?.as_ref().map(|(text, _)| text.as_str())
     }
 
+    /// Forgets the syntax-aware solutions (choices already made stay).
+    pub fn clear_syntax(&mut self) {
+        self.syntax.clear();
+    }
+
     /// The conflicts left in a block's syntax-aware solution.
     pub fn syntax_left(&self, block: usize) -> u32 {
         self.syntax.get(block).and_then(|s| s.as_ref()).map_or(0, |(_, left)| *left)

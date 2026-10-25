@@ -5,7 +5,7 @@
   import { api, END, type Choice, type InputRowView, type LineView, type MergeInfo, type MergeRequest, type ResultRowView } from "./api";
   import { notify } from "./toast.svelte";
   import { RowPane, ROW } from "./rowPane.svelte";
-  import { mergiraf } from "./mergiraf.svelte";
+  import { syntaxMerge } from "./syntaxMerge.svelte";
   import { scaledWheel, spacerHeight, windowOffset } from "./vscroll";
 
   let {
@@ -48,16 +48,20 @@
   // Edits run one after another, in the order they were made.
   let queue: Promise<unknown> = Promise.resolve();
 
-  // The syntax-aware merge (mergiraf), when it is installed and turned on.
+  // The syntax-aware merge (built in, or mergiraf), unless it is turned off.
   let structuredRunning = $state(false);
   let structuredError = $state("");
   let syntaxMenu = $state(false);
-  /** mergiraf's solution by block. */
-  const suggestionText = $derived(new Map(mergiraf.enabled ? (info?.suggestions ?? []) : []));
+  /** The syntax-aware result shown: from the engine chosen now, not one chosen before. */
+  const active = $derived(
+    syntaxMerge.enabled && !!syntaxMerge.found && !!info?.structured && info.structured.engine === syntaxMerge.found.name,
+  );
+  /** The syntax-aware solution by block. */
+  const suggestionText = $derived(new Map(active ? (info?.suggestions ?? []) : []));
   const conflictOf = $derived(new Map((info?.conflicts ?? []).map((c) => [c.block, c])));
-  /** Open conflicts mergiraf solved completely. */
+  /** Open conflicts the syntax-aware merge solved completely. */
   const openSuggestions = $derived(
-    mergiraf.enabled ? (info?.conflicts ?? []).filter((c) => c.suggestion && !c.partial && c.choice === "unresolved") : [],
+    active ? (info?.conflicts ?? []).filter((c) => c.suggestion && !c.partial && c.choice === "unresolved") : [],
   );
 
   /** Conflict number (1-based) by block. */
@@ -129,15 +133,15 @@
 
   // ---- syntax-aware merge ----
 
-  /** Asks mergiraf for solutions, in the background; the line merge stays as it is. */
+  /** Asks the syntax-aware merge for solutions, in the background; the line merge stays as it is. */
   async function runStructured(again = false) {
     structuredError = "";
-    const found = await mergiraf.detect(again);
+    const found = await syntaxMerge.detect(again);
     if (!found || !info || destroyed) return;
     const id = info.id;
     structuredRunning = true;
     try {
-      await api.mergeStructured(id, mergiraf.program);
+      await api.mergeStructured(id, syntaxMerge.engine, syntaxMerge.program);
       // Read back in order with any edit made meanwhile.
       if (!destroyed) await change(() => api.mergeInfo(id));
     } catch (e) {
@@ -160,8 +164,9 @@
   }
 
   function settingsChanged() {
-    mergiraf.save();
-    if (mergiraf.enabled) runStructured(true);
+    syntaxMerge.save();
+    structuredError = "";
+    if (syntaxMerge.enabled) runStructured(true);
   }
 
   function goTo(block: number) {
@@ -501,7 +506,7 @@
     remoteLocal: "took both, remote first",
     base: "kept the base",
     edited: "edited by hand",
-    syntax: "took mergiraf's solution",
+    syntax: "took the syntax-aware solution",
   };
 
   function rowsOf<T>(pane: RowPane<T>): [number, (T | undefined)[]] {
@@ -561,48 +566,61 @@
     <div class="syntax">
       <button
         class="sa"
-        class:on={mergiraf.enabled && !!mergiraf.found}
+        class:on={syntaxMerge.enabled && !!syntaxMerge.found}
         onclick={() => (syntaxMenu = !syntaxMenu)}
         aria-expanded={syntaxMenu}
-        title="Syntax-aware merging with mergiraf"
+        title="Merge by the syntax of the file where lines conflict"
       >✦ Syntax-aware{structuredRunning ? " …" : ""} ▾</button>
       {#if syntaxMenu}
         <div class="menu" role="dialog" aria-label="Syntax-aware merging">
-          <label><input type="checkbox" bind:checked={mergiraf.enabled} onchange={settingsChanged} /> Suggest solutions with mergiraf</label>
-          <label class="path">
-            <span>Program</span>
-            <input
-              bind:value={mergiraf.path}
-              onchange={settingsChanged}
-              placeholder="mergiraf on PATH"
-              spellcheck="false"
-              disabled={!mergiraf.enabled}
-            />
-          </label>
+          <p class="note">Solutions for conflicts, from merging by the syntax of the file (struct fields, imports, keys) where lines conflict. They are offered, never applied by themselves.</p>
+          <div class="choices" role="radiogroup" aria-label="Engine">
+            <label>
+              <input type="radio" name="syntax-engine" value="builtin" bind:group={syntaxMerge.engine} onchange={settingsChanged} />
+              <span><b>Built in</b> <small>weave: merges functions, classes and keys as units</small></span>
+            </label>
+            <label>
+              <input type="radio" name="syntax-engine" value="mergiraf" bind:group={syntaxMerge.engine} onchange={settingsChanged} />
+              <span><b>mergiraf</b> <small>installed separately; also merges within a line</small></span>
+            </label>
+            <label>
+              <input type="radio" name="syntax-engine" value="off" bind:group={syntaxMerge.engine} onchange={settingsChanged} />
+              <span><b>Off</b> <small>lines only, as Git merges</small></span>
+            </label>
+          </div>
+          {#if syntaxMerge.engine === "mergiraf"}
+            <label class="path">
+              <span>Program</span>
+              <input bind:value={syntaxMerge.path} onchange={settingsChanged} placeholder="mergiraf on PATH" spellcheck="false" />
+            </label>
+          {/if}
           <p class="status">
-            {#if !mergiraf.enabled}
-              Off: conflicts are merged by lines only, as Git does.
+            {#if !syntaxMerge.enabled}
+              Off: conflicts are merged by lines only.
             {:else if structuredRunning}
-              Merging with mergiraf…
-            {:else if mergiraf.found}
-              mergiraf {mergiraf.found.version}{#if info?.structured}: solved {info.structured.solved}{info.structured.narrowed ? `, narrowed ${info.structured.narrowed}` : ""} of {info.stats.conflicts} conflict{info.stats.conflicts === 1 ? "" : "s"}{/if}
-            {:else if mergiraf.problem}
-              {mergiraf.problem}
+              Merging with {syntaxMerge.found?.name ?? "the syntax-aware merge"}…
+            {:else if syntaxMerge.problem}
+              {syntaxMerge.problem}
+            {:else if active && info?.structured?.declined}
+              {info.structured.engine} does not merge this kind of file; the line merge stands.
+            {:else if active && info?.structured}
+              {info.structured.engine}: solved {info.structured.solved}{info.structured.narrowed ? `, narrowed ${info.structured.narrowed}` : ""} of {info.stats.conflicts} conflict{info.stats.conflicts === 1 ? "" : "s"}
+            {:else if syntaxMerge.found}
+              {syntaxMerge.found.name}
             {/if}
           </p>
-          <p class="note">
-            mergiraf merges by the syntax of the file (struct fields, imports, keys, arguments) where lines conflict. It is a separate program:
-            <code>cargo install mergiraf</code> or your system's package.
-          </p>
+          {#if syntaxMerge.engine === "mergiraf"}
+            <p class="note">mergiraf (GPL-3.0) is run as a separate program, never bundled: <code>cargo install mergiraf</code> or your system's package.</p>
+          {/if}
           <div class="row">
-            <button onclick={() => runStructured(true)} disabled={!mergiraf.enabled || structuredRunning}>Run again</button>
+            <button onclick={() => runStructured(true)} disabled={!syntaxMerge.enabled || structuredRunning}>Run again</button>
             <button onclick={() => (syntaxMenu = false)}>Close</button>
           </div>
         </div>
       {/if}
     </div>
     {#if openSuggestions.length}
-      <button class="sa-apply" onclick={applySuggestions} title="Take mergiraf's solution for every conflict it solved">
+      <button class="sa-apply" onclick={applySuggestions} title="Take the syntax-aware solution for every conflict it solved">
         ✦ Apply {openSuggestions.length} solution{openSuggestions.length === 1 ? "" : "s"}
       </button>
     {/if}
@@ -620,18 +638,18 @@
       <button onclick={useGitResult}>Start from Git's result</button>
     </div>
   {/if}
-  {#if structuredError && mergiraf.enabled}<div class="banner warn">mergiraf: {structuredError}</div>{/if}
-  {#if info?.structured?.whole && mergiraf.enabled}
+  {#if structuredError && syntaxMerge.enabled}<div class="banner warn">Syntax-aware merge: {structuredError}</div>{/if}
+  {#if info?.structured?.whole && active}
     <div class="banner warn">
       {#if info.stats.conflicts === 0 && info.structured.conflicts > 0}
-        mergiraf found {info.structured.conflicts} conflict{info.structured.conflicts === 1 ? "" : "s"} the line merge did not, such as the same key or
+        {info.structured.engine} found {info.structured.conflicts} conflict{info.structured.conflicts === 1 ? "" : "s"} the line merge did not, such as the same key or
         declaration added on both sides.
-        <button onclick={useStructured}>Show mergiraf's result</button>
+        <button onclick={useStructured}>Show its result</button>
       {:else}
-        mergiraf merged this file differently from the line merge, also outside the conflicts{info.structured.conflicts
+        {info.structured.engine} merged this file differently from the line merge, also outside the conflicts{info.structured.conflicts
           ? `, and left ${info.structured.conflicts} conflict${info.structured.conflicts === 1 ? "" : "s"}`
           : ""}.
-        <button onclick={useStructured}>Start from mergiraf's result</button>
+        <button onclick={useStructured}>Start from its result</button>
       {/if}
     </div>
   {/if}
@@ -678,7 +696,7 @@
     <div class="heads one">
       <div class="ph result">
         <span class="badge">RESULT</span><span class="name" title={info.output}>{info.output}</span>
-        <span class="legend"><i class="sw l"></i>from local <i class="sw r"></i>from remote <i class="sw both"></i>same on both <i class="sw e"></i>edited{#if info.structured && mergiraf.enabled} <i class="sw s"></i>syntax-aware{/if}</span>
+        <span class="legend"><i class="sw l"></i>from local <i class="sw r"></i>from remote <i class="sw both"></i>same on both <i class="sw e"></i>edited{#if active && !info.structured?.declined} <i class="sw s"></i>syntax-aware{/if}</span>
         {#if info.dirty}<span class="dirty">● unsaved</span>{/if}
       </div>
     </div>
@@ -705,13 +723,13 @@
                   <button onclick={() => choose(row.i, "base")} title="Alt+↑">Keep base</button>
                   {#if suggestionText.has(row.i)}
                     {#if conflictOf.get(row.i)?.partial}
-                      <button class="s" onclick={() => choose(row.i, "syntax")} title={`Alt+S · mergiraf solves part of this conflict and leaves a smaller one:\n${suggestionText.get(row.i)}`}>✦ Narrow down</button>
+                      <button class="s" onclick={() => choose(row.i, "syntax")} title={`Alt+S · ${info.structured?.engine ?? ""} solves part of this conflict and leaves a smaller one:\n${suggestionText.get(row.i)}`}>✦ Narrow down</button>
                     {:else}
-                      <button class="s" onclick={() => choose(row.i, "syntax")} title={`Alt+S · mergiraf's solution:\n${suggestionText.get(row.i)}`}>✦ Syntax-aware</button>
+                      <button class="s" onclick={() => choose(row.i, "syntax")} title={`Alt+S · ${info.structured?.engine ?? ""}'s solution:\n${suggestionText.get(row.i)}`}>✦ Syntax-aware</button>
                     {/if}
                   {/if}
                 {:else}
-                  <span class="state">{row.c === "syntax" && conflictOf.get(row.i)?.partial ? "mergiraf narrowed it; edit the rest by hand" : choiceLabel[row.c]}</span>
+                  <span class="state">{row.c === "syntax" && conflictOf.get(row.i)?.partial ? "narrowed by syntax; edit the rest by hand" : choiceLabel[row.c]}</span>
                   <button class="link" onclick={() => choose(row.i, "unresolved")}>Undo choice</button>
                 {/if}
               </div>
@@ -1072,6 +1090,18 @@
     overflow-wrap: anywhere;
   }
   .menu .note {
+    color: var(--dim);
+  }
+  .menu .choices {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .menu .choices label {
+    align-items: flex-start;
+  }
+  .menu .choices small {
+    display: block;
     color: var(--dim);
   }
   .menu .row {

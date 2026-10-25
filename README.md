@@ -200,14 +200,18 @@ The merge view shows local, base and remote side by side, with the result below 
 
 **Conflicts of a repository:** `parallax-compare .` in a repository with conflicts, or *Resolve conflicts in a repository…* in *New comparison*, lists the conflicted files with what went on (*Merging feature/x into main*, *Rebasing …*, *Cherry-picking …*, *Reverting …*) and which branch is local and which is remote; in a rebase, local is the branch being rebased onto. Text files open in the merge view; saving one without conflicts marks it resolved. **Keep local** and **Take remote** resolve any file as a whole, also binary files and files deleted on one side (then the choice is to keep or delete it). Nothing is staged until **Stage resolved files** runs `git add` (or `git rm`) for the files resolved here; then continue with `git commit`, `git rebase --continue` and so on.
 
-**Syntax-aware merging (optional):** with [mergiraf](https://mergiraf.org) installed (`cargo install mergiraf`, or your system's package), the merge view also asks it for solutions. mergiraf is a separate program; ParallaxCompare only runs it, never bundles it, and nothing changes when it is missing. It merges by the syntax of the file where lines conflict: struct fields, imports or JSON keys both sides added at the same place, different arguments changed on the same line, and more for about 40 languages and formats. Its solutions are offered, never applied by themselves:
+**Syntax-aware merging:** where lines conflict, the merge view also merges by the syntax of the file and offers the solutions it finds: struct fields, imports, functions or JSON keys both sides added at the same place, a function moved on one side and edited on the other. The engine is chosen under **✦ Syntax-aware** in the toolbar:
 
-- a conflict mergiraf solves gets **✦ Syntax-aware** (Alt+S) on its bar, with the solution in the tooltip; **✦ Apply N solutions** in the toolbar takes all of them. Taken solutions are tinted green in the result; undo works as for any choice
-- where Git's line merge joined two conflicts and mergiraf solves one, **✦ Narrow down** replaces the conflict by the smaller one left
-- where mergiraf finds a conflict the line merge did not (the same key added on both sides), or merges the file differently also outside the conflicts, a banner offers its whole result
-- in the list of a repository's conflicts, files mergiraf solves completely are marked **✦ mergiraf solves it**; **✦ Solve** writes its result into the work tree (not staged) and marks the file for review
+- **Built in** (the default): [weave](https://github.com/Ataraxy-Labs/weave), which merges functions, classes and keys as units (weave lists 38 languages and formats, among them JSON, YAML and TOML). It runs inside the app in milliseconds. Files it cannot parse into such units keep the line merge
+- **mergiraf**: [mergiraf](https://mergiraf.org), when installed separately (`cargo install mergiraf`, or your system's package; GPL-3.0, so it is run as its own program and never bundled). It merges syntax trees node by node and also solves changes to different arguments on the same line. Found through the path given there, `PARALLAX_MERGIRAF` or `PATH`; it gets 5 seconds per file
+- **Off**: lines only, as Git merges
 
-**✦ Syntax-aware** in the toolbar turns it off and on and takes the program's path; otherwise it is looked up in `PARALLAX_MERGIRAF`, then on `PATH`. mergiraf gets 5 seconds per file, after which it falls back to a line merge itself.
+Solutions are offered, never applied by themselves:
+
+- a conflict the engine solves gets **✦ Syntax-aware** (Alt+S) on its bar, with the solution in the tooltip; **✦ Apply N solutions** in the toolbar takes all of them. Taken solutions are tinted green in the result; undo works as for any choice
+- where Git's line merge joined two conflicts and the engine solves one, **✦ Narrow down** replaces the conflict by the smaller one left
+- where the engine finds a conflict the line merge did not (the same key added on both sides), or merges the file differently also outside the conflicts, a banner offers its whole result
+- in the list of a repository's conflicts, files the engine solves completely are marked **✦ solvable by syntax**; **✦ Solve** writes the result into the work tree (not staged) and marks the file for review
 
 *Merge three files…* in *New comparison* merges any three files (the base is optional; without it every difference is a conflict) into a result file of your choice.
 
@@ -308,7 +312,7 @@ $ parallax ~/src/shop@main ~/src/shop@feature/checkout
 
 Files are compared through their content view, so `parallax old.docx new.docx` prints a diff of the document text, and two images report their differing pixels. `--raw` compares the plain bytes as text instead, and `--bytes` turns off the ≈ similar status in folder compares.
 
-`parallax merge BASE LOCAL REMOTE [-o OUT]` merges three versions of a file without a window, like `git merge-file`, and writes the result with conflict markers where needed (to standard output without `-o`). The sources can be any of the forms above, such as `repo@main:src/a.c`. `--style diff3|zdiff3` adds the base to the markers, `-L` sets the labels, `--level` chooses how hard to make conflicts small. `--strategy syntax` lets mergiraf merge instead, when it is installed (`--mergiraf PATH` names the program; its markers always include the base). `parallax merge --repo .` merges every conflicted file of a repository again and writes those that merge cleanly (useful when Git's diff left a conflict that a different alignment avoids); nothing is staged. Exit status: 0 merged, 1 conflicts left, 2 error.
+`parallax merge BASE LOCAL REMOTE [-o OUT]` merges three versions of a file without a window, like `git merge-file`, and writes the result with conflict markers where needed (to standard output without `-o`). The sources can be any of the forms above, such as `repo@main:src/a.c`. `--style diff3|zdiff3` adds the base to the markers, `-L` sets the labels, `--level` chooses how hard to make conflicts small. `--strategy syntax` also merges by syntax where lines conflict, with the built-in engine; `--strategy mergiraf` does it with mergiraf when installed (`--mergiraf PATH` names the program). Both write the base into the markers. `parallax merge --repo .` merges every conflicted file of a repository again and writes those that merge cleanly (useful when Git's diff left a conflict that a different alignment avoids); nothing is staged. Exit status: 0 merged, 1 conflicts left, 2 error.
 
 `parallax --help` lists all options (`--merge-base`, `--quick`, `--strict-eol`, `--verify-archives`, `--include`, `-x/--exclude`, `--json`, `--whitespace`, `--histogram`, `-U` …). Exit status: 0 identical or only similar, 1 different, 2 error.
 
@@ -365,4 +369,4 @@ This is the first version of the MVP described in the concept. Not done yet:
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE). Notices of included third-party code are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

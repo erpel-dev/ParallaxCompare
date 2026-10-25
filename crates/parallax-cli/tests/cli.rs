@@ -172,7 +172,7 @@ fn three_way_merge() {
     assert_eq!(merge(&[&p("base"), &p("bin"), &p("remote")]).0, 2);
 }
 
-/// `--strategy syntax` takes mergiraf's result; a stand-in mergiraf here writes
+/// `--strategy mergiraf` takes mergiraf's result; a stand-in mergiraf here writes
 /// the remote side with a marker line, so its output is recognisable.
 #[cfg(unix)]
 #[test]
@@ -194,9 +194,24 @@ fn syntax_strategy_uses_mergiraf() {
     let files = [p("base.rs"), p("local.rs"), p("remote.rs")];
     let files: Vec<&str> = files.iter().map(String::as_str).collect();
     assert_eq!(merge(&files).0, 1, "a conflict for the line merge");
-    let (code, out, _) = merge(&[&files[..], &["--strategy", "syntax", "--mergiraf", &p("mergiraf")]].concat());
+    let (code, out, _) = merge(&[&files[..], &["--strategy", "mergiraf", "--mergiraf", &p("mergiraf")]].concat());
     assert_eq!((code, out.as_str()), (0, "solved\nc\n"));
-    let (code, _, err) = merge(&[&files[..], &["--strategy", "syntax", "--mergiraf", &p("missing")]].concat());
+    let (code, _, err) = merge(&[&files[..], &["--strategy", "mergiraf", "--mergiraf", &p("missing")]].concat());
     assert_eq!(code, 2);
     assert!(err.contains("cargo install mergiraf"), "{err}");
+}
+
+/// `--strategy syntax` merges struct fields both sides added with the built-in engine.
+#[test]
+fn syntax_strategy_is_built_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = |n: &str| dir.path().join(n).to_str().unwrap().to_string();
+    fs::write(p("base.rs"), "struct C {\n    a: u8,\n}\n").unwrap();
+    fs::write(p("local.rs"), "struct C {\n    a: u8,\n    b: u8,\n}\n").unwrap();
+    fs::write(p("remote.rs"), "struct C {\n    a: u8,\n    c: u8,\n}\n").unwrap();
+    let files = [p("base.rs"), p("local.rs"), p("remote.rs")];
+    let files: Vec<&str> = files.iter().map(String::as_str).collect();
+    assert_eq!(merge(&files).0, 1);
+    let (code, out, _) = merge(&[&files[..], &["--strategy", "syntax"]].concat());
+    assert_eq!((code, out.as_str()), (0, "struct C {\n    a: u8,\n    b: u8,\n    c: u8,\n}\n"));
 }

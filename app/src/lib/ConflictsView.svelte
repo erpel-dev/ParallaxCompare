@@ -3,7 +3,7 @@
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { api, type ConflictKind, type RepoConflicts } from "./api";
   import { notify } from "./toast.svelte";
-  import { mergiraf } from "./mergiraf.svelte";
+  import { syntaxMerge } from "./syntaxMerge.svelte";
 
   let {
     dir,
@@ -23,12 +23,15 @@
   /** Files resolved here but not staged yet: how, and whether staging removes them. */
   let resolved = $state<Record<string, { how: string; remove: boolean }>>({});
   let unlisten: UnlistenFn | undefined;
-  /** Conflicts mergiraf leaves in each text file (0: it solves the file), once checked. */
+  /** Conflicts the syntax-aware merge leaves in each text file (0: it solves the file), once checked. */
   let syntaxLeft = $state<Record<string, number>>({});
+  /** The engine `syntaxLeft` comes from; shown only while it is still the one chosen. */
+  let checkedWith = $state("");
+  const syntaxOn = $derived(syntaxMerge.enabled && !!checkedWith && syntaxMerge.found?.name === checkedWith);
   let checking = $state(false);
   let checkRun = 0;
   const solvable = $derived(
-    mergiraf.enabled ? (repo?.files ?? []).filter((f) => syntaxLeft[f.path] === 0 && !resolved[f.path]).map((f) => f.path) : [],
+    syntaxOn ? (repo?.files ?? []).filter((f) => syntaxLeft[f.path] === 0 && !resolved[f.path]).map((f) => f.path) : [],
   );
 
   const kindLabel: Record<ConflictKind, string> = {
@@ -60,6 +63,14 @@
 
   onDestroy(() => unlisten?.());
 
+  // A different engine chosen (in a merge tab) checks the files again.
+  let checkedFor = "";
+  $effect(() => {
+    const key = `${syntaxMerge.engine}\n${syntaxMerge.path}`;
+    if (repo && checkedFor && key !== checkedFor) checkSyntax(repo);
+    checkedFor = key;
+  });
+
   async function refresh() {
     try {
       repo = await api.repoConflicts(dir);
@@ -81,15 +92,20 @@
     }
   }
 
-  /** Asks mergiraf, file by file, which conflicts it can solve; writes nothing. */
+  /** Asks the syntax-aware merge, file by file, which conflicts it can solve; writes nothing. */
   async function checkSyntax(state: RepoConflicts) {
     const run = ++checkRun;
     syntaxLeft = {};
-    if (!(await mergiraf.detect())) return;
+    checkedWith = "";
+    const engine = await syntaxMerge.detect();
+    if (!engine || run !== checkRun) return;
+    checkedWith = engine.name;
     checking = true;
     try {
       for (const f of state.files.filter((f) => f.text)) {
-        const left = await api.structuredMergeConflict(state.workdir, f.path, mergiraf.program, false).catch(() => null);
+        const left = await api
+          .structuredMergeConflict(state.workdir, f.path, syntaxMerge.engine, syntaxMerge.program, false)
+          .catch(() => null);
         if (run !== checkRun) return;
         if (left !== null) syntaxLeft[f.path] = left;
       }
@@ -98,14 +114,16 @@
     }
   }
 
-  /** Writes mergiraf's results into the work tree; staging stays a separate step. */
+  /** Writes the syntax-aware results into the work tree; staging stays a separate step. */
   async function solve(paths: string[]) {
     if (!repo) return;
     for (const path of paths) {
       try {
-        const left = await api.structuredMergeConflict(repo.workdir, path, mergiraf.program, true);
-        if (left === 0) resolved[path] = { how: "solved by mergiraf, please review", remove: false };
-        else notify(`mergiraf left ${left} conflict${left === 1 ? "" : "s"} in ${path}.`, "info");
+        const left = await api.structuredMergeConflict(repo.workdir, path, syntaxMerge.engine, syntaxMerge.program, true);
+        const by = syntaxMerge.found?.name ?? "syntax";
+        if (left === 0) resolved[path] = { how: `solved by ${by}, please review`, remove: false };
+        else if (left === null) notify(`${by} does not merge ${path}.`, "info");
+        else notify(`${by} left ${left} conflict${left === 1 ? "" : "s"} in ${path}.`, "info");
       } catch (e) {
         notify(String(e));
       }
@@ -139,10 +157,10 @@
       {#if repo}<span class="path" title={repo.workdir}>{repo.workdir}</span>{/if}
     </div>
     <span class="grow"></span>
-    {#if checking}<span class="checking">✦ Asking mergiraf…</span>{/if}
+    {#if checking}<span class="checking">✦ Merging by syntax…</span>{/if}
     {#if solvable.length}
-      <button class="sa" onclick={() => solve(solvable)} title="Write mergiraf's result into the work tree for each file it solves completely; nothing is staged">
-        ✦ Solve {solvable.length} with mergiraf
+      <button class="sa" onclick={() => solve(solvable)} title="Write the syntax-aware result into the work tree for each file it solves completely; nothing is staged">
+        ✦ Solve {solvable.length} by syntax
       </button>
     {/if}
     <button onclick={refresh} title="Read the conflicts from the index again">⟳ Refresh</button>
@@ -180,10 +198,10 @@
                   {f.path}
                 {/if}
               </td>
-              <td><span class="chip {f.kind}">{kindLabel[f.kind]}</span>{#if !f.text && (f.kind === "bothModified" || f.kind === "bothAdded")}<span class="chip">binary</span>{/if}{#if mergiraf.enabled && syntaxLeft[f.path] === 0}<span class="chip sa" title="mergiraf merges this file by its syntax without conflicts">✦ mergiraf solves it</span>{/if}</td>
+              <td><span class="chip {f.kind}">{kindLabel[f.kind]}</span>{#if !f.text && (f.kind === "bothModified" || f.kind === "bothAdded")}<span class="chip">binary</span>{/if}{#if syntaxOn && syntaxLeft[f.path] === 0}<span class="chip sa" title={`${syntaxMerge.found?.name ?? "The syntax-aware merge"} merges this file without conflicts`}>✦ solvable by syntax</span>{/if}</td>
               <td class="state">{done ? `✓ ${done.how}` : "unresolved"}</td>
               <td class="actions">
-                {#if mergiraf.enabled && syntaxLeft[f.path] === 0 && !done}<button class="sa" onclick={() => solve([f.path])} title="Write mergiraf's result into the work tree">✦ Solve</button>{/if}
+                {#if syntaxOn && syntaxLeft[f.path] === 0 && !done}<button class="sa" onclick={() => solve([f.path])} title="Write the syntax-aware result into the work tree">✦ Solve</button>{/if}
                 {#if f.text}<button onclick={() => onOpenMerge(repo!.workdir, f.path)}>Open merge</button>{/if}
                 <button onclick={() => takeSide(f.path, false)} title={missing(f.kind, false) ? "Delete the file, as local did" : "Use the local version of the whole file"}>
                   {missing(f.kind, false) ? "Delete (local)" : "Keep local"}
