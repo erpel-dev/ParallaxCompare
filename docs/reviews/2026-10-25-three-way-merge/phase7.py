@@ -1,0 +1,13 @@
+from ui import *
+d=C/'partial-syntax';d.mkdir(exist_ok=True)
+for side,field,arg in [('base','',1),('local','local',2),('remote','remote',3)]:
+ text='struct C {\n    x: u8,\n'+(f'    {field}: u8,\n'if field else'')+'}\nfn f() {\n    g('+str(arg)+')\n}\n';(d/(side+'.rs')).write_text(text)
+merge('rust',**{s:str(d/(s+'.rs'))for s in ['base','local','remote']},output=str(d/'result.rs'));time.sleep(.5);snapshot('60-partial-syntax-offer');event('partial-syntax-offer',visible())
+if '✦ Narrow down' in visible():
+ click('✦ Narrow down');time.sleep(.3);snapshot('61-partial-syntax-narrowed');event('partial-syntax-narrowed',visible())
+ js('document.querySelector(".page:not([hidden]) .merge").focus()');combo('\ue00a','\ue012');time.sleep(.3);snapshot('62-partial-syntax-alt-left');event('partial-syntax-after-choice',visible())
+# Correctly exercise the normal multiline paste handler using a structured argument.
+case=merge('clean',output=str(C/'unicode-paste-confirmed.txt'));wait('return !!document.querySelector(".page:not([hidden]) .pane.bottom .rrow .no")');js('document.querySelector(".page:not([hidden]) .pane.bottom .rrow").click()');wait('return !!document.querySelector(".page:not([hidden]) input.editor")')
+js('const e=document.querySelector(".page:not([hidden]) input.editor");e.setSelectionRange(0,e.value.length);const d=new DataTransfer();d.setData("text/plain",arguments[0]);e.dispatchEvent(new ClipboardEvent("paste",{bubbles:true,cancelable:true,clipboardData:d}))','日本語 😀\nsecond line');time.sleep(.3);click('💾 Save result');time.sleep(.3);actual=pathlib.Path(case['output']).read_text();assert actual=='日本語 😀\nsecond line\ntwo\nthree\nfour\nFIVE\n',actual;event('check',{'name':'unicode-multiline-paste-confirmed','passed':True});snapshot('63-unicode-paste-confirmed')
+# Closing a dirty merge must preserve it when cancelled.
+case=merge('conflict',output=str(C/'close-cancel-confirmed.txt'));click('← Take local');time.sleep(.25);before=js('return document.querySelectorAll(".tabs .tab").length');js('document.querySelector(".tabs .on .x").click()');time.sleep(.25);snapshot('64-unsaved-close-dialog');desktop_key('Escape');time.sleep(.2);assert js('return document.querySelectorAll(".tabs .tab").length')==before;assert 'took local'in visible();event('check',{'name':'cancel-dirty-close-preserves-merge','passed':True});click('💾 Save result');time.sleep(.2);js('document.querySelector(".tabs .on .x").click()');time.sleep(.2);assert js('return document.querySelectorAll(".tabs .tab").length')==before-1;event('check',{'name':'saved-merge-closes-without-discard','passed':True});event('phase7-complete',{'elapsed':elapsed(),'errors':js('return window.exploreErrors')})

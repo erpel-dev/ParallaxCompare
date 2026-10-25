@@ -1,0 +1,22 @@
+{
+  "commit": "4c5ada6c3cd4158c3d581e4c921bb58f06d63181",
+  "started": "2026-10-25T16:28:20.813571+00:00",
+  "ended": {
+    "utc": "2026-10-25T16:58:25.970403+00:00",
+    "durationSeconds": 1805.156842002063,
+    "unhandledErrors": [],
+    "screenshots": 91
+  },
+  "findings": 9,
+  "priorities": {
+    "P1": 2,
+    "P2": 6,
+    "P3": 1
+  },
+  "repeatUseCycles": 270,
+  "guiMergeOpensLogged": 309,
+  "repoConflictViewsLogged": 5,
+  "rustTestsPassed": 368,
+  "rustTestsIgnored": 3,
+  "frontendTestsPassed": 12
+}

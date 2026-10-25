@@ -1,0 +1,52 @@
+[
+  {
+    "name": "utf16-column-edit",
+    "passed": true,
+    "detail": null
+  },
+  {
+    "name": "unicode-undo",
+    "passed": true,
+    "detail": null
+  },
+  {
+    "name": "unrepresentable-save-rejected",
+    "passed": true,
+    "detail": {
+      "ok": false,
+      "error": "Cannot save: windows-1252 cannot store the character '\u65e5' (U+65E5)."
+    }
+  },
+  {
+    "name": "failed-save-preserves-file",
+    "passed": true,
+    "detail": null
+  },
+  {
+    "name": "failed-save-remains-dirty",
+    "passed": true,
+    "detail": null
+  },
+  {
+    "name": "mixed-git-archive-sources-open",
+    "passed": true,
+    "detail": {
+      "automatic": 0,
+      "unresolved": 1,
+      "conflicts": 1
+    }
+  },
+  {
+    "name": "mixed-sources-conflict",
+    "passed": true,
+    "detail": null
+  },
+  {
+    "name": "binary-local-rejected",
+    "passed": true,
+    "detail": {
+      "ok": false,
+      "error": "The local version is binary; binary files are resolved by choosing a whole version."
+    }
+  }
+]

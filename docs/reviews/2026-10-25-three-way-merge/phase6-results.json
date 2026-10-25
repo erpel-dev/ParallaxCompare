@@ -1,0 +1,69 @@
+{
+  "checks": [
+    {
+      "name": "100k-last-line-accessible",
+      "passed": true,
+      "detail": [
+        99998,
+        99999,
+        100000
+      ]
+    },
+    {
+      "name": "million-last-line-accessible",
+      "passed": true,
+      "detail": [
+        999998,
+        999999,
+        1000000
+      ]
+    },
+    {
+      "name": "million-save-correct-last-line",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "4000-conflicts-count",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "4000-first-choice-count",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "batch-syntax-keeps-all-fields",
+      "passed": true,
+      "detail": null
+    }
+  ],
+  "timings": [
+    {
+      "case": "100k-clean",
+      "openSeconds": 0.2756078690290451,
+      "scrollEndSeconds": 0.11363757494837046
+    },
+    {
+      "case": "100k-clean-middle",
+      "scrollSeconds": 0.2294226730009541
+    },
+    {
+      "case": "million-identical",
+      "bytesPerInput": 14000000,
+      "openSeconds": 0.7307027080096304,
+      "scrollEndSeconds": 0.23146995599381626,
+      "lastRenderedLine": 1000000
+    },
+    {
+      "case": "4000-conflicts-gui",
+      "openSeconds": 8.010787231032737
+    },
+    {
+      "case": "150-syntax-solutions",
+      "openAndOfferSeconds": 0.3377476909663528,
+      "applySeconds": 1.7368208520347252
+    }
+  ]
+}

@@ -1,0 +1,62 @@
+[
+  {
+    "case": "baseline",
+    "seconds": 2.3529864847660065e-06,
+    "memoryKiB": {
+      "VmRSS": 182148,
+      "VmHWM": 182148,
+      "RssAnon": 70228,
+      "RssFile": 91420
+    }
+  },
+  {
+    "case": "million-open",
+    "seconds": 0.5599064970156178,
+    "memoryKiB": {
+      "VmRSS": 330888,
+      "VmHWM": 429776,
+      "RssAnon": 216852,
+      "RssFile": 91552
+    }
+  },
+  {
+    "case": "million-syntax",
+    "seconds": 0.2776433869730681,
+    "memoryKiB": {
+      "VmRSS": 566716,
+      "VmHWM": 566716,
+      "RssAnon": 451656,
+      "RssFile": 91552
+    }
+  },
+  {
+    "case": "million-closed",
+    "seconds": 1.0048838349757716,
+    "memoryKiB": {
+      "VmRSS": 478788,
+      "VmHWM": 566220,
+      "RssAnon": 363728,
+      "RssFile": 91552
+    }
+  },
+  {
+    "case": "million-reopened",
+    "seconds": 0.4832708080066368,
+    "memoryKiB": {
+      "VmRSS": 513564,
+      "VmHWM": 566220,
+      "RssAnon": 398504,
+      "RssFile": 91552
+    }
+  },
+  {
+    "case": "million-reclosed",
+    "seconds": 1.0023802110226825,
+    "memoryKiB": {
+      "VmRSS": 513556,
+      "VmHWM": 566220,
+      "RssAnon": 398496,
+      "RssFile": 91552
+    }
+  }
+]

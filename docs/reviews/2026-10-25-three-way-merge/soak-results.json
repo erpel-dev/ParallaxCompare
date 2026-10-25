@@ -1,0 +1,2702 @@
+[
+  {
+    "cycle": 1,
+    "case": "conflict",
+    "passed": true,
+    "elapsed": 1103.5952432630584,
+    "memory": {
+      "VmRSS": "730084 kB",
+      "VmHWM": "756912 kB"
+    }
+  },
+  {
+    "cycle": 2,
+    "case": "clean",
+    "passed": true,
+    "elapsed": 1105.6483298459789,
+    "memory": {
+      "VmRSS": "730092 kB",
+      "VmHWM": "756912 kB"
+    }
+  },
+  {
+    "cycle": 3,
+    "case": "crlf",
+    "passed": true,
+    "elapsed": 1107.7709276820533,
+    "memory": {
+      "VmRSS": "730100 kB",
+      "VmHWM": "756912 kB"
+    }
+  },
+  {
+    "cycle": 4,
+    "case": "json",
+    "passed": true,
+    "elapsed": 1110.6934793030377,
+    "memory": {
+      "VmRSS": "730084 kB",
+      "VmHWM": "756912 kB"
+    }
+  },
+  {
+    "cycle": 5,
+    "case": "multi",
+    "passed": true,
+    "elapsed": 1113.2053835410625,
+    "memory": {
+      "VmRSS": "730104 kB",
+      "VmHWM": "756912 kB"
+    }
+  },
+  {
+    "cycle": 6,
+    "case": "large-clean",
+    "passed": true,
+    "elapsed": 1117.2073486620793,
+    "memory": {
+      "VmRSS": "775936 kB",
+      "VmHWM": "775936 kB"
+    }
+  },
+  {
+    "cycle": 7,
+    "case": "long-line",
+    "passed": true,
+    "elapsed": 1119.9394091930008,
+    "memory": {
+      "VmRSS": "776344 kB",
+      "VmHWM": "776772 kB"
+    }
+  },
+  {
+    "cycle": 8,
+    "case": "utf16",
+    "passed": true,
+    "elapsed": 1122.1143365299795,
+    "memory": {
+      "VmRSS": "775924 kB",
+      "VmHWM": "776772 kB"
+    }
+  },
+  {
+    "cycle": 9,
+    "case": "unicode",
+    "passed": true,
+    "elapsed": 1124.4000020100502,
+    "memory": {
+      "VmRSS": "775920 kB",
+      "VmHWM": "776772 kB"
+    }
+  },
+  {
+    "cycle": 10,
+    "case": "no-eol",
+    "passed": true,
+    "elapsed": 1126.5570048460504,
+    "memory": {
+      "VmRSS": "776496 kB",
+      "VmHWM": "776772 kB"
+    }
+  },
+  {
+    "cycle": 11,
+    "case": "conflict",
+    "passed": true,
+    "elapsed": 1129.1681603230536,
+    "memory": {
+      "VmRSS": "775912 kB",
+      "VmHWM": "776772 kB"
+    }
+  },
+  {
+    "cycle": 12,
+    "case": "clean",
+    "passed": true,
+    "elapsed": 1131.2519612180768,
+    "memory": {
+      "VmRSS": "775920 kB",
+      "VmHWM": "776772 kB"
+    }
+  },
+  {
+    "cycle": 13,
+    "case": "crlf",
+    "passed": true,
+    "elapsed": 1133.4379432849819,
+    "memory": {
+      "VmRSS": "775940 kB",
+      "VmHWM": "776772 kB"
+    }
+  },
+  {
+    "cycle": 14,
+    "case": "json",
+    "passed": true,
+    "elapsed": 1136.3509284730535,
+    "memory": {
+      "VmRSS": "775912 kB",
+      "VmHWM": "776772 kB"
+    }
+  },
+  {
+    "cycle": 15,
+    "case": "multi",
+    "passed": true,
+    "elapsed": 1138.962948119035,
+    "memory": {
+      "VmRSS": "775912 kB",
+      "VmHWM": "776772 kB"
+    }
+  },
+  {
+    "cycle": 16,
+    "case": "large-clean",
+    "passed": true,
+    "elapsed": 1142.8892520039808,
+    "memory": {
+      "VmRSS": "792576 kB",
+      "VmHWM": "792576 kB"
+    }
+  },
+  {
+    "cycle": 17,
+    "case": "long-line",
+    "passed": true,
+    "elapsed": 1145.504870623001,
+    "memory": {
+      "VmRSS": "793000 kB",
+      "VmHWM": "793428 kB"
+    }
+  },
+  {
+    "cycle": 18,
+    "case": "utf16",
+    "passed": true,
+    "elapsed": 1147.598922668025,
+    "memory": {
+      "VmRSS": "792580 kB",
+      "VmHWM": "793428 kB"
+    }
+  },
+  {
+    "cycle": 19,
+    "case": "unicode",
+    "passed": true,
+    "elapsed": 1149.6885480770143,
+    "memory": {
+      "VmRSS": "792580 kB",
+      "VmHWM": "793428 kB"
+    }
+  },
+  {
+    "cycle": 20,
+    "case": "no-eol",
+    "passed": true,
+    "elapsed": 1151.92291405797,
+    "memory": {
+      "VmRSS": "793148 kB",
+      "VmHWM": "793428 kB"
+    }
+  },
+  {
+    "cycle": 21,
+    "case": "conflict",
+    "passed": true,
+    "elapsed": 1154.552415578044,
+    "memory": {
+      "VmRSS": "792572 kB",
+      "VmHWM": "793428 kB"
+    }
+  },
+  {
+    "cycle": 22,
+    "case": "clean",
+    "passed": true,
+    "elapsed": 1156.6290937350132,
+    "memory": {
+      "VmRSS": "792600 kB",
+      "VmHWM": "793428 kB"
+    }
+  },
+  {
+    "cycle": 23,
+    "case": "crlf",
+    "passed": true,
+    "elapsed": 1158.689559262013,
+    "memory": {
+      "VmRSS": "792576 kB",
+      "VmHWM": "793428 kB"
+    }
+  },
+  {
+    "cycle": 24,
+    "case": "json",
+    "passed": true,
+    "elapsed": 1161.7036702079931,
+    "memory": {
+      "VmRSS": "792568 kB",
+      "VmHWM": "793428 kB"
+    }
+  },
+  {
+    "cycle": 25,
+    "case": "multi",
+    "passed": true,
+    "elapsed": 1164.389597618021,
+    "memory": {
+      "VmRSS": "792568 kB",
+      "VmHWM": "793428 kB"
+    }
+  },
+  {
+    "cycle": 26,
+    "case": "large-clean",
+    "passed": true,
+    "elapsed": 1168.3145397680346,
+    "memory": {
+      "VmRSS": "792576 kB",
+      "VmHWM": "794972 kB"
+    }
+  },
+  {
+    "cycle": 27,
+    "case": "long-line",
+    "passed": true,
+    "elapsed": 1171.0695033640368,
+    "memory": {
+      "VmRSS": "792888 kB",
+      "VmHWM": "794972 kB"
+    }
+  },
+  {
+    "cycle": 28,
+    "case": "utf16",
+    "passed": true,
+    "elapsed": 1173.249648843077,
+    "memory": {
+      "VmRSS": "792892 kB",
+      "VmHWM": "794972 kB"
+    }
+  },
+  {
+    "cycle": 29,
+    "case": "unicode",
+    "passed": true,
+    "elapsed": 1175.5321057160618,
+    "memory": {
+      "VmRSS": "792564 kB",
+      "VmHWM": "794972 kB"
+    }
+  },
+  {
+    "cycle": 30,
+    "case": "no-eol",
+    "passed": true,
+    "elapsed": 1177.7692072760547,
+    "memory": {
+      "VmRSS": "793172 kB",
+      "VmHWM": "794972 kB"
+    }
+  },
+  {
+    "cycle": 31,
+    "case": "conflict",
+    "passed": true,
+    "elapsed": 1180.3856147420593,
+    "memory": {
+      "VmRSS": "792568 kB",
+      "VmHWM": "794972 kB"
+    }
+  },
+  {
+    "cycle": 32,
+    "case": "clean",
+    "passed": true,
+    "elapsed": 1182.4529414570425,
+    "memory": {
+      "VmRSS": "792568 kB",
+      "VmHWM": "794972 kB"
+    }
+  },
+  {
+    "cycle": 33,
+    "case": "crlf",
+    "passed": true,
+    "elapsed": 1184.5438772609923,
+    "memory": {
+      "VmRSS": "792600 kB",
+      "VmHWM": "794972 kB"
+    }
+  },
+  {
+    "cycle": 34,
+    "case": "json",
+    "passed": true,
+    "elapsed": 1187.5804302060278,
+    "memory": {
+      "VmRSS": "792560 kB",
+      "VmHWM": "794972 kB"
+    }
+  },
+  {
+    "cycle": 35,
+    "case": "multi",
+    "passed": true,
+    "elapsed": 1190.1447405730141,
+    "memory": {
+      "VmRSS": "792564 kB",
+      "VmHWM": "794972 kB"
+    }
+  },
+  {
+    "cycle": 36,
+    "case": "large-clean",
+    "passed": true,
+    "elapsed": 1194.0977834420046,
+    "memory": {
+      "VmRSS": "795064 kB",
+      "VmHWM": "795372 kB"
+    }
+  },
+  {
+    "cycle": 37,
+    "case": "long-line",
+    "passed": true,
+    "elapsed": 1197.033897130983,
+    "memory": {
+      "VmRSS": "795472 kB",
+      "VmHWM": "795956 kB"
+    }
+  },
+  {
+    "cycle": 38,
+    "case": "utf16",
+    "passed": true,
+    "elapsed": 1199.122125087073,
+    "memory": {
+      "VmRSS": "795056 kB",
+      "VmHWM": "795956 kB"
+    }
+  },
+  {
+    "cycle": 39,
+    "case": "unicode",
+    "passed": true,
+    "elapsed": 1201.4086828270229,
+    "memory": {
+      "VmRSS": "795048 kB",
+      "VmHWM": "795956 kB"
+    }
+  },
+  {
+    "cycle": 40,
+    "case": "no-eol",
+    "passed": true,
+    "elapsed": 1203.5748114039889,
+    "memory": {
+      "VmRSS": "795620 kB",
+      "VmHWM": "795956 kB"
+    }
+  },
+  {
+    "cycle": 41,
+    "case": "conflict",
+    "passed": true,
+    "elapsed": 1206.321091971011,
+    "memory": {
+      "VmRSS": "795044 kB",
+      "VmHWM": "795956 kB"
+    }
+  },
+  {
+    "cycle": 42,
+    "case": "clean",
+    "passed": true,
+    "elapsed": 1208.4563774110284,
+    "memory": {
+      "VmRSS": "795048 kB",
+      "VmHWM": "795956 kB"
+    }
+  },
+  {
+    "cycle": 43,
+    "case": "crlf",
+    "passed": true,
+    "elapsed": 1210.7453095969977,
+    "memory": {
+      "VmRSS": "795088 kB",
+      "VmHWM": "795956 kB"
+    }
+  },
+  {
+    "cycle": 44,
+    "case": "json",
+    "passed": true,
+    "elapsed": 1213.666340093012,
+    "memory": {
+      "VmRSS": "795044 kB",
+      "VmHWM": "795956 kB"
+    }
+  },
+  {
+    "cycle": 45,
+    "case": "multi",
+    "passed": true,
+    "elapsed": 1216.1609758900013,
+    "memory": {
+      "VmRSS": "795048 kB",
+      "VmHWM": "795956 kB"
+    }
+  },
+  {
+    "cycle": 46,
+    "case": "large-clean",
+    "passed": true,
+    "elapsed": 1220.0696098019835,
+    "memory": {
+      "VmRSS": "795048 kB",
+      "VmHWM": "797688 kB"
+    }
+  },
+  {
+    "cycle": 47,
+    "case": "long-line",
+    "passed": true,
+    "elapsed": 1222.7090708169853,
+    "memory": {
+      "VmRSS": "795464 kB",
+      "VmHWM": "797688 kB"
+    }
+  },
+  {
+    "cycle": 48,
+    "case": "utf16",
+    "passed": true,
+    "elapsed": 1224.8449061759748,
+    "memory": {
+      "VmRSS": "795056 kB",
+      "VmHWM": "797688 kB"
+    }
+  },
+  {
+    "cycle": 49,
+    "case": "unicode",
+    "passed": true,
+    "elapsed": 1227.033711867989,
+    "memory": {
+      "VmRSS": "795052 kB",
+      "VmHWM": "797688 kB"
+    }
+  },
+  {
+    "cycle": 50,
+    "case": "no-eol",
+    "passed": true,
+    "elapsed": 1229.2592112870188,
+    "memory": {
+      "VmRSS": "795648 kB",
+      "VmHWM": "797688 kB"
+    }
+  },
+  {
+    "cycle": 51,
+    "case": "conflict",
+    "passed": true,
+    "elapsed": 1231.9502279680455,
+    "memory": {
+      "VmRSS": "795044 kB",
+      "VmHWM": "797688 kB"
+    }
+  },
+  {
+    "cycle": 52,
+    "case": "clean",
+    "passed": true,
+    "elapsed": 1234.0513014419703,
+    "memory": {
+      "VmRSS": "795056 kB",
+      "VmHWM": "797688 kB"
+    }
+  },
+  {
+    "cycle": 53,
+    "case": "crlf",
+    "passed": true,
+    "elapsed": 1236.322904841043,
+    "memory": {
+      "VmRSS": "795048 kB",
+      "VmHWM": "797688 kB"
+    }
+  },
+  {
+    "cycle": 54,
+    "case": "json",
+    "passed": true,
+    "elapsed": 1239.330915492028,
+    "memory": {
+      "VmRSS": "795044 kB",
+      "VmHWM": "797688 kB"
+    }
+  },
+  {
+    "cycle": 55,
+    "case": "multi",
+    "passed": true,
+    "elapsed": 1241.9415422580205,
+    "memory": {
+      "VmRSS": "795048 kB",
+      "VmHWM": "797688 kB"
+    }
+  },
+  {
+    "cycle": 56,
+    "case": "large-clean",
+    "passed": true,
+    "elapsed": 1245.9027130859904,
+    "memory": {
+      "VmRSS": "795980 kB",
+      "VmHWM": "797688 kB"
+    }
+  },
+  {
+    "cycle": 57,
+    "case": "long-line",
+    "passed": true,
+    "elapsed": 1248.599633618025,
+    "memory": {
+      "VmRSS": "796404 kB",
+      "VmHWM": "797688 kB"
+    }
+  },
+  {
+    "cycle": 58,
+    "case": "utf16",
+    "passed": true,
+    "elapsed": 1250.661707211053,
+    "memory": {
+      "VmRSS": "796288 kB",
+      "VmHWM": "797688 kB"
+    }
+  },
+  {
+    "cycle": 59,
+    "case": "unicode",
+    "passed": true,
+    "elapsed": 1252.8380843170453,
+    "memory": {
+      "VmRSS": "796288 kB",
+      "VmHWM": "797688 kB"
+    }
+  },
+  {
+    "cycle": 60,
+    "case": "no-eol",
+    "passed": true,
+    "elapsed": 1255.0814851260511,
+    "memory": {
+      "VmRSS": "796412 kB",
+      "VmHWM": "797688 kB"
+    }
+  },
+  {
+    "cycle": 61,
+    "case": "conflict",
+    "passed": true,
+    "elapsed": 1257.7748029159848,
+    "memory": {
+      "VmRSS": "795972 kB",
+      "VmHWM": "797688 kB"
+    }
+  },
+  {
+    "cycle": 62,
+    "case": "clean",
+    "passed": true,
+    "elapsed": 1259.8616227270104,
+    "memory": {
+      "VmRSS": "795984 kB",
+      "VmHWM": "797688 kB"
+    }
+  },
+  {
+    "cycle": 63,
+    "case": "crlf",
+    "passed": true,
+    "elapsed": 1261.947032251046,
+    "memory": {
+      "VmRSS": "795988 kB",
+      "VmHWM": "797688 kB"
+    }
+  },
+  {
+    "cycle": 64,
+    "case": "json",
+    "passed": true,
+    "elapsed": 1264.753767444985,
+    "memory": {
+      "VmRSS": "795972 kB",
+      "VmHWM": "797688 kB"
+    }
+  },
+  {
+    "cycle": 65,
+    "case": "multi",
+    "passed": true,
+    "elapsed": 1267.3413761530537,
+    "memory": {
+      "VmRSS": "795964 kB",
+      "VmHWM": "797688 kB"
+    }
+  },
+  {
+    "cycle": 66,
+    "case": "large-clean",
+    "passed": true,
+    "elapsed": 1271.4298939660657,
+    "memory": {
+      "VmRSS": "795980 kB",
+      "VmHWM": "798520 kB"
+    }
+  },
+  {
+    "cycle": 67,
+    "case": "long-line",
+    "passed": true,
+    "elapsed": 1274.0325555480085,
+    "memory": {
+      "VmRSS": "796404 kB",
+      "VmHWM": "798520 kB"
+    }
+  },
+  {
+    "cycle": 68,
+    "case": "utf16",
+    "passed": true,
+    "elapsed": 1276.2143497919897,
+    "memory": {
+      "VmRSS": "795984 kB",
+      "VmHWM": "798520 kB"
+    }
+  },
+  {
+    "cycle": 69,
+    "case": "unicode",
+    "passed": true,
+    "elapsed": 1278.3880877930205,
+    "memory": {
+      "VmRSS": "795976 kB",
+      "VmHWM": "798520 kB"
+    }
+  },
+  {
+    "cycle": 70,
+    "case": "no-eol",
+    "passed": true,
+    "elapsed": 1280.6309675549855,
+    "memory": {
+      "VmRSS": "796596 kB",
+      "VmHWM": "798520 kB"
+    }
+  },
+  {
+    "cycle": 71,
+    "case": "conflict",
+    "passed": true,
+    "elapsed": 1283.257069629035,
+    "memory": {
+      "VmRSS": "795976 kB",
+      "VmHWM": "798520 kB"
+    }
+  },
+  {
+    "cycle": 72,
+    "case": "clean",
+    "passed": true,
+    "elapsed": 1285.3398241620744,
+    "memory": {
+      "VmRSS": "795988 kB",
+      "VmHWM": "798520 kB"
+    }
+  },
+  {
+    "cycle": 73,
+    "case": "crlf",
+    "passed": true,
+    "elapsed": 1287.525109452079,
+    "memory": {
+      "VmRSS": "795980 kB",
+      "VmHWM": "798520 kB"
+    }
+  },
+  {
+    "cycle": 74,
+    "case": "json",
+    "passed": true,
+    "elapsed": 1290.566582644009,
+    "memory": {
+      "VmRSS": "795972 kB",
+      "VmHWM": "798520 kB"
+    }
+  },
+  {
+    "cycle": 75,
+    "case": "multi",
+    "passed": true,
+    "elapsed": 1293.2080380490515,
+    "memory": {
+      "VmRSS": "795972 kB",
+      "VmHWM": "798520 kB"
+    }
+  },
+  {
+    "cycle": 76,
+    "case": "large-clean",
+    "passed": true,
+    "elapsed": 1297.3146459080745,
+    "memory": {
+      "VmRSS": "795980 kB",
+      "VmHWM": "798668 kB"
+    }
+  },
+  {
+    "cycle": 77,
+    "case": "long-line",
+    "passed": true,
+    "elapsed": 1300.0527847370831,
+    "memory": {
+      "VmRSS": "796404 kB",
+      "VmHWM": "798668 kB"
+    }
+  },
+  {
+    "cycle": 78,
+    "case": "utf16",
+    "passed": true,
+    "elapsed": 1302.2359098480083,
+    "memory": {
+      "VmRSS": "796284 kB",
+      "VmHWM": "798668 kB"
+    }
+  },
+  {
+    "cycle": 79,
+    "case": "unicode",
+    "passed": true,
+    "elapsed": 1304.4059524370823,
+    "memory": {
+      "VmRSS": "796288 kB",
+      "VmHWM": "798668 kB"
+    }
+  },
+  {
+    "cycle": 80,
+    "case": "no-eol",
+    "passed": true,
+    "elapsed": 1306.5348404840333,
+    "memory": {
+      "VmRSS": "796552 kB",
+      "VmHWM": "798668 kB"
+    }
+  },
+  {
+    "cycle": 81,
+    "case": "conflict",
+    "passed": true,
+    "elapsed": 1309.23860280402,
+    "memory": {
+      "VmRSS": "795972 kB",
+      "VmHWM": "798668 kB"
+    }
+  },
+  {
+    "cycle": 82,
+    "case": "clean",
+    "passed": true,
+    "elapsed": 1311.3205532790162,
+    "memory": {
+      "VmRSS": "796004 kB",
+      "VmHWM": "798668 kB"
+    }
+  },
+  {
+    "cycle": 83,
+    "case": "crlf",
+    "passed": true,
+    "elapsed": 1313.3996425759979,
+    "memory": {
+      "VmRSS": "796000 kB",
+      "VmHWM": "798668 kB"
+    }
+  },
+  {
+    "cycle": 84,
+    "case": "json",
+    "passed": true,
+    "elapsed": 1316.1795490849763,
+    "memory": {
+      "VmRSS": "795968 kB",
+      "VmHWM": "798668 kB"
+    }
+  },
+  {
+    "cycle": 85,
+    "case": "multi",
+    "passed": true,
+    "elapsed": 1318.8056681770831,
+    "memory": {
+      "VmRSS": "795964 kB",
+      "VmHWM": "798668 kB"
+    }
+  },
+  {
+    "cycle": 86,
+    "case": "large-clean",
+    "passed": true,
+    "elapsed": 1322.707123688073,
+    "memory": {
+      "VmRSS": "795984 kB",
+      "VmHWM": "798668 kB"
+    }
+  },
+  {
+    "cycle": 87,
+    "case": "long-line",
+    "passed": true,
+    "elapsed": 1325.4235574409831,
+    "memory": {
+      "VmRSS": "796408 kB",
+      "VmHWM": "798668 kB"
+    }
+  },
+  {
+    "cycle": 88,
+    "case": "utf16",
+    "passed": true,
+    "elapsed": 1327.5964586250484,
+    "memory": {
+      "VmRSS": "796016 kB",
+      "VmHWM": "798668 kB"
+    }
+  },
+  {
+    "cycle": 89,
+    "case": "unicode",
+    "passed": true,
+    "elapsed": 1329.7556833450217,
+    "memory": {
+      "VmRSS": "795968 kB",
+      "VmHWM": "798668 kB"
+    }
+  },
+  {
+    "cycle": 90,
+    "case": "no-eol",
+    "passed": true,
+    "elapsed": 1332.0051769790007,
+    "memory": {
+      "VmRSS": "796588 kB",
+      "VmHWM": "798668 kB"
+    }
+  },
+  {
+    "cycle": 91,
+    "case": "conflict",
+    "passed": true,
+    "elapsed": 1334.616484357044,
+    "memory": {
+      "VmRSS": "795980 kB",
+      "VmHWM": "798668 kB"
+    }
+  },
+  {
+    "cycle": 92,
+    "case": "clean",
+    "passed": true,
+    "elapsed": 1336.702423830051,
+    "memory": {
+      "VmRSS": "795988 kB",
+      "VmHWM": "798668 kB"
+    }
+  },
+  {
+    "cycle": 93,
+    "case": "crlf",
+    "passed": true,
+    "elapsed": 1338.9806364090182,
+    "memory": {
+      "VmRSS": "795984 kB",
+      "VmHWM": "798668 kB"
+    }
+  },
+  {
+    "cycle": 94,
+    "case": "json",
+    "passed": true,
+    "elapsed": 1341.8026995289838,
+    "memory": {
+      "VmRSS": "795980 kB",
+      "VmHWM": "798668 kB"
+    }
+  },
+  {
+    "cycle": 95,
+    "case": "multi",
+    "passed": true,
+    "elapsed": 1344.314732921077,
+    "memory": {
+      "VmRSS": "795980 kB",
+      "VmHWM": "798668 kB"
+    }
+  },
+  {
+    "cycle": 96,
+    "case": "large-clean",
+    "passed": true,
+    "elapsed": 1348.354492123006,
+    "memory": {
+      "VmRSS": "796004 kB",
+      "VmHWM": "798668 kB"
+    }
+  },
+  {
+    "cycle": 97,
+    "case": "long-line",
+    "passed": true,
+    "elapsed": 1351.0578808119753,
+    "memory": {
+      "VmRSS": "796428 kB",
+      "VmHWM": "798668 kB"
+    }
+  },
+  {
+    "cycle": 98,
+    "case": "utf16",
+    "passed": true,
+    "elapsed": 1353.1144620780833,
+    "memory": {
+      "VmRSS": "796312 kB",
+      "VmHWM": "798668 kB"
+    }
+  },
+  {
+    "cycle": 99,
+    "case": "unicode",
+    "passed": true,
+    "elapsed": 1355.2927212620853,
+    "memory": {
+      "VmRSS": "796004 kB",
+      "VmHWM": "798668 kB"
+    }
+  },
+  {
+    "cycle": 100,
+    "case": "no-eol",
+    "passed": true,
+    "elapsed": 1357.5430743290344,
+    "memory": {
+      "VmRSS": "796576 kB",
+      "VmHWM": "798668 kB"
+    }
+  },
+  {
+    "cycle": 101,
+    "case": "conflict",
+    "passed": true,
+    "elapsed": 1360.0516073179897,
+    "memory": {
+      "VmRSS": "797632 kB",
+      "VmHWM": "798668 kB"
+    }
+  },
+  {
+    "cycle": 102,
+    "case": "clean",
+    "passed": true,
+    "elapsed": 1362.1153136680368,
+    "memory": {
+      "VmRSS": "797628 kB",
+      "VmHWM": "798668 kB"
+    }
+  },
+  {
+    "cycle": 103,
+    "case": "crlf",
+    "passed": true,
+    "elapsed": 1364.3144665530417,
+    "memory": {
+      "VmRSS": "797624 kB",
+      "VmHWM": "798668 kB"
+    }
+  },
+  {
+    "cycle": 104,
+    "case": "json",
+    "passed": true,
+    "elapsed": 1367.1337352329865,
+    "memory": {
+      "VmRSS": "797616 kB",
+      "VmHWM": "798668 kB"
+    }
+  },
+  {
+    "cycle": 105,
+    "case": "multi",
+    "passed": true,
+    "elapsed": 1369.7863763960777,
+    "memory": {
+      "VmRSS": "797620 kB",
+      "VmHWM": "798668 kB"
+    }
+  },
+  {
+    "cycle": 106,
+    "case": "large-clean",
+    "passed": true,
+    "elapsed": 1373.8568149469793,
+    "memory": {
+      "VmRSS": "797624 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 107,
+    "case": "long-line",
+    "passed": true,
+    "elapsed": 1376.4970306979958,
+    "memory": {
+      "VmRSS": "798048 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 108,
+    "case": "utf16",
+    "passed": true,
+    "elapsed": 1378.6623394300696,
+    "memory": {
+      "VmRSS": "797624 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 109,
+    "case": "unicode",
+    "passed": true,
+    "elapsed": 1380.8323678580346,
+    "memory": {
+      "VmRSS": "797632 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 110,
+    "case": "no-eol",
+    "passed": true,
+    "elapsed": 1382.9947544049937,
+    "memory": {
+      "VmRSS": "798208 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 111,
+    "case": "conflict",
+    "passed": true,
+    "elapsed": 1385.383796993061,
+    "memory": {
+      "VmRSS": "797628 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 112,
+    "case": "clean",
+    "passed": true,
+    "elapsed": 1387.4876071000472,
+    "memory": {
+      "VmRSS": "797636 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 113,
+    "case": "crlf",
+    "passed": true,
+    "elapsed": 1389.671719126054,
+    "memory": {
+      "VmRSS": "797624 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 114,
+    "case": "json",
+    "passed": true,
+    "elapsed": 1392.4857524749823,
+    "memory": {
+      "VmRSS": "797616 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 115,
+    "case": "multi",
+    "passed": true,
+    "elapsed": 1395.1073717090767,
+    "memory": {
+      "VmRSS": "797624 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 116,
+    "case": "large-clean",
+    "passed": true,
+    "elapsed": 1399.0171890649945,
+    "memory": {
+      "VmRSS": "797624 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 117,
+    "case": "long-line",
+    "passed": true,
+    "elapsed": 1401.7478079519933,
+    "memory": {
+      "VmRSS": "798048 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 118,
+    "case": "utf16",
+    "passed": true,
+    "elapsed": 1404.0631635220489,
+    "memory": {
+      "VmRSS": "797628 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 119,
+    "case": "unicode",
+    "passed": true,
+    "elapsed": 1406.156806214014,
+    "memory": {
+      "VmRSS": "797628 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 120,
+    "case": "no-eol",
+    "passed": true,
+    "elapsed": 1408.2572906370042,
+    "memory": {
+      "VmRSS": "798204 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 121,
+    "case": "conflict",
+    "passed": true,
+    "elapsed": 1411.041761446977,
+    "memory": {
+      "VmRSS": "797616 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 122,
+    "case": "clean",
+    "passed": true,
+    "elapsed": 1413.1102624760242,
+    "memory": {
+      "VmRSS": "797620 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 123,
+    "case": "crlf",
+    "passed": true,
+    "elapsed": 1415.2822647310095,
+    "memory": {
+      "VmRSS": "797640 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 124,
+    "case": "json",
+    "passed": true,
+    "elapsed": 1418.1925303820753,
+    "memory": {
+      "VmRSS": "797616 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 125,
+    "case": "multi",
+    "passed": true,
+    "elapsed": 1420.8001958680106,
+    "memory": {
+      "VmRSS": "797616 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 126,
+    "case": "large-clean",
+    "passed": true,
+    "elapsed": 1424.9665697630262,
+    "memory": {
+      "VmRSS": "797624 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 127,
+    "case": "long-line",
+    "passed": true,
+    "elapsed": 1427.695619162987,
+    "memory": {
+      "VmRSS": "798048 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 128,
+    "case": "utf16",
+    "passed": true,
+    "elapsed": 1429.8743270010455,
+    "memory": {
+      "VmRSS": "797928 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 129,
+    "case": "unicode",
+    "passed": true,
+    "elapsed": 1432.0605698080035,
+    "memory": {
+      "VmRSS": "797632 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 130,
+    "case": "no-eol",
+    "passed": true,
+    "elapsed": 1434.3121694950387,
+    "memory": {
+      "VmRSS": "798224 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 131,
+    "case": "conflict",
+    "passed": true,
+    "elapsed": 1436.9458817150444,
+    "memory": {
+      "VmRSS": "797624 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 132,
+    "case": "clean",
+    "passed": true,
+    "elapsed": 1439.0568312039832,
+    "memory": {
+      "VmRSS": "797648 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 133,
+    "case": "crlf",
+    "passed": true,
+    "elapsed": 1441.249466784997,
+    "memory": {
+      "VmRSS": "797628 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 134,
+    "case": "json",
+    "passed": true,
+    "elapsed": 1444.183483874076,
+    "memory": {
+      "VmRSS": "797616 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 135,
+    "case": "multi",
+    "passed": true,
+    "elapsed": 1446.833444692078,
+    "memory": {
+      "VmRSS": "797616 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 136,
+    "case": "large-clean",
+    "passed": true,
+    "elapsed": 1450.7673268310027,
+    "memory": {
+      "VmRSS": "797640 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 137,
+    "case": "long-line",
+    "passed": true,
+    "elapsed": 1453.4212526030606,
+    "memory": {
+      "VmRSS": "798048 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 138,
+    "case": "utf16",
+    "passed": true,
+    "elapsed": 1455.6022248780355,
+    "memory": {
+      "VmRSS": "797928 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 139,
+    "case": "unicode",
+    "passed": true,
+    "elapsed": 1457.7939883280778,
+    "memory": {
+      "VmRSS": "797620 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 140,
+    "case": "no-eol",
+    "passed": true,
+    "elapsed": 1459.9128212949727,
+    "memory": {
+      "VmRSS": "798236 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 141,
+    "case": "conflict",
+    "passed": true,
+    "elapsed": 1462.4085975299822,
+    "memory": {
+      "VmRSS": "797620 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 142,
+    "case": "clean",
+    "passed": true,
+    "elapsed": 1464.520342755015,
+    "memory": {
+      "VmRSS": "797620 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 143,
+    "case": "crlf",
+    "passed": true,
+    "elapsed": 1466.5973721679766,
+    "memory": {
+      "VmRSS": "797636 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 144,
+    "case": "json",
+    "passed": true,
+    "elapsed": 1469.418825411005,
+    "memory": {
+      "VmRSS": "797616 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 145,
+    "case": "multi",
+    "passed": true,
+    "elapsed": 1472.0666132300394,
+    "memory": {
+      "VmRSS": "797620 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 146,
+    "case": "large-clean",
+    "passed": true,
+    "elapsed": 1475.9937650680076,
+    "memory": {
+      "VmRSS": "801776 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 147,
+    "case": "long-line",
+    "passed": true,
+    "elapsed": 1478.631568185985,
+    "memory": {
+      "VmRSS": "802196 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 148,
+    "case": "utf16",
+    "passed": true,
+    "elapsed": 1480.7110150890658,
+    "memory": {
+      "VmRSS": "801780 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 149,
+    "case": "unicode",
+    "passed": true,
+    "elapsed": 1482.8931127290707,
+    "memory": {
+      "VmRSS": "801760 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 150,
+    "case": "no-eol",
+    "passed": true,
+    "elapsed": 1485.0145873749861,
+    "memory": {
+      "VmRSS": "802356 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 151,
+    "case": "conflict",
+    "passed": true,
+    "elapsed": 1487.807359419996,
+    "memory": {
+      "VmRSS": "801744 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 152,
+    "case": "clean",
+    "passed": true,
+    "elapsed": 1489.9101736029843,
+    "memory": {
+      "VmRSS": "801772 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 153,
+    "case": "crlf",
+    "passed": true,
+    "elapsed": 1492.0842460390413,
+    "memory": {
+      "VmRSS": "801772 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 154,
+    "case": "json",
+    "passed": true,
+    "elapsed": 1495.0945635479875,
+    "memory": {
+      "VmRSS": "801752 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 155,
+    "case": "multi",
+    "passed": true,
+    "elapsed": 1497.69700379204,
+    "memory": {
+      "VmRSS": "801752 kB",
+      "VmHWM": "816296 kB"
+    }
+  },
+  {
+    "cycle": 156,
+    "case": "large-clean",
+    "passed": true,
+    "elapsed": 1501.6683066550177,
+    "memory": {
+      "VmRSS": "802196 kB",
+      "VmHWM": "821208 kB"
+    }
+  },
+  {
+    "cycle": 157,
+    "case": "long-line",
+    "passed": true,
+    "elapsed": 1504.1793467790121,
+    "memory": {
+      "VmRSS": "802488 kB",
+      "VmHWM": "821208 kB"
+    }
+  },
+  {
+    "cycle": 158,
+    "case": "utf16",
+    "passed": true,
+    "elapsed": 1506.3455843440024,
+    "memory": {
+      "VmRSS": "802516 kB",
+      "VmHWM": "821208 kB"
+    }
+  },
+  {
+    "cycle": 159,
+    "case": "unicode",
+    "passed": true,
+    "elapsed": 1508.5414153650636,
+    "memory": {
+      "VmRSS": "802196 kB",
+      "VmHWM": "821208 kB"
+    }
+  },
+  {
+    "cycle": 160,
+    "case": "no-eol",
+    "passed": true,
+    "elapsed": 1510.6922895240132,
+    "memory": {
+      "VmRSS": "802792 kB",
+      "VmHWM": "821208 kB"
+    }
+  },
+  {
+    "cycle": 161,
+    "case": "conflict",
+    "passed": true,
+    "elapsed": 1513.3237805609824,
+    "memory": {
+      "VmRSS": "802188 kB",
+      "VmHWM": "821208 kB"
+    }
+  },
+  {
+    "cycle": 162,
+    "case": "clean",
+    "passed": true,
+    "elapsed": 1515.4197412109934,
+    "memory": {
+      "VmRSS": "802204 kB",
+      "VmHWM": "821208 kB"
+    }
+  },
+  {
+    "cycle": 163,
+    "case": "crlf",
+    "passed": true,
+    "elapsed": 1517.693551157019,
+    "memory": {
+      "VmRSS": "802196 kB",
+      "VmHWM": "821208 kB"
+    }
+  },
+  {
+    "cycle": 164,
+    "case": "json",
+    "passed": true,
+    "elapsed": 1520.6166074320208,
+    "memory": {
+      "VmRSS": "802192 kB",
+      "VmHWM": "821208 kB"
+    }
+  },
+  {
+    "cycle": 165,
+    "case": "multi",
+    "passed": true,
+    "elapsed": 1523.0858721280238,
+    "memory": {
+      "VmRSS": "802200 kB",
+      "VmHWM": "821208 kB"
+    }
+  },
+  {
+    "cycle": 166,
+    "case": "large-clean",
+    "passed": true,
+    "elapsed": 1527.0029217030387,
+    "memory": {
+      "VmRSS": "802196 kB",
+      "VmHWM": "821208 kB"
+    }
+  },
+  {
+    "cycle": 167,
+    "case": "long-line",
+    "passed": true,
+    "elapsed": 1529.7315438240767,
+    "memory": {
+      "VmRSS": "802620 kB",
+      "VmHWM": "821208 kB"
+    }
+  },
+  {
+    "cycle": 168,
+    "case": "utf16",
+    "passed": true,
+    "elapsed": 1531.921125472989,
+    "memory": {
+      "VmRSS": "802192 kB",
+      "VmHWM": "821208 kB"
+    }
+  },
+  {
+    "cycle": 169,
+    "case": "unicode",
+    "passed": true,
+    "elapsed": 1534.0140718390467,
+    "memory": {
+      "VmRSS": "802216 kB",
+      "VmHWM": "821208 kB"
+    }
+  },
+  {
+    "cycle": 170,
+    "case": "no-eol",
+    "passed": true,
+    "elapsed": 1536.122730490053,
+    "memory": {
+      "VmRSS": "802788 kB",
+      "VmHWM": "821208 kB"
+    }
+  },
+  {
+    "cycle": 171,
+    "case": "conflict",
+    "passed": true,
+    "elapsed": 1538.5094279160257,
+    "memory": {
+      "VmRSS": "802200 kB",
+      "VmHWM": "821208 kB"
+    }
+  },
+  {
+    "cycle": 172,
+    "case": "clean",
+    "passed": true,
+    "elapsed": 1540.5846573470626,
+    "memory": {
+      "VmRSS": "802192 kB",
+      "VmHWM": "821208 kB"
+    }
+  },
+  {
+    "cycle": 173,
+    "case": "crlf",
+    "passed": true,
+    "elapsed": 1542.8521126500564,
+    "memory": {
+      "VmRSS": "802184 kB",
+      "VmHWM": "821208 kB"
+    }
+  },
+  {
+    "cycle": 174,
+    "case": "json",
+    "passed": true,
+    "elapsed": 1545.8465127820382,
+    "memory": {
+      "VmRSS": "802192 kB",
+      "VmHWM": "821208 kB"
+    }
+  },
+  {
+    "cycle": 175,
+    "case": "multi",
+    "passed": true,
+    "elapsed": 1548.4612906200346,
+    "memory": {
+      "VmRSS": "802192 kB",
+      "VmHWM": "821208 kB"
+    }
+  },
+  {
+    "cycle": 176,
+    "case": "large-clean",
+    "passed": true,
+    "elapsed": 1552.4649595760275,
+    "memory": {
+      "VmRSS": "822296 kB",
+      "VmHWM": "822296 kB"
+    }
+  },
+  {
+    "cycle": 177,
+    "case": "long-line",
+    "passed": true,
+    "elapsed": 1555.2881421559723,
+    "memory": {
+      "VmRSS": "822720 kB",
+      "VmHWM": "822948 kB"
+    }
+  },
+  {
+    "cycle": 178,
+    "case": "utf16",
+    "passed": true,
+    "elapsed": 1557.4481019090163,
+    "memory": {
+      "VmRSS": "822600 kB",
+      "VmHWM": "822948 kB"
+    }
+  },
+  {
+    "cycle": 179,
+    "case": "unicode",
+    "passed": true,
+    "elapsed": 1559.5193940540776,
+    "memory": {
+      "VmRSS": "822608 kB",
+      "VmHWM": "822948 kB"
+    }
+  },
+  {
+    "cycle": 180,
+    "case": "no-eol",
+    "passed": true,
+    "elapsed": 1561.6271197610768,
+    "memory": {
+      "VmRSS": "822900 kB",
+      "VmHWM": "822948 kB"
+    }
+  },
+  {
+    "cycle": 181,
+    "case": "conflict",
+    "passed": true,
+    "elapsed": 1564.2408285189886,
+    "memory": {
+      "VmRSS": "822292 kB",
+      "VmHWM": "822948 kB"
+    }
+  },
+  {
+    "cycle": 182,
+    "case": "clean",
+    "passed": true,
+    "elapsed": 1566.3255096920766,
+    "memory": {
+      "VmRSS": "822316 kB",
+      "VmHWM": "822948 kB"
+    }
+  },
+  {
+    "cycle": 183,
+    "case": "crlf",
+    "passed": true,
+    "elapsed": 1568.4770087020006,
+    "memory": {
+      "VmRSS": "822312 kB",
+      "VmHWM": "822948 kB"
+    }
+  },
+  {
+    "cycle": 184,
+    "case": "json",
+    "passed": true,
+    "elapsed": 1571.3190077830805,
+    "memory": {
+      "VmRSS": "822288 kB",
+      "VmHWM": "822948 kB"
+    }
+  },
+  {
+    "cycle": 185,
+    "case": "multi",
+    "passed": true,
+    "elapsed": 1573.9230900719995,
+    "memory": {
+      "VmRSS": "822292 kB",
+      "VmHWM": "822948 kB"
+    }
+  },
+  {
+    "cycle": 186,
+    "case": "large-clean",
+    "passed": true,
+    "elapsed": 1577.8548131870339,
+    "memory": {
+      "VmRSS": "876468 kB",
+      "VmHWM": "876468 kB"
+    }
+  },
+  {
+    "cycle": 187,
+    "case": "long-line",
+    "passed": true,
+    "elapsed": 1580.4382147450233,
+    "memory": {
+      "VmRSS": "876876 kB",
+      "VmHWM": "877004 kB"
+    }
+  },
+  {
+    "cycle": 188,
+    "case": "utf16",
+    "passed": true,
+    "elapsed": 1582.612690787064,
+    "memory": {
+      "VmRSS": "876756 kB",
+      "VmHWM": "877004 kB"
+    }
+  },
+  {
+    "cycle": 189,
+    "case": "unicode",
+    "passed": true,
+    "elapsed": 1584.827492149081,
+    "memory": {
+      "VmRSS": "876760 kB",
+      "VmHWM": "877004 kB"
+    }
+  },
+  {
+    "cycle": 190,
+    "case": "no-eol",
+    "passed": true,
+    "elapsed": 1587.1118028049823,
+    "memory": {
+      "VmRSS": "876892 kB",
+      "VmHWM": "877004 kB"
+    }
+  },
+  {
+    "cycle": 191,
+    "case": "conflict",
+    "passed": true,
+    "elapsed": 1589.6357355570653,
+    "memory": {
+      "VmRSS": "876452 kB",
+      "VmHWM": "877004 kB"
+    }
+  },
+  {
+    "cycle": 192,
+    "case": "clean",
+    "passed": true,
+    "elapsed": 1591.7211714170408,
+    "memory": {
+      "VmRSS": "876456 kB",
+      "VmHWM": "877004 kB"
+    }
+  },
+  {
+    "cycle": 193,
+    "case": "crlf",
+    "passed": true,
+    "elapsed": 1593.9213907000376,
+    "memory": {
+      "VmRSS": "876456 kB",
+      "VmHWM": "877004 kB"
+    }
+  },
+  {
+    "cycle": 194,
+    "case": "json",
+    "passed": true,
+    "elapsed": 1596.7593570050085,
+    "memory": {
+      "VmRSS": "876444 kB",
+      "VmHWM": "877004 kB"
+    }
+  },
+  {
+    "cycle": 195,
+    "case": "multi",
+    "passed": true,
+    "elapsed": 1599.3797440460185,
+    "memory": {
+      "VmRSS": "876444 kB",
+      "VmHWM": "877004 kB"
+    }
+  },
+  {
+    "cycle": 196,
+    "case": "large-clean",
+    "passed": true,
+    "elapsed": 1603.310040861019,
+    "memory": {
+      "VmRSS": "876456 kB",
+      "VmHWM": "878928 kB"
+    }
+  },
+  {
+    "cycle": 197,
+    "case": "long-line",
+    "passed": true,
+    "elapsed": 1605.995115416008,
+    "memory": {
+      "VmRSS": "876752 kB",
+      "VmHWM": "878928 kB"
+    }
+  },
+  {
+    "cycle": 198,
+    "case": "utf16",
+    "passed": true,
+    "elapsed": 1608.1810020409757,
+    "memory": {
+      "VmRSS": "876756 kB",
+      "VmHWM": "878928 kB"
+    }
+  },
+  {
+    "cycle": 199,
+    "case": "unicode",
+    "passed": true,
+    "elapsed": 1623.7603967270115,
+    "memory": {
+      "VmRSS": "876520 kB",
+      "VmHWM": "878928 kB"
+    }
+  },
+  {
+    "cycle": 200,
+    "case": "no-eol",
+    "passed": true,
+    "elapsed": 1625.9043720320333,
+    "memory": {
+      "VmRSS": "877104 kB",
+      "VmHWM": "878928 kB"
+    }
+  },
+  {
+    "cycle": 201,
+    "case": "conflict",
+    "passed": true,
+    "elapsed": 1628.4967801220482,
+    "memory": {
+      "VmRSS": "876512 kB",
+      "VmHWM": "878928 kB"
+    }
+  },
+  {
+    "cycle": 202,
+    "case": "clean",
+    "passed": true,
+    "elapsed": 1630.6160117259715,
+    "memory": {
+      "VmRSS": "876512 kB",
+      "VmHWM": "878928 kB"
+    }
+  },
+  {
+    "cycle": 203,
+    "case": "crlf",
+    "passed": true,
+    "elapsed": 1632.813665806083,
+    "memory": {
+      "VmRSS": "876516 kB",
+      "VmHWM": "878928 kB"
+    }
+  },
+  {
+    "cycle": 204,
+    "case": "json",
+    "passed": true,
+    "elapsed": 1635.87083867006,
+    "memory": {
+      "VmRSS": "876508 kB",
+      "VmHWM": "878928 kB"
+    }
+  },
+  {
+    "cycle": 205,
+    "case": "multi",
+    "passed": true,
+    "elapsed": 1638.4075916500296,
+    "memory": {
+      "VmRSS": "876508 kB",
+      "VmHWM": "878928 kB"
+    }
+  },
+  {
+    "cycle": 206,
+    "case": "large-clean",
+    "passed": true,
+    "elapsed": 1642.3716564059723,
+    "memory": {
+      "VmRSS": "880140 kB",
+      "VmHWM": "880140 kB"
+    }
+  },
+  {
+    "cycle": 207,
+    "case": "long-line",
+    "passed": true,
+    "elapsed": 1645.0674833690282,
+    "memory": {
+      "VmRSS": "880580 kB",
+      "VmHWM": "880940 kB"
+    }
+  },
+  {
+    "cycle": 208,
+    "case": "utf16",
+    "passed": true,
+    "elapsed": 1647.13443434902,
+    "memory": {
+      "VmRSS": "880164 kB",
+      "VmHWM": "880940 kB"
+    }
+  },
+  {
+    "cycle": 209,
+    "case": "unicode",
+    "passed": true,
+    "elapsed": 1649.411862218054,
+    "memory": {
+      "VmRSS": "880132 kB",
+      "VmHWM": "880940 kB"
+    }
+  },
+  {
+    "cycle": 210,
+    "case": "no-eol",
+    "passed": true,
+    "elapsed": 1651.5338245630264,
+    "memory": {
+      "VmRSS": "880732 kB",
+      "VmHWM": "880940 kB"
+    }
+  },
+  {
+    "cycle": 211,
+    "case": "conflict",
+    "passed": true,
+    "elapsed": 1654.0437669460662,
+    "memory": {
+      "VmRSS": "880132 kB",
+      "VmHWM": "880940 kB"
+    }
+  },
+  {
+    "cycle": 212,
+    "case": "clean",
+    "passed": true,
+    "elapsed": 1656.1122400340391,
+    "memory": {
+      "VmRSS": "880144 kB",
+      "VmHWM": "880940 kB"
+    }
+  },
+  {
+    "cycle": 213,
+    "case": "crlf",
+    "passed": true,
+    "elapsed": 1658.1700454200618,
+    "memory": {
+      "VmRSS": "880156 kB",
+      "VmHWM": "880940 kB"
+    }
+  },
+  {
+    "cycle": 214,
+    "case": "json",
+    "passed": true,
+    "elapsed": 1660.9641373730265,
+    "memory": {
+      "VmRSS": "880132 kB",
+      "VmHWM": "880940 kB"
+    }
+  },
+  {
+    "cycle": 215,
+    "case": "multi",
+    "passed": true,
+    "elapsed": 1663.494678253075,
+    "memory": {
+      "VmRSS": "880132 kB",
+      "VmHWM": "880940 kB"
+    }
+  },
+  {
+    "cycle": 216,
+    "case": "large-clean",
+    "passed": true,
+    "elapsed": 1667.4362061150605,
+    "memory": {
+      "VmRSS": "913908 kB",
+      "VmHWM": "913908 kB"
+    }
+  },
+  {
+    "cycle": 217,
+    "case": "long-line",
+    "passed": true,
+    "elapsed": 1670.0691689370433,
+    "memory": {
+      "VmRSS": "914348 kB",
+      "VmHWM": "914972 kB"
+    }
+  },
+  {
+    "cycle": 218,
+    "case": "utf16",
+    "passed": true,
+    "elapsed": 1672.1915610539727,
+    "memory": {
+      "VmRSS": "913932 kB",
+      "VmHWM": "914972 kB"
+    }
+  },
+  {
+    "cycle": 219,
+    "case": "unicode",
+    "passed": true,
+    "elapsed": 1674.3833252070472,
+    "memory": {
+      "VmRSS": "913904 kB",
+      "VmHWM": "914972 kB"
+    }
+  },
+  {
+    "cycle": 220,
+    "case": "no-eol",
+    "passed": true,
+    "elapsed": 1676.61769270699,
+    "memory": {
+      "VmRSS": "914488 kB",
+      "VmHWM": "914972 kB"
+    }
+  },
+  {
+    "cycle": 221,
+    "case": "conflict",
+    "passed": true,
+    "elapsed": 1679.4300858740462,
+    "memory": {
+      "VmRSS": "913904 kB",
+      "VmHWM": "914972 kB"
+    }
+  },
+  {
+    "cycle": 222,
+    "case": "clean",
+    "passed": true,
+    "elapsed": 1681.6102201290196,
+    "memory": {
+      "VmRSS": "913924 kB",
+      "VmHWM": "914972 kB"
+    }
+  },
+  {
+    "cycle": 223,
+    "case": "crlf",
+    "passed": true,
+    "elapsed": 1683.810422823066,
+    "memory": {
+      "VmRSS": "913912 kB",
+      "VmHWM": "914972 kB"
+    }
+  },
+  {
+    "cycle": 224,
+    "case": "json",
+    "passed": true,
+    "elapsed": 1686.7123149840627,
+    "memory": {
+      "VmRSS": "913900 kB",
+      "VmHWM": "914972 kB"
+    }
+  },
+  {
+    "cycle": 225,
+    "case": "multi",
+    "passed": true,
+    "elapsed": 1689.396541340975,
+    "memory": {
+      "VmRSS": "913892 kB",
+      "VmHWM": "914972 kB"
+    }
+  },
+  {
+    "cycle": 226,
+    "case": "large-clean",
+    "passed": true,
+    "elapsed": 1693.3653857110767,
+    "memory": {
+      "VmRSS": "914064 kB",
+      "VmHWM": "916808 kB"
+    }
+  },
+  {
+    "cycle": 227,
+    "case": "long-line",
+    "passed": true,
+    "elapsed": 1696.0508511740481,
+    "memory": {
+      "VmRSS": "914488 kB",
+      "VmHWM": "916808 kB"
+    }
+  },
+  {
+    "cycle": 228,
+    "case": "utf16",
+    "passed": true,
+    "elapsed": 1698.1970439010765,
+    "memory": {
+      "VmRSS": "914368 kB",
+      "VmHWM": "916808 kB"
+    }
+  },
+  {
+    "cycle": 229,
+    "case": "unicode",
+    "passed": true,
+    "elapsed": 1700.369604960084,
+    "memory": {
+      "VmRSS": "914060 kB",
+      "VmHWM": "916808 kB"
+    }
+  },
+  {
+    "cycle": 230,
+    "case": "no-eol",
+    "passed": true,
+    "elapsed": 1702.479907248984,
+    "memory": {
+      "VmRSS": "914688 kB",
+      "VmHWM": "916808 kB"
+    }
+  },
+  {
+    "cycle": 231,
+    "case": "conflict",
+    "passed": true,
+    "elapsed": 1705.0599452700699,
+    "memory": {
+      "VmRSS": "914064 kB",
+      "VmHWM": "916808 kB"
+    }
+  },
+  {
+    "cycle": 232,
+    "case": "clean",
+    "passed": true,
+    "elapsed": 1707.1424205260118,
+    "memory": {
+      "VmRSS": "914060 kB",
+      "VmHWM": "916808 kB"
+    }
+  },
+  {
+    "cycle": 233,
+    "case": "crlf",
+    "passed": true,
+    "elapsed": 1709.434746681014,
+    "memory": {
+      "VmRSS": "914072 kB",
+      "VmHWM": "916808 kB"
+    }
+  },
+  {
+    "cycle": 234,
+    "case": "json",
+    "passed": true,
+    "elapsed": 1712.4197405610466,
+    "memory": {
+      "VmRSS": "914060 kB",
+      "VmHWM": "916808 kB"
+    }
+  },
+  {
+    "cycle": 235,
+    "case": "multi",
+    "passed": true,
+    "elapsed": 1715.106470127008,
+    "memory": {
+      "VmRSS": "914060 kB",
+      "VmHWM": "916808 kB"
+    }
+  },
+  {
+    "cycle": 236,
+    "case": "large-clean",
+    "passed": true,
+    "elapsed": 1719.076949595008,
+    "memory": {
+      "VmRSS": "914064 kB",
+      "VmHWM": "916808 kB"
+    }
+  },
+  {
+    "cycle": 237,
+    "case": "long-line",
+    "passed": true,
+    "elapsed": 1721.7271621030523,
+    "memory": {
+      "VmRSS": "914488 kB",
+      "VmHWM": "916808 kB"
+    }
+  },
+  {
+    "cycle": 238,
+    "case": "utf16",
+    "passed": true,
+    "elapsed": 1723.912202974083,
+    "memory": {
+      "VmRSS": "914384 kB",
+      "VmHWM": "916808 kB"
+    }
+  },
+  {
+    "cycle": 239,
+    "case": "unicode",
+    "passed": true,
+    "elapsed": 1726.1319319159957,
+    "memory": {
+      "VmRSS": "914060 kB",
+      "VmHWM": "916808 kB"
+    }
+  },
+  {
+    "cycle": 240,
+    "case": "no-eol",
+    "passed": true,
+    "elapsed": 1728.2565041980706,
+    "memory": {
+      "VmRSS": "914656 kB",
+      "VmHWM": "916808 kB"
+    }
+  },
+  {
+    "cycle": 241,
+    "case": "conflict",
+    "passed": true,
+    "elapsed": 1730.9688845929923,
+    "memory": {
+      "VmRSS": "914056 kB",
+      "VmHWM": "916808 kB"
+    }
+  },
+  {
+    "cycle": 242,
+    "case": "clean",
+    "passed": true,
+    "elapsed": 1733.077665784047,
+    "memory": {
+      "VmRSS": "914064 kB",
+      "VmHWM": "916808 kB"
+    }
+  },
+  {
+    "cycle": 243,
+    "case": "crlf",
+    "passed": true,
+    "elapsed": 1735.265651314985,
+    "memory": {
+      "VmRSS": "914064 kB",
+      "VmHWM": "916808 kB"
+    }
+  },
+  {
+    "cycle": 244,
+    "case": "json",
+    "passed": true,
+    "elapsed": 1737.9813609509729,
+    "memory": {
+      "VmRSS": "914056 kB",
+      "VmHWM": "916808 kB"
+    }
+  },
+  {
+    "cycle": 245,
+    "case": "multi",
+    "passed": true,
+    "elapsed": 1740.5578114800155,
+    "memory": {
+      "VmRSS": "914072 kB",
+      "VmHWM": "916808 kB"
+    }
+  },
+  {
+    "cycle": 246,
+    "case": "large-clean",
+    "passed": true,
+    "elapsed": 1744.4819641610375,
+    "memory": {
+      "VmRSS": "916856 kB",
+      "VmHWM": "916904 kB"
+    }
+  },
+  {
+    "cycle": 247,
+    "case": "long-line",
+    "passed": true,
+    "elapsed": 1747.1095066720154,
+    "memory": {
+      "VmRSS": "917284 kB",
+      "VmHWM": "917824 kB"
+    }
+  },
+  {
+    "cycle": 248,
+    "case": "utf16",
+    "passed": true,
+    "elapsed": 1749.2917682450498,
+    "memory": {
+      "VmRSS": "916864 kB",
+      "VmHWM": "917824 kB"
+    }
+  },
+  {
+    "cycle": 249,
+    "case": "unicode",
+    "passed": true,
+    "elapsed": 1751.3807038330706,
+    "memory": {
+      "VmRSS": "916872 kB",
+      "VmHWM": "917824 kB"
+    }
+  },
+  {
+    "cycle": 250,
+    "case": "no-eol",
+    "passed": true,
+    "elapsed": 1753.5010440740734,
+    "memory": {
+      "VmRSS": "917448 kB",
+      "VmHWM": "917824 kB"
+    }
+  },
+  {
+    "cycle": 251,
+    "case": "conflict",
+    "passed": true,
+    "elapsed": 1756.1136163530173,
+    "memory": {
+      "VmRSS": "916856 kB",
+      "VmHWM": "917824 kB"
+    }
+  },
+  {
+    "cycle": 252,
+    "case": "clean",
+    "passed": true,
+    "elapsed": 1758.214498150046,
+    "memory": {
+      "VmRSS": "916864 kB",
+      "VmHWM": "917824 kB"
+    }
+  },
+  {
+    "cycle": 253,
+    "case": "crlf",
+    "passed": true,
+    "elapsed": 1760.2927117060171,
+    "memory": {
+      "VmRSS": "916876 kB",
+      "VmHWM": "917824 kB"
+    }
+  },
+  {
+    "cycle": 254,
+    "case": "json",
+    "passed": true,
+    "elapsed": 1763.2075074790046,
+    "memory": {
+      "VmRSS": "916852 kB",
+      "VmHWM": "917824 kB"
+    }
+  },
+  {
+    "cycle": 255,
+    "case": "multi",
+    "passed": true,
+    "elapsed": 1765.8345996940043,
+    "memory": {
+      "VmRSS": "916852 kB",
+      "VmHWM": "917824 kB"
+    }
+  },
+  {
+    "cycle": 256,
+    "case": "large-clean",
+    "passed": true,
+    "elapsed": 1769.843190244981,
+    "memory": {
+      "VmRSS": "919892 kB",
+      "VmHWM": "919892 kB"
+    }
+  },
+  {
+    "cycle": 257,
+    "case": "long-line",
+    "passed": true,
+    "elapsed": 1772.5676261340268,
+    "memory": {
+      "VmRSS": "920316 kB",
+      "VmHWM": "921120 kB"
+    }
+  },
+  {
+    "cycle": 258,
+    "case": "utf16",
+    "passed": true,
+    "elapsed": 1774.9449655429926,
+    "memory": {
+      "VmRSS": "919896 kB",
+      "VmHWM": "921120 kB"
+    }
+  },
+  {
+    "cycle": 259,
+    "case": "unicode",
+    "passed": true,
+    "elapsed": 1777.161727347062,
+    "memory": {
+      "VmRSS": "919892 kB",
+      "VmHWM": "921120 kB"
+    }
+  },
+  {
+    "cycle": 260,
+    "case": "no-eol",
+    "passed": true,
+    "elapsed": 1779.2926859110594,
+    "memory": {
+      "VmRSS": "920488 kB",
+      "VmHWM": "921120 kB"
+    }
+  },
+  {
+    "cycle": 261,
+    "case": "conflict",
+    "passed": true,
+    "elapsed": 1781.8182449550368,
+    "memory": {
+      "VmRSS": "919888 kB",
+      "VmHWM": "921120 kB"
+    }
+  },
+  {
+    "cycle": 262,
+    "case": "clean",
+    "passed": true,
+    "elapsed": 1783.9520089440048,
+    "memory": {
+      "VmRSS": "919896 kB",
+      "VmHWM": "921120 kB"
+    }
+  },
+  {
+    "cycle": 263,
+    "case": "crlf",
+    "passed": true,
+    "elapsed": 1786.1489035909763,
+    "memory": {
+      "VmRSS": "919896 kB",
+      "VmHWM": "921120 kB"
+    }
+  },
+  {
+    "cycle": 264,
+    "case": "json",
+    "passed": true,
+    "elapsed": 1789.1822195430286,
+    "memory": {
+      "VmRSS": "919884 kB",
+      "VmHWM": "921120 kB"
+    }
+  },
+  {
+    "cycle": 265,
+    "case": "multi",
+    "passed": true,
+    "elapsed": 1791.8146959060105,
+    "memory": {
+      "VmRSS": "919888 kB",
+      "VmHWM": "921120 kB"
+    }
+  },
+  {
+    "cycle": 266,
+    "case": "large-clean",
+    "passed": true,
+    "elapsed": 1795.739543140051,
+    "memory": {
+      "VmRSS": "919896 kB",
+      "VmHWM": "922836 kB"
+    }
+  },
+  {
+    "cycle": 267,
+    "case": "long-line",
+    "passed": true,
+    "elapsed": 1798.6043135049986,
+    "memory": {
+      "VmRSS": "920320 kB",
+      "VmHWM": "922836 kB"
+    }
+  },
+  {
+    "cycle": 268,
+    "case": "utf16",
+    "passed": true,
+    "elapsed": 1800.7775923350127,
+    "memory": {
+      "VmRSS": "919912 kB",
+      "VmHWM": "922836 kB"
+    }
+  },
+  {
+    "cycle": 269,
+    "case": "unicode",
+    "passed": true,
+    "elapsed": 1802.8523141840706,
+    "memory": {
+      "VmRSS": "919908 kB",
+      "VmHWM": "922836 kB"
+    }
+  },
+  {
+    "cycle": 270,
+    "case": "no-eol",
+    "passed": true,
+    "elapsed": 1805.0881745960796,
+    "memory": {
+      "VmRSS": "920492 kB",
+      "VmHWM": "922836 kB"
+    }
+  }
+]

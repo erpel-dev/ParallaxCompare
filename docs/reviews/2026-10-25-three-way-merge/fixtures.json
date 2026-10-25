@@ -1,0 +1,127 @@
+{
+  "clean": {
+    "base": "/tmp/parallax-merge-exploration-20261025/clean/base.txt",
+    "local": "/tmp/parallax-merge-exploration-20261025/clean/local.txt",
+    "remote": "/tmp/parallax-merge-exploration-20261025/clean/remote.txt",
+    "output": "/tmp/parallax-merge-exploration-20261025/clean/result.txt"
+  },
+  "conflict": {
+    "base": "/tmp/parallax-merge-exploration-20261025/conflict/base.txt",
+    "local": "/tmp/parallax-merge-exploration-20261025/conflict/local.txt",
+    "remote": "/tmp/parallax-merge-exploration-20261025/conflict/remote.txt",
+    "output": "/tmp/parallax-merge-exploration-20261025/conflict/result.txt"
+  },
+  "multi": {
+    "base": "/tmp/parallax-merge-exploration-20261025/multi/base.txt",
+    "local": "/tmp/parallax-merge-exploration-20261025/multi/local.txt",
+    "remote": "/tmp/parallax-merge-exploration-20261025/multi/remote.txt",
+    "output": "/tmp/parallax-merge-exploration-20261025/multi/result.txt"
+  },
+  "identical": {
+    "base": "/tmp/parallax-merge-exploration-20261025/identical/base.txt",
+    "local": "/tmp/parallax-merge-exploration-20261025/identical/local.txt",
+    "remote": "/tmp/parallax-merge-exploration-20261025/identical/remote.txt",
+    "output": "/tmp/parallax-merge-exploration-20261025/identical/result.txt"
+  },
+  "empty": {
+    "base": "/tmp/parallax-merge-exploration-20261025/empty/base.txt",
+    "local": "/tmp/parallax-merge-exploration-20261025/empty/local.txt",
+    "remote": "/tmp/parallax-merge-exploration-20261025/empty/remote.txt",
+    "output": "/tmp/parallax-merge-exploration-20261025/empty/result.txt"
+  },
+  "no-base": {
+    "base": "/tmp/parallax-merge-exploration-20261025/no-base/base.txt",
+    "local": "/tmp/parallax-merge-exploration-20261025/no-base/local.txt",
+    "remote": "/tmp/parallax-merge-exploration-20261025/no-base/remote.txt",
+    "output": "/tmp/parallax-merge-exploration-20261025/no-base/result.txt"
+  },
+  "empty-result": {
+    "base": "/tmp/parallax-merge-exploration-20261025/empty-result/base.txt",
+    "local": "/tmp/parallax-merge-exploration-20261025/empty-result/local.txt",
+    "remote": "/tmp/parallax-merge-exploration-20261025/empty-result/remote.txt",
+    "output": "/tmp/parallax-merge-exploration-20261025/empty-result/result.txt"
+  },
+  "no-eol": {
+    "base": "/tmp/parallax-merge-exploration-20261025/no-eol/base.txt",
+    "local": "/tmp/parallax-merge-exploration-20261025/no-eol/local.txt",
+    "remote": "/tmp/parallax-merge-exploration-20261025/no-eol/remote.txt",
+    "output": "/tmp/parallax-merge-exploration-20261025/no-eol/result.txt"
+  },
+  "crlf": {
+    "base": "/tmp/parallax-merge-exploration-20261025/crlf/base.txt",
+    "local": "/tmp/parallax-merge-exploration-20261025/crlf/local.txt",
+    "remote": "/tmp/parallax-merge-exploration-20261025/crlf/remote.txt",
+    "output": "/tmp/parallax-merge-exploration-20261025/crlf/result.txt"
+  },
+  "unicode": {
+    "base": "/tmp/parallax-merge-exploration-20261025/unicode/base.txt",
+    "local": "/tmp/parallax-merge-exploration-20261025/unicode/local.txt",
+    "remote": "/tmp/parallax-merge-exploration-20261025/unicode/remote.txt",
+    "output": "/tmp/parallax-merge-exploration-20261025/unicode/result.txt"
+  },
+  "json": {
+    "base": "/tmp/parallax-merge-exploration-20261025/json/base.json",
+    "local": "/tmp/parallax-merge-exploration-20261025/json/local.json",
+    "remote": "/tmp/parallax-merge-exploration-20261025/json/remote.json",
+    "output": "/tmp/parallax-merge-exploration-20261025/json/result.json"
+  },
+  "rust": {
+    "base": "/tmp/parallax-merge-exploration-20261025/rust/base.rs",
+    "local": "/tmp/parallax-merge-exploration-20261025/rust/local.rs",
+    "remote": "/tmp/parallax-merge-exploration-20261025/rust/remote.rs",
+    "output": "/tmp/parallax-merge-exploration-20261025/rust/result.rs"
+  },
+  "syntax-line": {
+    "base": "/tmp/parallax-merge-exploration-20261025/syntax-line/base.rs",
+    "local": "/tmp/parallax-merge-exploration-20261025/syntax-line/local.rs",
+    "remote": "/tmp/parallax-merge-exploration-20261025/syntax-line/remote.rs",
+    "output": "/tmp/parallax-merge-exploration-20261025/syntax-line/result.rs"
+  },
+  "marker-literal": {
+    "base": "/tmp/parallax-merge-exploration-20261025/marker-literal/base.txt",
+    "local": "/tmp/parallax-merge-exploration-20261025/marker-literal/local.txt",
+    "remote": "/tmp/parallax-merge-exploration-20261025/marker-literal/remote.txt",
+    "output": "/tmp/parallax-merge-exploration-20261025/marker-literal/result.txt"
+  },
+  "long-line": {
+    "base": "/tmp/parallax-merge-exploration-20261025/long-line/base.txt",
+    "local": "/tmp/parallax-merge-exploration-20261025/long-line/local.txt",
+    "remote": "/tmp/parallax-merge-exploration-20261025/long-line/remote.txt",
+    "output": "/tmp/parallax-merge-exploration-20261025/long-line/result.txt"
+  },
+  "utf16": {
+    "base": "/tmp/parallax-merge-exploration-20261025/utf16/base.txt",
+    "local": "/tmp/parallax-merge-exploration-20261025/utf16/local.txt",
+    "remote": "/tmp/parallax-merge-exploration-20261025/utf16/remote.txt",
+    "output": "/tmp/parallax-merge-exploration-20261025/utf16/result.txt"
+  },
+  "legacy": {
+    "base": "/tmp/parallax-merge-exploration-20261025/legacy/base.txt",
+    "local": "/tmp/parallax-merge-exploration-20261025/legacy/local.txt",
+    "remote": "/tmp/parallax-merge-exploration-20261025/legacy/remote.txt",
+    "output": "/tmp/parallax-merge-exploration-20261025/legacy/result.txt"
+  },
+  "large-clean": {
+    "base": "/tmp/parallax-merge-exploration-20261025/large-clean/base.txt",
+    "local": "/tmp/parallax-merge-exploration-20261025/large-clean/local.txt",
+    "remote": "/tmp/parallax-merge-exploration-20261025/large-clean/remote.txt",
+    "output": "/tmp/parallax-merge-exploration-20261025/large-clean/result.txt"
+  },
+  "large-conflicts": {
+    "base": "/tmp/parallax-merge-exploration-20261025/large-conflicts/base.txt",
+    "local": "/tmp/parallax-merge-exploration-20261025/large-conflicts/local.txt",
+    "remote": "/tmp/parallax-merge-exploration-20261025/large-conflicts/remote.txt",
+    "output": "/tmp/parallax-merge-exploration-20261025/large-conflicts/result.txt"
+  },
+  "many-conflicts": {
+    "base": "/tmp/parallax-merge-exploration-20261025/many-conflicts/base.txt",
+    "local": "/tmp/parallax-merge-exploration-20261025/many-conflicts/local.txt",
+    "remote": "/tmp/parallax-merge-exploration-20261025/many-conflicts/remote.txt",
+    "output": "/tmp/parallax-merge-exploration-20261025/many-conflicts/result.txt"
+  },
+  "repos": {
+    "repo-conflicts": "/tmp/parallax-merge-exploration-20261025/repo-conflicts",
+    "repo-rebase": "/tmp/parallax-merge-exploration-20261025/repo-rebase",
+    "repo-cherry": "/tmp/parallax-merge-exploration-20261025/repo-cherry"
+  }
+}

@@ -1,0 +1,156 @@
+[
+  {
+    "id": "M01",
+    "severity": "P1",
+    "title": "Saving silently overwrites external changes to the merge output",
+    "steps": [
+      "Create a clean three-file merge with an existing result file.",
+      "After the merge opens, change the result file from another process.",
+      "Click Save result."
+    ],
+    "actual": "ONE\ntwo\nthree\nfour\nFIVE\n",
+    "expected": "Reject the stale save and offer reload, Save As or explicit overwrite.",
+    "fix": "Capture the output bytes/existence when opening and after each save; check again before the atomic replacement. Protect duplicate open merges targeting the same file too.",
+    "evidence": [
+      "04-external-overwritten.png",
+      "runtime.jsonl"
+    ]
+  },
+  {
+    "id": "M02",
+    "severity": "P1",
+    "title": "Taking a side of a symlink conflict replaces the symlink with a regular file",
+    "steps": [
+      "Create a repository with both branches changing a symlink target.",
+      "Open Resolve conflicts and click Take remote for link.",
+      "Stage resolved files and inspect git ls-files -s link."
+    ],
+    "actual": "link is a regular file containing 'remote-target'; the UI marks it resolved.",
+    "expected": "Keep a symlink pointing at remote-target and stage mode 120000.",
+    "fix": "Use each stage mode when resolving whole files; create symlinks for 120000, preserve 100755/100644 and handle gitlinks separately. Symlink conflicts must not open as editable text.",
+    "evidence": [
+      "07-symlink-flattened.png",
+      "runtime.jsonl"
+    ]
+  },
+  {
+    "id": "M03",
+    "severity": "P2",
+    "title": "Taking a whole version ignores the chosen executable bit",
+    "steps": [
+      "In a rebase conflict, base and remote script.sh are executable (stage mode 100755), while local is non-executable (100644).",
+      "Click Take remote in the repository conflict list.",
+      "Stage the resolved file and inspect git ls-files -s script.sh."
+    ],
+    "actual": "The remote content is taken, but the file remains non-executable (0o600).",
+    "expected": "Restore the chosen stage executable bit and stage mode 100755.",
+    "fix": "Use stage.mode when resolving whole files; pass permissions to replacement. Compare executable bits independently of the process umask.",
+    "evidence": [
+      "10-executable-mode.png",
+      "runtime.jsonl"
+    ]
+  },
+  {
+    "id": "M04",
+    "severity": "P3",
+    "title": "An empty merge result has no way to start typing",
+    "steps": [
+      "Merge three empty files, or merge a file deleted on both sides.",
+      "Try to add text to the empty result pane."
+    ],
+    "actual": "The result has no rows or editor; clicking the empty pane and typing does nothing.",
+    "expected": "Provide an editable empty line or an Insert line action.",
+    "fix": "Render an empty-result placeholder that opens an editor at (0,0), and ensure result line counts include the insertion point.",
+    "evidence": [
+      "13-empty-result.png"
+    ]
+  },
+  {
+    "id": "M05",
+    "severity": "P2",
+    "title": "Merge input lines are clipped with no horizontal scrolling",
+    "steps": [
+      "Open three files with a shared 190-character prefix and different text after it.",
+      "Try to inspect the changed suffix in Local/Base/Remote."
+    ],
+    "actual": "At a 1400 px window, each code cell has 420\u2013421 px visible width versus 1343\u20131364 px of text. Code and cells use overflow:hidden; the input pane scrollWidth equals clientWidth (1400 px), so scrolling cannot reveal the suffix.",
+    "expected": "Allow horizontal scrolling or wrapping so the changed text can be inspected before choosing a side.",
+    "fix": "Add per-pane horizontal scroll with synchronized headers, or configurable wrapping. The result pane needs the same treatment; retain a way to inspect backend-truncated line tails.",
+    "evidence": [
+      "17-clipped-input-lines.png",
+      "runtime.jsonl"
+    ]
+  },
+  {
+    "id": "M06",
+    "severity": "P2",
+    "title": "A valid relative mergiraf path is detected but fails during the merge",
+    "steps": [
+      "In the application working directory, place .review-tools/mergiraf pointing at an installed executable.",
+      "Choose mergiraf and set Program to .review-tools/mergiraf.",
+      "The version check succeeds, but the merge fails."
+    ],
+    "actual": "\u2191 Previous conflict\n\u2193 Next conflict\n1 of 1 conflict left\n\u21b6 Undo\n\u21b7 Redo\n\u2726 Syntax-aware \u25be\n\ud83d\udcbe Save result\nSyntax-aware merge: not supported: mergiraf could not be run. Install mergiraf and make it available on PATH: No such file or directory (os error 2)\nLOCAL\n/tmp/parallax-merge-exploration-20261025/syntax-line/local.rs\nBASE\n/tmp/parallax-merge-exploration-20261025/syntax-line/base.rs\nREMOTE\n/tmp/parallax-merge-exploration-20261025/syntax-line/remote.rs\n1\nfn main() {\n1\nfn main() {\n1\nfn main() {\n2\n    call(3, 2);\n2\n    call(1, 2);\n2\n    call(1, 4);\n3\n}\n3\n}\n3\n}\nRESULT\n/tmp/parallax-merge-exploration-20261025/relative-program.rs\nfrom local\nfrom remote\nsame on both\nedited\n1\nfn main() {\nConflict 1 of 1\n\u2190 Take local\nTake remote \u2192\nTake both\nBoth, remote first\nKeep base\n2\n<<<<<<< /tmp/parallax-merge-exploration-20261025/syntax-line/local.rs\n3\n    call(3, 2);\n4\n=======\n5\n    call(1, 4);\n6\n>>>>>>> /tmp/parallax-merge-exploration-20261025/syntax-line/remote.rs\n7\n}\n0 changes merged automatically\n1 conflict\nUTF-8 \u00b7 Rust\nF7/F8 conflicts \u00b7 Alt+\u2190/\u2192 take a side \u00b7 Alt+\u2193 both \u00b7 click a result line to edit",
+    "expected": "Resolve the configured program to an absolute executable path once and use it for every invocation.",
+    "fix": "Canonicalize an explicit or PATH-derived executable in Mergiraf::find before running merge in its temporary working directory.",
+    "evidence": [
+      "40a-relative-program-detected.png",
+      "40b-relative-program-merge-error.png",
+      "runtime.jsonl"
+    ]
+  },
+  {
+    "id": "M07",
+    "severity": "P2",
+    "title": "Merge initialization scales quadratically with many independent conflicts",
+    "steps": [
+      "Generate N conflict lines separated by six unchanged context lines.",
+      "Open the three files in a merge.",
+      "Repeat for 500, 1000, 2000 and 4000 conflicts using the optimized build."
+    ],
+    "actual": "For 3500 / 7000 / 14000 / 28000 input lines (about 49 / 98 / 204 / 416 KB per input), open_merge takes 0.126 / 0.422 / 1.944 / 7.069 seconds. Doubling the input and conflicts roughly quadruples initialization time.",
+    "expected": "Avoid repeated whole-file scans when constructing blocks; loading small sub-megabyte inputs should not take seconds.",
+    "fix": "MergeSession::new calls content once per block, and content splits all three entire documents into line vectors every time. Reuse line offsets/slices for each block. Profile info()/stats serialization separately after removing that scan.",
+    "evidence": [
+      "backend-performance-confirmed.json",
+      "backend-performance-confirmed.log",
+      "backend-performance.py"
+    ]
+  },
+  {
+    "id": "M08",
+    "severity": "P2",
+    "title": "The default syntax pass adds substantial memory for an entirely unchanged plain-text merge",
+    "steps": [
+      "In a fresh process, merge three identical 14,000,000-byte text files containing one million lines.",
+      "Measure main-process RSS after open_merge.",
+      "Run merge_structured with the built-in engine, which the GUI runs by default."
+    ],
+    "actual": "Main-process RSS rises from 182,148 KiB baseline to 330,888 KiB after opening, then 566,716 KiB after the redundant syntax pass\u2014about 230 MiB extra although there are no changes or conflicts. Closing leaves allocator-retained memory; a leak was not established.",
+    "expected": "Skip syntax work when all three texts are identical, and avoid cloning whole documents for a no-op.",
+    "fix": "Add a trivial unchanged-merge fast path before copying texts or invoking the engine. Retain syntax checks for nontrivial clean line merges, since they may reveal semantic conflicts. Profile temporary vectors and owned strings in set_syntax_result.",
+    "evidence": [
+      "fresh-memory-results.json",
+      "fresh-memory.py"
+    ]
+  },
+  {
+    "id": "M09",
+    "severity": "P2",
+    "title": "Side shortcuts after Narrow down discard the syntax-merged parts of the conflict",
+    "steps": [
+      "Merge a Rust struct where local adds a local field, remote adds a remote field, and both sides edit the following function differently.",
+      "Choose \u2726 Narrow down. The result retains both fields and leaves only the function call conflicted.",
+      "Focus the merge and press Alt+Left to take the local side."
+    ],
+    "actual": "The remote field disappears as the shortcut replaces the entire original line-conflict block. The counter changes to All 1 conflict resolved. The visible buttons had deliberately offered only manual editing and Undo choice after narrowing.",
+    "expected": "Resolve only the remaining inner conflict, retaining the fields already merged, or disable whole-block side shortcuts after narrowing and explain their scope.",
+    "fix": "Guard Alt+arrow handling for partially narrowed syntax choices, or model the remaining marker ranges as new conflicts. The same scope policy should cover local, remote, base and both-side shortcuts.",
+    "evidence": [
+      "61-partial-syntax-narrowed.png",
+      "62-partial-syntax-alt-left.png",
+      "phase7.py",
+      "phase7.log"
+    ]
+  }
+]

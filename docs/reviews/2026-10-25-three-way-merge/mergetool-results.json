@@ -1,0 +1,26 @@
+[
+  {
+    "mode": "resolve-remote",
+    "gitExit": 0,
+    "appExit": "0",
+    "text": "header\nremote\nfooter\n",
+    "unmerged": false,
+    "wallSeconds": 3.337074237060733
+  },
+  {
+    "mode": "cancel",
+    "gitExit": 1,
+    "appExit": "1",
+    "text": "header\n<<<<<<< HEAD\nlocal\n=======\nremote\n>>>>>>> feature/remote\nfooter\n",
+    "unmerged": true,
+    "wallSeconds": 2.2412924009840935
+  },
+  {
+    "mode": "save-markers",
+    "gitExit": 1,
+    "appExit": "1",
+    "text": "header\n<<<<<<< HEAD\nlocal\n=======\nremote\n>>>>>>> feature/remote\nfooter\n",
+    "unmerged": true,
+    "wallSeconds": 3.5237832120619714
+  }
+]
