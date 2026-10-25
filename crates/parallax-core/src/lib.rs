@@ -6,10 +6,13 @@
 //! those trees, so any source can be compared against any other source.
 
 pub mod compare;
+pub mod conflicts;
 pub mod convert;
 pub mod edit;
 pub mod error;
 pub mod highlight;
+pub mod merge;
+pub mod merge_session;
 pub mod ops;
 mod process;
 pub mod progress;

@@ -128,3 +128,46 @@ fn include_patterns() {
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("1 files compared"), "{out}");
 }
+
+fn merge(args: &[&str]) -> (i32, String, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_parallax")).arg("merge").args(args).output().unwrap();
+    let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+    (out.status.code().unwrap(), text(&out.stdout), text(&out.stderr))
+}
+
+#[test]
+fn three_way_merge() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = |n: &str| dir.path().join(n).to_str().unwrap().to_string();
+    fs::write(p("base"), "a\nb\nc\nd\ne\n").unwrap();
+    fs::write(p("local"), "a\nB\nc\nd\ne\n").unwrap();
+    fs::write(p("remote"), "a\nb\nc\nd\nE\n").unwrap();
+    let (code, out, _) = merge(&[&p("base"), &p("local"), &p("remote")]);
+    assert_eq!((code, out.as_str()), (0, "a\nB\nc\nd\nE\n"));
+
+    fs::write(p("remote"), "a\nX\nc\nd\ne\n").unwrap();
+    let (code, _, err) = merge(&[
+        &p("base"),
+        &p("local"),
+        &p("remote"),
+        "-o",
+        &p("out"),
+        "-L",
+        "mine",
+        "-L",
+        "old",
+        "-L",
+        "theirs",
+        "--style",
+        "diff3",
+    ]);
+    assert_eq!(code, 1);
+    assert!(err.contains("1 conflict left"), "{err}");
+    assert_eq!(
+        fs::read_to_string(p("out")).unwrap(),
+        "a\n<<<<<<< mine\nB\n||||||| old\nb\n=======\nX\n>>>>>>> theirs\nc\nd\ne\n"
+    );
+
+    fs::write(p("bin"), b"\0\x01").unwrap();
+    assert_eq!(merge(&[&p("base"), &p("bin"), &p("remote")]).0, 2);
+}

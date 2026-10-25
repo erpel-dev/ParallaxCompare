@@ -55,6 +55,11 @@ impl Drain {
 }
 
 pub(crate) fn run(cmd: &mut Command, program: &str, operation: &str, limit: Duration) -> Result<String> {
+    run_bytes(cmd, program, operation, limit).map(|out| String::from_utf8_lossy(&out).into_owned())
+}
+
+/// Like [`run`], with the output as bytes (file contents from `git cat-file`).
+pub(crate) fn run_bytes(cmd: &mut Command, program: &str, operation: &str, limit: Duration) -> Result<Vec<u8>> {
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(windows)]
     {
@@ -91,7 +96,7 @@ pub(crate) fn run(cmd: &mut Command, program: &str, operation: &str, limit: Dura
     let deadline = Instant::now() + DRAIN_GRACE;
     let (out, err) = (stdout.until(deadline), stderr.until(deadline));
     if status.success() {
-        Ok(String::from_utf8_lossy(&out).into_owned())
+        Ok(out)
     } else {
         let detail = String::from_utf8_lossy(&err);
         let detail = detail.trim();

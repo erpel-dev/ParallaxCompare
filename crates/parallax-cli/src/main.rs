@@ -6,6 +6,8 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+mod merge_cmd;
+
 use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
 
@@ -22,7 +24,7 @@ use parallax_core::textdiff::{self, DiffOptions, RowKind, WhitespaceMode};
     name = "parallax",
     version,
     about = "Compare folders, archives, Git revisions and files",
-    after_help = "SOURCES:\n  path/to/folder        a folder or a file\n  release.7z            an archive (zip, 7z, tar.gz/xz/zst/bz2, jar, …)\n  release.7z!/bin       a folder inside an archive\n  repo@main             a Git branch, tag or commit (no checkout needed)\n  repo@v1.4:src/lib     a folder inside a Git revision\n\nEXAMPLES:\n  parallax ~/src/app@main ~/src/app@feature/x --merge-base\n  parallax dist/ release-1.4.7z\n  parallax old.txt new.txt"
+    after_help = "SOURCES:\n  path/to/folder        a folder or a file\n  release.7z            an archive (zip, 7z, tar.gz/xz/zst/bz2, jar, …)\n  release.7z!/bin       a folder inside an archive\n  repo@main             a Git branch, tag or commit (no checkout needed)\n  repo@v1.4:src/lib     a folder inside a Git revision\n\nEXAMPLES:\n  parallax ~/src/app@main ~/src/app@feature/x --merge-base\n  parallax dist/ release-1.4.7z\n  parallax old.txt new.txt\n\nMERGE:\n  parallax merge BASE LOCAL REMOTE [-o OUT]   3-way merge (parallax merge --help)"
 )]
 struct Cli {
     left: String,
@@ -134,8 +136,18 @@ impl Paint {
 }
 
 fn main() -> ExitCode {
+    // `parallax merge …`, unless "merge" is a folder compared with one other source.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).is_some_and(|a| a == "merge") && !(args.len() == 3 && std::path::Path::new("merge").exists()) {
+        let cli = merge_cmd::MergeCli::parse_from(&args[1..]);
+        return exit(merge_cmd::run(&cli));
+    }
     let cli = Cli::parse();
-    match run(&cli) {
+    exit(run(&cli))
+}
+
+fn exit(result: Result<bool>) -> ExitCode {
+    match result {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(1),
         Err(e) if e.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == std::io::ErrorKind::BrokenPipe) => {
