@@ -348,13 +348,6 @@ export interface RefList {
   recentCommits: CommitInfo[];
 }
 
-export interface PathInfo {
-  exists: boolean;
-  isDir: boolean;
-  isArchive: boolean;
-  gitRoot: string | null;
-}
-
 export interface SourcePreview {
   kind: "empty" | "folder" | "file" | "archive" | "archivePath" | "gitRev" | "remote" | "needsRepository" | "error";
   spec: SourceSpec | null;
@@ -460,11 +453,15 @@ export interface ResultRowView {
 
 export type ConflictKind = "bothModified" | "bothAdded" | "deletedByUs" | "deletedByThem" | "addedByUs" | "addedByThem" | "bothDeleted";
 
+/** The kind of file a Git mode records. */
+export type FileMode = "regular" | "executable" | "symlink" | "gitlink";
+
 export interface RepoConflicts {
   workdir: string;
   summary: string;
   labels: { local: string; base: string; remote: string };
-  files: { path: string; kind: ConflictKind; text: boolean }[];
+  /** `special`: a link or a submodule rather than a file, on either side. */
+  files: { path: string; kind: ConflictKind; text: boolean; special: FileMode | null }[];
 }
 
 export const defaultCompareOptions = (): CompareOptions => ({
@@ -501,11 +498,14 @@ export const api = {
   /** Conflicts left, or `null` when the engine declined the file. */
   structuredMergeConflict: (workdir: string, path: string, engine: string, mergiraf: string | null, write: boolean) =>
     invoke<number | null>("structured_merge_conflict", { workdir, path, engine, mergiraf, write }),
-  mergeSave: (id: number, withMarkers: boolean) => invoke<{ info: MergeInfo; clean: boolean }>("merge_save", { id, withMarkers }),
+  /** `stale`: not saved, the file changed on disk since; `overwrite` saves anyway. */
+  mergeSave: (id: number, withMarkers: boolean, overwrite: boolean) =>
+    invoke<{ info: MergeInfo; clean: boolean; stale: boolean }>("merge_save", { id, withMarkers, overwrite }),
   repoConflicts: (dir: string) => invoke<RepoConflicts>("repo_conflicts", { dir }),
-  takeConflictSide: (workdir: string, path: string, remote: boolean) => invoke<boolean>("take_conflict_side", { workdir, path, remote }),
-  stageConflicts: (workdir: string, paths: [string, boolean][]) => invoke<void>("stage_conflicts", { workdir, paths }),
-  inspectPath: (path: string) => invoke<PathInfo>("inspect_path", { path }),
+  takeConflictSide: (workdir: string, path: string, remote: boolean) =>
+    invoke<{ deleted: boolean; mode: FileMode | null }>("take_conflict_side", { workdir, path, remote }),
+  /** Each path with whether it is deleted, and the kind of file to record when a whole version was taken. */
+  stageConflicts: (workdir: string, paths: [string, boolean, FileMode | null][]) => invoke<void>("stage_conflicts", { workdir, paths }),
   gitRefs: (repo: string) => invoke<RefList>("git_refs", { repo }),
   parseSource: (text: string) => invoke<SourceSpec>("parse_source", { text }),
   previewSource: (text: string, spec: SourceSpec | null = null) => invoke<SourcePreview>("preview_source", { text, spec }),
@@ -565,13 +565,3 @@ export function theme(): "dark" | "light" {
   return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
 }
 
-export function describeSpec(spec: SourceSpec): string {
-  switch (spec.type) {
-    case "local":
-      return spec.path;
-    case "gitRev":
-      return `${spec.repo}@${spec.rev}${spec.subpath ? ":" + spec.subpath : ""}`;
-    case "gitWorktree":
-      return `${spec.repo} (worktree)`;
-  }
-}

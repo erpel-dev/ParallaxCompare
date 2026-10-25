@@ -1501,3 +1501,28 @@ fn tars_that_expand_too_far_are_refused() {
     };
     assert!(error.contains("expands to more than"), "{error}");
 }
+
+/// Two sources with the same archive open: an edit through the second keeps the
+/// edit made through the first, although the second read the archive before it.
+#[test]
+fn two_sources_writing_one_archive_keep_both_edits() {
+    use parallax_core::vfs::{Change, Data};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("shared.zip");
+    fs::write(&path, zip_bytes(&[("a.txt", "ORIGINAL A"), ("b.txt", "ORIGINAL B")])).unwrap();
+    let open = || SourceSpec::parse(&path.display().to_string()).open(SourceOptions::default()).unwrap();
+    let (first, second) = (open(), open());
+    // Both read the archive first.
+    first.vfs.read(&first.path("a.txt")).unwrap();
+    second.vfs.read(&second.path("b.txt")).unwrap();
+    let put = |s: &Source, p: &str, text: &str| {
+        let change =
+            Change::Put { path: s.path(p), kind: EntryKind::File, data: Data::from_vec(text.into()), mtime: None };
+        s.vfs.apply(vec![change], &Progress::default()).unwrap();
+    };
+    put(&first, "a.txt", "FIRST EDIT");
+    put(&second, "b.txt", "SECOND EDIT");
+    let fresh = open();
+    let read = |p: &str| String::from_utf8(fresh.vfs.read(&fresh.path(p)).unwrap().to_vec()).unwrap();
+    assert_eq!((read("a.txt").as_str(), read("b.txt").as_str()), ("FIRST EDIT", "SECOND EDIT"));
+}

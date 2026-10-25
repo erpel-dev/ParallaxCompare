@@ -3,7 +3,11 @@
 use std::{
     io::Read,
     process::{Command, ExitStatus, Stdio},
-    sync::{Arc, mpsc},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     time::{Duration, Instant},
 };
 
@@ -16,8 +20,15 @@ use crate::{Error, Result};
 const DRAIN_GRACE: Duration = Duration::from_secs(1);
 
 /// One pipe's output, read on a thread so a full pipe buffer can never block the child.
+///
+/// A helper the command started can keep the pipe open after the command and
+/// the caller are done. Its reader then keeps reading until the pipe closes (a
+/// blocking read cannot be cancelled portably), but throws the bytes away, so late
+/// output costs no memory.
 struct Drain {
     shared: Arc<Mutex<Vec<u8>>>,
+    /// Whether output is still wanted.
+    wanted: Arc<AtomicBool>,
     closed: mpsc::Receiver<()>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -26,18 +37,21 @@ impl Drain {
     fn spawn(mut pipe: Box<dyn Read + Send>) -> Self {
         let shared = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&shared);
+        let wanted = Arc::new(AtomicBool::new(true));
+        let keep = Arc::clone(&wanted);
         let (signal, closed) = mpsc::channel();
         let thread = std::thread::spawn(move || {
             let mut buf = [0; 16 * 1024];
             loop {
                 match pipe.read(&mut buf) {
                     Ok(0) | Err(_) => break,
-                    Ok(read) => sink.lock().extend_from_slice(&buf[..read]),
+                    Ok(read) if keep.load(Ordering::Relaxed) => sink.lock().extend_from_slice(&buf[..read]),
+                    Ok(_) => {}
                 }
             }
             let _ = signal.send(());
         });
-        Self { shared, closed, thread: Some(thread) }
+        Self { shared, wanted, closed, thread: Some(thread) }
     }
 
     /// The bytes that arrived until `deadline`. A helper that inherited the pipe
@@ -49,8 +63,17 @@ impl Drain {
         {
             let _ = thread.join();
         }
+        self.wanted.store(false, Ordering::Relaxed);
         let mut out = self.shared.lock();
         std::mem::take(&mut out)
+    }
+}
+
+impl Drop for Drain {
+    /// Also on the error paths, which never ask for the output.
+    fn drop(&mut self) {
+        self.wanted.store(false, Ordering::Relaxed);
+        self.shared.lock().clear();
     }
 }
 
@@ -121,6 +144,23 @@ pub(crate) fn run_status(
 
 #[cfg(test)]
 mod tests {
+    /// A helper that keeps the output open after the command exits: the command's
+    /// own output comes back within the grace, and the late output is not kept.
+    #[cfg(unix)]
+    #[test]
+    fn helpers_holding_the_pipe_do_not_hold_the_caller() {
+        let started = Instant::now();
+        let out = run(
+            Command::new("sh").args(["-c", "echo hi; (sleep 2; head -c 4000000 /dev/zero) &"]),
+            "sh",
+            "sh",
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        assert_eq!(out, "hi\n");
+        assert!(started.elapsed() < Duration::from_millis(1900), "{:?}", started.elapsed());
+    }
+
     use super::*;
 
     #[test]

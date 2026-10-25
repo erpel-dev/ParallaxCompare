@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime};
 
 use super::{ArchiveFormat, ArchiveFs, Backend, civil_to_unix, tar_reader};
 use crate::progress::Progress;
-use crate::vfs::{Change, Data, EntryKind, normalize};
+use crate::vfs::{Change, Data, EntryKind, Vfs, normalize};
 use crate::{Error, Result};
 
 /// LZMA2 and xz level for new data; 7-Zip's default.
@@ -26,6 +26,18 @@ impl ArchiveFs {
     /// `progress` counts entries; cancelling stops before the new archive is complete.
     pub fn rewritten(&self, changes: Vec<Change>, progress: &Progress) -> Result<Vec<u8>> {
         let edits = Edits::new(changes);
+        // A file where a folder is would leave the folder's entries beside it: an
+        // archive whose path is both, which tools cannot extract.
+        for put in edits.puts.iter().filter(|p| p.kind != EntryKind::Dir) {
+            let removed_first = edits.removed.iter().any(|r| is_within(&put.path, r));
+            if !removed_first && self.stat(&put.path).is_ok_and(|e| e.kind == EntryKind::Dir) {
+                return Err(Error::Unsupported(format!(
+                    "{} is a folder in {}; a file cannot replace it",
+                    put.path,
+                    self.label()
+                )));
+            }
+        }
         progress.expect(edits.puts.len() as u64);
         match &self.backend {
             Backend::Zip { archive, .. } => write_zip(archive, &edits, progress),
@@ -382,6 +394,29 @@ mod tests {
             assert_eq!(back, secs);
         }
         assert_eq!(unix_to_civil(951_868_800), (2000, 3, 1, 0, 0, 0));
+    }
+
+    /// A file cannot replace a folder; removing the folder in the same batch first works.
+    #[test]
+    fn files_do_not_replace_folders() {
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        zip.start_file("node/child.txt", zip::write::SimpleFileOptions::default()).unwrap();
+        zip.write_all(b"child").unwrap();
+        let bytes = zip.finish().unwrap().into_inner();
+        let archive = ArchiveFs::open(Data::from_vec(bytes), ArchiveFormat::Zip, "t.zip").unwrap();
+        let put = || Change::Put {
+            path: "node".into(),
+            kind: EntryKind::File,
+            data: Data::from_vec(b"file".to_vec()),
+            mtime: None,
+        };
+        let err = archive.rewritten(vec![put()], &Progress::default()).unwrap_err().to_string();
+        assert!(err.contains("is a folder"), "{err}");
+        let data =
+            archive.rewritten(vec![Change::Remove { path: "node".into() }, put()], &Progress::default()).unwrap();
+        let again = ArchiveFs::open(Data::from_vec(data), ArchiveFormat::Zip, "t.zip").unwrap();
+        assert_eq!(again.stat("node").unwrap().kind, EntryKind::File);
+        assert!(again.stat("node/child.txt").is_err());
     }
 
     #[test]

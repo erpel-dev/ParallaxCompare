@@ -8,6 +8,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
 
 use gix::ObjectId;
 use gix::bstr::ByteSlice;
@@ -20,8 +21,9 @@ use crate::{Error, Result};
 static NEXT_REPO_ID: AtomicUsize = AtomicUsize::new(0);
 
 thread_local! {
-    /// `gix::Repository` is not `Sync`; each worker thread keeps its own handle.
-    static LOCAL_REPOS: RefCell<HashMap<usize, gix::Repository>> = RefCell::new(HashMap::new());
+    /// `gix::Repository` is not `Sync`; each worker thread keeps its own handle,
+    /// until the last `GitRepo` it belongs to is dropped.
+    static LOCAL_REPOS: RefCell<HashMap<usize, (Weak<()>, gix::Repository)>> = RefCell::new(HashMap::new());
 }
 
 /// A repository handle that can be shared between threads.
@@ -29,6 +31,9 @@ thread_local! {
 pub struct GitRepo {
     id: usize,
     shared: gix::ThreadSafeRepository,
+    /// Alive while any clone of this handle is: thread handles of dropped
+    /// repositories are let go (they hold pack mappings and an object cache).
+    alive: Arc<()>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -68,16 +73,17 @@ impl GitRepo {
     /// Opens the repository containing `path` (discovering upwards).
     pub fn discover(path: impl AsRef<Path>) -> Result<Self> {
         let shared = gix::ThreadSafeRepository::discover(path.as_ref()).map_err(Error::git)?;
-        Ok(GitRepo { id: NEXT_REPO_ID.fetch_add(1, Ordering::Relaxed), shared })
+        Ok(GitRepo { id: NEXT_REPO_ID.fetch_add(1, Ordering::Relaxed), shared, alive: Arc::new(()) })
     }
 
     pub fn with<T>(&self, f: impl FnOnce(&gix::Repository) -> Result<T>) -> Result<T> {
         LOCAL_REPOS.with(|repos| {
             let mut repos = repos.borrow_mut();
-            let repo = repos.entry(self.id).or_insert_with(|| {
+            repos.retain(|_, (owner, _)| owner.strong_count() > 0);
+            let (_, repo) = repos.entry(self.id).or_insert_with(|| {
                 let mut repo = self.shared.to_thread_local();
                 repo.object_cache_size_if_unset(16 * 1024 * 1024);
-                repo
+                (Arc::downgrade(&self.alive), repo)
             });
             f(repo)
         })
@@ -122,8 +128,7 @@ impl GitRepo {
     /// The best common ancestor of two revisions.
     pub fn merge_base(&self, a: &str, b: &str) -> Result<String> {
         self.with(|repo| {
-            let a = repo.rev_parse_single(a).map_err(Error::git)?.detach();
-            let b = repo.rev_parse_single(b).map_err(Error::git)?.detach();
+            let (a, b) = (commit_of(repo, a)?, commit_of(repo, b)?);
             let base = repo.merge_base(a, b).map_err(Error::git)?;
             base.map(|id| id.to_string()).ok_or_else(|| Error::Git("no common ancestor".into()))
         })
@@ -167,20 +172,28 @@ impl GitRepo {
     }
 }
 
+/// The commit a revision names, through annotated tags.
+fn commit_of(repo: &gix::Repository, rev: &str) -> Result<ObjectId> {
+    let object = repo.rev_parse_single(rev).map_err(Error::git)?.object().map_err(Error::git)?;
+    Ok(object.peel_to_commit().map_err(Error::git)?.id)
+}
+
 impl GitRepo {
     /// The commits reachable from `rev` that changed the file at `path` (added,
     /// modified or deleted it), newest first. Renames are not followed. Stops after
     /// `limit` commits found or `scan` commits looked at.
     pub fn file_log(&self, rev: &str, path: &str, limit: usize, scan: usize) -> Result<Vec<CommitInfo>> {
         self.with(|repo| {
-            let start = repo.rev_parse_single(rev).map_err(Error::git)?;
+            let start = repo.find_commit(commit_of(repo, rev)?).map_err(Error::git)?.id();
             let entry_at = |id: gix::ObjectId| -> Option<gix::ObjectId> {
                 let tree = repo.find_commit(id).ok()?.tree().ok()?;
                 tree.lookup_entry_by_path(path).ok().flatten().map(|e| e.object_id())
             };
             let mut out = Vec::new();
             let walk = start.ancestors().all().map_err(Error::git)?;
-            for info in walk.take(scan).filter_map(|i| i.ok()) {
+            for info in walk.take(scan) {
+                // A broken walk is an error, not a file without history.
+                let info = info.map_err(Error::git)?;
                 let here = entry_at(info.id);
                 let parent = info.parent_ids().next().map(|p| entry_at(p.detach()));
                 let changed = match parent {
@@ -306,4 +319,64 @@ impl Vfs for GitTreeFs {
 /// against Git objects without reading the object.
 pub fn blob_id(data: &[u8]) -> Option<ObjectId> {
     gix::objs::compute_hash(gix::hash::Kind::Sha1, gix::objs::Kind::Blob, data).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    fn git(dir: &Path, args: &[&str]) -> bool {
+        Command::new("git")
+            .args(["-c", "user.email=t@example.com", "-c", "user.name=T", "-c", "init.defaultBranch=main"])
+            .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }
+
+    /// A repository with two commits and an annotated tag on the first.
+    fn repo() -> Option<tempfile::TempDir> {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        if !git(d, &["init", "-q"]) {
+            return None;
+        }
+        std::fs::write(d.join("file.txt"), "one\n").unwrap();
+        assert!(git(d, &["add", "."]) && git(d, &["commit", "-qm", "first"]));
+        assert!(git(d, &["tag", "-a", "annotated", "-m", "tag"]));
+        std::fs::write(d.join("file.txt"), "two\n").unwrap();
+        assert!(git(d, &["commit", "-qam", "second"]));
+        Some(dir)
+    }
+
+    #[test]
+    fn annotated_tags_work_like_their_commits() {
+        let Some(dir) = repo() else { return };
+        let repo = GitRepo::discover(dir.path()).unwrap();
+        let first = repo.resolve("annotated").unwrap().commit.unwrap().id;
+        assert_eq!(repo.merge_base("annotated", "main").unwrap(), first);
+        let log = repo.file_log("annotated", "file.txt", 10, 100).unwrap();
+        assert_eq!(log.iter().map(|c| c.summary.as_str()).collect::<Vec<_>>(), ["first"]);
+        assert_eq!(repo.file_log("main", "file.txt", 10, 100).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn dropped_repositories_release_their_thread_handles() {
+        let Some(dir) = repo() else { return };
+        let count = || LOCAL_REPOS.with(|r| r.borrow().len());
+        let kept = GitRepo::discover(dir.path()).unwrap();
+        kept.resolve("HEAD").unwrap();
+        for _ in 0..20 {
+            let repo = GitRepo::discover(dir.path()).unwrap();
+            let clone = repo.clone();
+            repo.resolve("HEAD").unwrap();
+            drop(repo);
+            clone.resolve("HEAD").unwrap();
+        }
+        kept.resolve("HEAD").unwrap();
+        // The kept repository and at most the one dropped last.
+        assert!(count() <= 2, "{}", count());
+    }
 }

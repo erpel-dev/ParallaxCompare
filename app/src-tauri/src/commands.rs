@@ -16,7 +16,6 @@ use parallax_core::search::{self, SearchOptions, SearchResult};
 use parallax_core::source::{Source, SourceInfo, SourceOptions, SourceSpec, open_pair};
 use parallax_core::text::{self, LineEnding, TextDoc};
 use parallax_core::textdiff::{self, DiffOptions, DiffStats, RowKind, Section};
-use parallax_core::vfs::archive::detect_format;
 use parallax_core::vfs::git::{GitRepo, RefList};
 use parallax_core::vfs::{Change, Data, EntryKind, split_parent};
 use parallax_core::watch::{Watcher, WriteGuard};
@@ -213,36 +212,6 @@ pub(crate) async fn blocking<T: Send + 'static>(f: impl FnOnce() -> CmdResult<T>
 #[tauri::command]
 pub fn startup_request(state: State<'_, AppState>) -> Option<StartupRequest> {
     state.startup.lock().take()
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PathInfo {
-    exists: bool,
-    is_dir: bool,
-    is_archive: bool,
-    /// Working directory of the Git repository containing the path, if any.
-    git_root: Option<String>,
-}
-
-#[tauri::command]
-pub async fn inspect_path(path: String) -> CmdResult<PathInfo> {
-    blocking(move || {
-        let p = std::path::Path::new(&path);
-        let meta = std::fs::metadata(p).ok();
-        let git_root = if meta.is_some() {
-            GitRepo::discover(p).ok().and_then(|r| r.workdir()).map(|w| w.display().to_string())
-        } else {
-            None
-        };
-        Ok(PathInfo {
-            exists: meta.is_some(),
-            is_dir: meta.as_ref().is_some_and(|m| m.is_dir()),
-            is_archive: detect_format(&path).is_some(),
-            git_root,
-        })
-    })
-    .await
 }
 
 /// Reads a path typed into a path bar: `repo@rev:sub` is a Git revision. A web
@@ -923,13 +892,17 @@ pub async fn open_file_diff(
             && !matches!(chosen, View::Text | View::Hex | View::Image);
         let identical = chosen != View::FlatbufferData && !unread && left_data.is_some() && left_data.as_deref() == right_data.as_deref();
         let mut note = None;
+        // The texts of the chosen view, when finding it already made them.
+        let mut rendered = None;
         // ≈ similar files open in the view where they are equal, and say why.
         if view.is_none()
             && !identical
             && let (Some(l), Some(r)) = (&left_data, &right_data)
-            && let Some((similar, reason)) = convert::similar_view(&name, l, r, &views)
+            && let Some(convert::Similar { view: similar, reason, texts }) = convert::similar_view(&name, l, r, &views)
         {
             chosen = similar;
+            // Flatbuffer data needs the schemas the generic rendering does not have.
+            rendered = texts.filter(|_| similar != View::FlatbufferData);
             note = Some(if similar == View::Image {
                 let meta = if views.contains(&View::ImageMetadata) { " “Image metadata” shows how." } else { "" };
                 format!("≈ Similar: {reason}. The pixels are identical; the files differ in metadata or encoding.{meta}")
@@ -982,7 +955,9 @@ pub async fn open_file_diff(
             })
         };
         let (mut left_text, mut right_text) = (None, None);
-        if !matches!(chosen, View::Image | View::Text) {
+        if let Some((l, r)) = rendered.filter(|_| !matches!(chosen, View::Image | View::Text)) {
+            (left_text, right_text) = (Some(Ok(l)), Some(Ok(r)));
+        } else if !matches!(chosen, View::Image | View::Text) {
             (left_text, right_text) = std::thread::scope(|s| {
                 let l = s.spawn(|| render(&left_data, chosen, 0));
                 let r = render(&right_data, chosen, 1);

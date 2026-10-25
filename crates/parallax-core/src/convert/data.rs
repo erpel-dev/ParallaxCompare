@@ -174,9 +174,15 @@ fn scalar(value: String, style: TScalarStyle, tag: Option<&Tag>) -> Scalar {
         None | Some("!") if plain && tag.is_none() => resolve_plain(&value),
         None | Some("!") => Scalar::Str(value),
         Some("!!str") => Scalar::Str(value),
-        Some("!!int" | "!!float" | "!!bool" | "!!null") => match resolve_plain(&value) {
-            Scalar::Str(s) => Scalar::Tagged(tag_name(tag.unwrap()), s),
-            other => other,
+        // An explicit core tag decides the type; a value that does not fit it keeps the tag.
+        Some(t @ ("!!int" | "!!float" | "!!bool" | "!!null")) => match (t, resolve_plain(&value)) {
+            ("!!int", s @ Scalar::Int(_)) | ("!!float", s @ Scalar::Float(_)) => s,
+            ("!!bool", s @ Scalar::Bool(_)) | ("!!null", s @ Scalar::Null) => s,
+            ("!!float", Scalar::Int(_)) => match value.parse::<f64>() {
+                Ok(f) if f.is_finite() => Scalar::Float(num(format!("{f:?}"), &value)),
+                _ => Scalar::Tagged(t.to_string(), value),
+            },
+            _ => Scalar::Tagged(t.to_string(), value),
         },
         Some(t) => Scalar::Tagged(t.to_string(), value),
     }
@@ -193,6 +199,21 @@ fn key_text(key: &Node) -> String {
             out
         }
     }
+}
+
+/// What makes two mapping keys the same key: their type and their text.
+fn key_identity(key: &Node, text: &str) -> String {
+    let kind = match key {
+        Node::Scalar(Scalar::Null) => "null",
+        Node::Scalar(Scalar::Bool(_)) => "bool",
+        Node::Scalar(Scalar::Int(_)) => "int",
+        Node::Scalar(Scalar::Float(_)) => "float",
+        Node::Scalar(Scalar::Str(_)) => "str",
+        Node::Scalar(Scalar::Tagged(..)) => "tagged",
+        Node::Seq(..) => "seq",
+        Node::Map(..) => "map",
+    };
+    format!("{kind}:{text}")
 }
 
 /// A one-line form of a collection used as a mapping key (rare in practice).
@@ -226,15 +247,17 @@ fn flow(node: &Node, out: &mut String) {
 
 /// Finishes a mapping: applies merge keys, keeps the last of duplicate keys, sorts.
 fn finish_map(entries: Vec<(Node, Node)>, warnings: &mut Vec<String>) -> Vec<(Node, Node)> {
-    // (key text, priority: merged 0 / explicit 1, order, key, value)
-    let mut all: Vec<(String, u8, usize, Node, Node)> = Vec::with_capacity(entries.len());
+    // (key text, key identity, priority: merged 0 / explicit 1, order, key, value).
+    // The text is what keys sort by; the identity (type and text) is what makes two
+    // keys the same: the integer 1 and the string "1" are different keys.
+    let mut all: Vec<(String, String, u8, usize, Node, Node)> = Vec::with_capacity(entries.len());
     for (i, (k, v)) in entries.into_iter().enumerate() {
         if k == Node::Scalar(Scalar::Str("<<".into())) {
             let sources = match v {
                 Node::Map(..) => vec![v],
                 Node::Seq(items, _) if items.iter().all(|n| matches!(n, Node::Map(..))) => items,
                 other => {
-                    all.push(("<<".into(), 1, i, k, other));
+                    all.push(("<<".into(), key_identity(&k, "<<"), 1, i, k, other));
                     continue;
                 }
             };
@@ -243,20 +266,24 @@ fn finish_map(entries: Vec<(Node, Node)>, warnings: &mut Vec<String>) -> Vec<(No
             for (j, source) in sources.into_iter().enumerate() {
                 if let Node::Map(merged, _) = source {
                     for (mk, mv) in merged {
-                        all.push((key_text(&mk), 0, n - j, mk, mv));
+                        let text = key_text(&mk);
+                        let identity = key_identity(&mk, &text);
+                        all.push((text, identity, 0, n - j, mk, mv));
                     }
                 }
             }
             continue;
         }
-        all.push((key_text(&k), 1, i, k, v));
+        let text = key_text(&k);
+        let identity = key_identity(&k, &text);
+        all.push((text, identity, 1, i, k, v));
     }
-    all.sort_by(|a, b| (&a.0, a.1, a.2).cmp(&(&b.0, b.1, b.2)));
+    all.sort_by(|a, b| (&a.0, &a.1, a.2, a.3).cmp(&(&b.0, &b.1, b.2, b.3)));
     let mut out: Vec<(Node, Node)> = Vec::with_capacity(all.len());
     let mut last_key: Option<(String, u8)> = None;
-    for (text, prio, _, k, v) in all {
+    for (text, identity, prio, _, k, v) in all {
         match &last_key {
-            Some((t, p)) if *t == text => {
+            Some((id, p)) if *id == identity => {
                 if *p == 1 && prio == 1 && warnings.len() < 100 {
                     warnings.push(format!("duplicate key {text}, the last one is used"));
                 }
@@ -264,7 +291,7 @@ fn finish_map(entries: Vec<(Node, Node)>, warnings: &mut Vec<String>) -> Vec<(No
             }
             _ => out.push((k, v)),
         }
-        last_key = Some((text, prio));
+        last_key = Some((identity, prio));
     }
     out
 }
@@ -613,6 +640,35 @@ mod tests {
         assert!(normalized_yaml(b"*unknown").is_err());
         assert_eq!(normalized_yaml(b"").unwrap(), "");
         assert_eq!(normalized_yaml(b"just text").unwrap(), "just text\n");
+    }
+
+    /// Keys of different types are different keys; a change under one shows.
+    #[test]
+    fn keys_of_different_types_stay_apart() {
+        let old = b"1: OLD\n\"1\": stable\n";
+        let new = b"1: NEW\n\"1\": stable\n";
+        assert_eq!(same_yaml(old, new), Some(false));
+        let y = normalized_yaml(old).unwrap();
+        assert!(!y.contains("duplicate"), "{y}");
+        assert!(y.contains("1: OLD") && y.contains("\"1\": stable"), "{y}");
+        assert_eq!(same_yaml(b"true: a\n\"true\": b\n", b"true: a\n\"true\": c\n"), Some(false));
+        assert_eq!(same_yaml(b"null: a\n\"null\": b\n", b"null: x\n\"null\": b\n"), Some(false));
+        // The same key twice is still one key, the last one.
+        assert_eq!(normalized_yaml(b"1: a\n1: b\n").unwrap(), "# ! duplicate key 1, the last one is used\n1: b\n");
+    }
+
+    /// An explicit core tag decides the type.
+    #[test]
+    fn explicit_tags_keep_their_type() {
+        assert_eq!(same_yaml(b"v: !!float 1\n", b"v: 1\n"), Some(false));
+        assert_eq!(same_yaml(b"v: !!float 1\n", b"v: 1.0\n"), Some(true));
+        assert_eq!(same_yaml(b"v: !!int 7\n", b"v: 7\n"), Some(true));
+        assert_eq!(same_yaml(b"v: !!bool true\n", b"v: true\n"), Some(true));
+        assert_eq!(same_yaml(b"v: !!null ~\n", b"v: null\n"), Some(true));
+        // A value that does not fit its tag keeps the tag rather than becoming another type.
+        assert_eq!(same_yaml(b"v: !!int 1.5\n", b"v: 1.5\n"), Some(false));
+        assert_eq!(same_yaml(b"v: !!bool 1\n", b"v: 1\n"), Some(false));
+        assert_eq!(normalized_yaml(b"v: !!float 1\n").unwrap(), "v: 1.0\n");
     }
 
     #[test]

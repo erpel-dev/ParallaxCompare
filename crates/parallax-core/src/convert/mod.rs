@@ -55,6 +55,7 @@ mod xls;
 mod xpand;
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 pub use image_diff::{ImageDiff, ImageSide, image_diff};
 
@@ -738,27 +739,52 @@ pub fn render_source(
     if view == View::FlatbufferData { flatbuffers::data(source, rel, data, schema) } else { render(view, name, data) }
 }
 
+/// Two files are ≈ similar: the view where they look the same, why, and the
+/// view's text of both (equal), when it was made while finding the view.
+#[derive(Debug, Clone)]
+pub struct Similar {
+    pub view: View,
+    pub reason: &'static str,
+    pub texts: Option<(String, String)>,
+}
+
+/// Views of both sides rendered while answering one question, so that none is
+/// rendered twice: documents are slow to convert.
+#[derive(Default)]
+struct Renders(HashMap<View, (Option<String>, Option<String>)>);
+
+impl Renders {
+    /// Whether both sides render, and render the same.
+    fn equal(&mut self, view: View, name: &str, left: &[u8], right: &[u8]) -> Option<bool> {
+        let (a, b) =
+            self.0.entry(view).or_insert_with(|| (render(view, name, left).ok(), render(view, name, right).ok()));
+        Some(a.as_ref()? == b.as_ref()?)
+    }
+}
+
 /// For files that differ in bytes but are ≈ similar: the first of `views` in which
 /// they look the same, and why they are similar. A file opened from a folder
 /// compare is shown in that view, so ≈ does not open on a page of differences.
-pub fn similar_view(name: &str, left: &[u8], right: &[u8], views: &[View]) -> Option<(View, &'static str)> {
+pub fn similar_view(name: &str, left: &[u8], right: &[u8], views: &[View]) -> Option<Similar> {
     const MAX: usize = 64 * 1024 * 1024;
     // The size first: comparing large files byte for byte is what this avoids.
     if left.len().max(right.len()) > MAX || left == right {
         return None;
     }
-    let reason = content_equal(name, left, right)?;
+    let mut renders = Renders::default();
+    let reason = content_equal_with(name, left, right, &mut renders)?;
     if views.first() == Some(&View::Image) {
-        return Some((View::Image, reason));
+        return Some(Similar { view: View::Image, reason, texts: None });
     }
-    views
+    let view = *views
         .iter()
         .filter(|v| !matches!(v, View::Text | View::Hex | View::Image))
-        .find(|&&v| match (render(v, name, left), render(v, name, right)) {
-            (Ok(a), Ok(b)) => a == b,
-            _ => false,
-        })
-        .map(|&v| (v, reason))
+        .find(|&&v| renders.equal(v, name, left, right) == Some(true))?;
+    let texts = match renders.0.remove(&view) {
+        Some((Some(a), Some(b))) => Some((a, b)),
+        _ => None,
+    };
+    Some(Similar { view, reason, texts })
 }
 
 /// Views whose edited text can be saved back into the file it was made from.
@@ -897,6 +923,10 @@ pub fn has_content_rule(name: &str) -> bool {
 /// class. The reason to show when they do; `None` when they differ or the format
 /// has no such notion.
 pub fn content_equal(name: &str, left: &[u8], right: &[u8]) -> Option<&'static str> {
+    content_equal_with(name, left, right, &mut Renders::default())
+}
+
+fn content_equal_with(name: &str, left: &[u8], right: &[u8], renders: &mut Renders) -> Option<&'static str> {
     let (kl, kr) = (kind_of(name, left), kind_of(name, right));
     // The same certificate as PEM on one side and DER on the other.
     if matches!(kl, Kind::Pem | Kind::DerCert) && matches!(kr, Kind::Pem | Kind::DerCert) {
@@ -919,15 +949,14 @@ pub fn content_equal(name: &str, left: &[u8], right: &[u8]) -> Option<&'static s
             return (definitions::outline(name, left).ok()? == definitions::outline(name, right).ok()?)
                 .then_some("same declarations, only formatting, comments or independent definition order differ");
         }
-        Kind::Pdf | Kind::Ooxml | Kind::Odf => {
-            render(View::Document, name, left).ok()? == render(View::Document, name, right).ok()?
-        }
+        Kind::Pdf | Kind::Ooxml | Kind::Odf => renders.equal(View::Document, name, left, right)?,
         // Only formats with a native reader have a text notion.
         Kind::LegacyOffice if office::has_native_reader(&extension(name)) => {
-            render(View::Document, name, left).ok()? == render(View::Document, name, right).ok()?
+            renders.equal(View::Document, name, left, right)?
         }
         Kind::Visio | Kind::LegacyVisio => {
-            return (render(View::Diagram, name, left).ok()? == render(View::Diagram, name, right).ok()?)
+            return renders
+                .equal(View::Diagram, name, left, right)?
                 .then_some("same pages, shapes and masters, only the file layout differs");
         }
         Kind::Raster => image_diff::pixels_equal(left, right)?,
@@ -1111,8 +1140,15 @@ mod tests {
             assert!(content_equal(name, odx, odx_changed).is_none());
         }
         assert_eq!(
-            similar_view("engine.odx", odx, odx_format, &views_for("engine.odx", odx)).unwrap().0,
+            similar_view("engine.odx", odx, odx_format, &views_for("engine.odx", odx)).unwrap().view,
             View::Diagnostics
+        );
+        // The texts made while finding the view come along, so it is not rendered again.
+        let similar = similar_view("engine.odx", odx, odx_format, &views_for("engine.odx", odx)).unwrap();
+        let (l, r) = similar.texts.unwrap();
+        assert_eq!(
+            (l.as_str(), r.as_str()),
+            (render(View::Diagnostics, "engine.odx", odx).unwrap().as_str(), l.as_str())
         );
         assert!(content_equal("engine.odx", b"<ODX>", b"<ODX>").is_none());
         assert!(has_content_rule("engine.dcm"));

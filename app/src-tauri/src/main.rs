@@ -13,7 +13,6 @@ fn main() {
         .manage(commands::AppState::new(startup))
         .invoke_handler(tauri::generate_handler![
             commands::startup_request,
-            commands::inspect_path,
             commands::git_refs,
             commands::parse_source,
             commands::preview_source,

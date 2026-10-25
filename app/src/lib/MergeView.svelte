@@ -131,6 +131,68 @@
     });
   }
 
+  // ---- scrolling sideways: each input column and the result on its own ----
+
+  /** How far local, base, remote and the result are scrolled sideways, in pixels. */
+  let hx = $state([0, 0, 0, 0]);
+  let hbars = $state<(HTMLDivElement | undefined)[]>([undefined, undefined, undefined, undefined]);
+  const TAB = 8;
+
+  /** The width of a line in characters, as shown. */
+  function chars(line: LineView | null | undefined): number {
+    if (!line) return 0;
+    let n = line.t.length + (line.o ? 1 : 0) + (line.x ? 1 : 0);
+    for (const c of line.t) if (c === "\t") n += TAB - 1;
+    return n;
+  }
+
+  /** The widest line in view of each column, in characters. */
+  const widest = $derived.by(() => {
+    const w = [0, 0, 0, 0];
+    for (const row of topRows[1]) {
+      if (!row) continue;
+      w[0] = Math.max(w[0], chars(row.l));
+      w[1] = Math.max(w[1], chars(row.b));
+      w[2] = Math.max(w[2], chars(row.r));
+    }
+    for (const row of resultRows[1]) if (row?.l) w[3] = Math.max(w[3], chars(row.l));
+    return w;
+  });
+
+  /** A sideways wheel (or Shift+wheel) scrolls that column; returns whether it did. */
+  function wheelSideways(e: WheelEvent, column: number): boolean {
+    const dx = e.deltaX || (e.shiftKey ? e.deltaY : 0);
+    const bar = hbars[column];
+    if (!dx || !bar) return false;
+    bar.scrollLeft += dx;
+    return true;
+  }
+
+  /** The input column under the pointer. */
+  function columnAt(e: WheelEvent): number {
+    const r = topEl!.getBoundingClientRect();
+    return Math.max(0, Math.min(2, Math.floor(((e.clientX - r.left) / r.width) * 3)));
+  }
+
+  function wheelTop(e: WheelEvent) {
+    if (wheelSideways(e, columnAt(e))) e.preventDefault();
+    else onWheel(e, topEl, inputs);
+  }
+
+  function wheelResult(e: WheelEvent) {
+    if (wheelSideways(e, 3)) e.preventDefault();
+    else onWheel(e, resultEl, results);
+  }
+
+  /** Starts typing into an empty result. */
+  async function editEmpty() {
+    if (!info || editing) return;
+    editing = { line: 0 };
+    draft = original = "";
+    await tick();
+    input?.focus();
+  }
+
   // ---- syntax-aware merge ----
 
   /** Asks the syntax-aware merge for solutions, in the background; the line merge stays as it is. */
@@ -386,7 +448,15 @@
       }
     }
     try {
-      const saved = await api.mergeSave(info.id, markers);
+      let saved = await api.mergeSave(info.id, markers, false);
+      if (saved.stale) {
+        const replace = await ask(
+          `${info.title} changed on disk since this merge opened or was last saved here, by another program or another merge of the same file. Replace it with this result?`,
+          { title: "File changed on disk", kind: "warning", okLabel: "Replace", cancelLabel: "Keep the file" },
+        );
+        if (!replace) return;
+        saved = await api.mergeSave(info.id, markers, true);
+      }
       apply(saved.info);
       onSaved?.(saved.clean);
       savedNote = saved.clean
@@ -540,6 +610,19 @@
   }
 </script>
 
+{#snippet editor(n: number)}
+  <input
+    class="editor"
+    bind:this={input}
+    bind:value={draft}
+    onkeydown={editKey}
+    onpaste={onPaste}
+    onblur={() => commit()}
+    spellcheck="false"
+    aria-label="Edit line {n + 1}"
+  />
+{/snippet}
+
 <!-- Keys that reach no element (after the button that had focus went away) still count while this tab shows. -->
 <svelte:window onkeydown={(e) => e.target === document.body && root?.offsetParent && onKey(e)} />
 
@@ -667,17 +750,17 @@
       bind:this={topEl}
       bind:clientHeight={inputs.viewHeight}
       onscroll={() => onScroll(0)}
-      onwheel={(e) => onWheel(e, topEl, inputs)}
+      onwheel={wheelTop}
     >
       <div class="spacer" style:height="{spacerHeight(inputs.total * ROW)}px">
         <div class="window" style:transform="translateY({windowOffset(inputs.scrollTop, inputs.scale, topRows[0], ROW)}px)">
           {#each topRows[1] as row, k (topRows[0] + k)}
             {#if row}
               <div class="irow" class:current={row.i === current}>
-                {#each [["l", row.l], ["b", row.b], ["r", row.r]] as const as [side, line] (side)}
+                {#each [["l", row.l, 0], ["b", row.b, 1], ["r", row.r, 2]] as const as [side, line, column] (side)}
                   <div class="cell {line ? inputTint(row, side) : 'fill'}">
                     {#if line}
-                      <span class="no">{line.n + 1}</span><span class="code">{#if line.o}<span class="cut">…</span>{/if}{#each segments(line) as seg, si (si)}<span class:mark={seg.mark} style:color={seg.color}>{seg.text}</span>{/each}{#if line.x}<span class="cut">…</span>{/if}</span>
+                      <span class="no">{line.n + 1}</span><span class="code" style:text-indent="{-hx[column]}px">{#if line.o}<span class="cut">…</span>{/if}{#each segments(line) as seg, si (si)}<span class:mark={seg.mark} style:color={seg.color}>{seg.text}</span>{/each}{#if line.x}<span class="cut">…</span>{/if}</span>
                     {/if}
                   </div>
                 {/each}
@@ -688,6 +771,14 @@
           {/each}
         </div>
       </div>
+    </div>
+
+    <div class="hbars three">
+      {#each [0, 1, 2] as k (k)}
+        <div class="hbar" bind:this={hbars[k]} onscroll={(e) => (hx[k] = e.currentTarget.scrollLeft)}>
+          <div style:width="calc(62px + {widest[k]}ch)"></div>
+        </div>
+      {/each}
     </div>
 
     <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -705,31 +796,48 @@
       bind:this={resultEl}
       bind:clientHeight={results.viewHeight}
       onscroll={() => onScroll(1)}
-      onwheel={(e) => onWheel(e, resultEl, results)}
+      onwheel={wheelResult}
     >
+      {#if results.total === 0 && !loading}
+        <!-- svelte-ignore a11y_click_events_have_key_events -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div class="rrow empty" onclick={editEmpty}>
+          <span class="no">1</span>
+          {#if editing?.line === 0}
+            {@render editor(0)}
+          {:else}
+            <span class="code hint">The result is empty. Click to type.</span>
+          {/if}
+        </div>
+      {/if}
       <div class="spacer" style:height="{spacerHeight(results.total * ROW)}px">
         <div class="window" style:transform="translateY({windowOffset(results.scrollTop, results.scale, resultRows[0], ROW)}px)">
           {#each resultRows[1] as row, k (resultRows[0] + k)}
             {#if !row}
               <div class="rrow loading"></div>
             {:else if !row.l}
-              <div class="rrow header" class:open={row.c === "unresolved" || (row.c === "syntax" && conflictOf.get(row.i)?.partial)} class:current={row.i === current}>
+              {@const narrowed = row.c === "syntax" && !!conflictOf.get(row.i)?.partial}
+              <div class="rrow header" class:open={row.c === "unresolved" || narrowed} class:current={row.i === current}>
                 <span class="title">Conflict {conflictNo.get(row.i)} of {info.stats.conflicts}</span>
-                {#if row.c === "unresolved"}
+                {#if narrowed}
+                  <span class="state" title="Edit the rest by hand, or take a side: that replaces the whole conflict, also what was merged by syntax">narrowed by syntax · a side replaces the whole conflict:</span>
+                {/if}
+                {#if row.c === "unresolved" || narrowed}
                   <button class="l" onclick={() => choose(row.i, "local")} title="Alt+←">← Take local</button>
                   <button class="r" onclick={() => choose(row.i, "remote")} title="Alt+→">Take remote →</button>
                   <button onclick={() => choose(row.i, "localRemote")} title="Alt+↓">Take both</button>
                   <button onclick={() => choose(row.i, "remoteLocal")} title="Alt+Shift+↓">Both, remote first</button>
                   <button onclick={() => choose(row.i, "base")} title="Alt+↑">Keep base</button>
-                  {#if suggestionText.has(row.i)}
+                  {#if suggestionText.has(row.i) && row.c === "unresolved"}
                     {#if conflictOf.get(row.i)?.partial}
                       <button class="s" onclick={() => choose(row.i, "syntax")} title={`Alt+S · ${info.structured?.engine ?? ""} solves part of this conflict and leaves a smaller one:\n${suggestionText.get(row.i)}`}>✦ Narrow down</button>
                     {:else}
                       <button class="s" onclick={() => choose(row.i, "syntax")} title={`Alt+S · ${info.structured?.engine ?? ""}'s solution:\n${suggestionText.get(row.i)}`}>✦ Syntax-aware</button>
                     {/if}
                   {/if}
-                {:else}
-                  <span class="state">{row.c === "syntax" && conflictOf.get(row.i)?.partial ? "narrowed by syntax; edit the rest by hand" : choiceLabel[row.c]}</span>
+                {/if}
+                {#if row.c !== "unresolved"}
+                  {#if !narrowed}<span class="state">{choiceLabel[row.c]}</span>{/if}
                   <button class="link" onclick={() => choose(row.i, "unresolved")}>Undo choice</button>
                 {/if}
               </div>
@@ -739,23 +847,20 @@
               <div class="rrow {resultTint(row)}" class:current={row.i === current && row.k === "conflict"} onclick={() => openEditor(row)}>
                 <span class="no">{row.l.n + 1}</span>
                 {#if editing?.line === row.l.n}
-                  <input
-                    class="editor"
-                    bind:this={input}
-                    bind:value={draft}
-                    onkeydown={editKey}
-                    onpaste={onPaste}
-                    onblur={() => commit()}
-                    spellcheck="false"
-                    aria-label="Edit line {row.l.n + 1}"
-                  />
+                  {@render editor(row.l.n)}
                 {:else}
-                  <span class="code">{#if row.l.o}<span class="cut">…</span>{/if}{#each segments(row.l) as seg, si (si)}<span style:color={seg.color}>{seg.text}</span>{/each}{#if row.l.x}<span class="cut">…</span>{/if}</span>
+                  <span class="code" style:text-indent="{-hx[3]}px">{#if row.l.o}<span class="cut">…</span>{/if}{#each segments(row.l) as seg, si (si)}<span style:color={seg.color}>{seg.text}</span>{/each}{#if row.l.x}<span class="cut">…</span>{/if}</span>
                 {/if}
               </div>
             {/if}
           {/each}
         </div>
+      </div>
+    </div>
+
+    <div class="hbars">
+      <div class="hbar" bind:this={hbars[3]} onscroll={(e) => (hx[3] = e.currentTarget.scrollLeft)}>
+        <div style:width="calc(62px + {widest[3]}ch)"></div>
       </div>
     </div>
 
@@ -980,8 +1085,33 @@
     user-select: none;
   }
   .code {
+    display: block;
+    flex: 1;
+    min-width: 0;
     overflow: hidden;
     text-overflow: clip;
+    tab-size: 8;
+  }
+  .hbars {
+    display: grid;
+    flex: none;
+    font-family: var(--mono);
+    font-size: 12.5px;
+  }
+  .hbars.three {
+    grid-template-columns: 1fr 1fr 1fr;
+  }
+  .hbar {
+    overflow-x: auto;
+    overflow-y: hidden;
+    min-width: 0;
+  }
+  .hbar > div {
+    height: 1px;
+  }
+  .rrow.empty .hint {
+    color: var(--faint);
+    font-style: italic;
   }
   .cut {
     color: var(--faint);

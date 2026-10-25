@@ -164,12 +164,28 @@ fn parse<'a>(text: &'a str, ext: &str) -> Table<'a> {
     Table { header, rows, more, delimiter }
 }
 
-/// A cell on one line: line breaks inside quotes become `\n`.
+/// A cell on one line, so that different cells never look the same: line breaks
+/// inside quotes become `\n` (`\r` alone `\r`), a backslash is doubled, and the
+/// column separator inside a cell gets a backslash before it.
 fn cell_text(cell: &str, out: &mut String) {
-    if cell.contains(['\n', '\r']) {
-        out.push_str(&cell.replace("\r\n", "\\n").replace('\n', "\\n").replace('\r', "\\r"));
-    } else {
+    const BAR: char = '│';
+    if !cell.contains(['\n', '\r', '\\', BAR]) {
         out.push_str(cell);
+        return;
+    }
+    let mut chars = cell.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\r' if chars.peek() == Some(&'\n') => {
+                chars.next();
+                out.push_str("\\n");
+            }
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            BAR => out.push_str("\\│"),
+            c => out.push(c),
+        }
     }
 }
 
@@ -277,6 +293,17 @@ pub fn same_rows(ext: &str, left: &[u8], right: &[u8]) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    /// Cells whose text holds the separator, a backslash or a line break render
+    /// differently from the cells they could be mistaken for.
+    #[test]
+    fn cells_render_unambiguously() {
+        let render =
+            |data: &str| crate::convert::render(crate::convert::View::Table, "x.csv", data.as_bytes()).unwrap();
+        assert_ne!(render("id,a,b\n1,\"left │ middle\",right\n"), render("id,a,b\n1,left,\"middle │ right\"\n"));
+        assert_ne!(render("id,note\n1,\"two\nlines\"\n"), render("id,note\n1,two\\nlines\n"));
+        assert!(render("id,note\n1,\"two\r\nlines\"\n").contains("two\\nlines"));
+    }
+
     use super::*;
 
     macro_rules! fixture {

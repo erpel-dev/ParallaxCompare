@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use parallax_core::conflicts::{self, ConflictKind, RepoConflicts, Resolution};
+use parallax_core::conflicts::{self, ConflictKind, FileMode, RepoConflicts, Resolution};
 use parallax_core::edit::Pos;
 use parallax_core::highlight::{self, DocHighlighter, ThemeKind};
 use parallax_core::merge::{BlockKind, MarkerStyle, MergeOptions};
@@ -42,6 +42,9 @@ pub struct MergeTab {
     startup: bool,
     /// A conflicted file of a repository: the work tree and the path in it.
     repo: Option<(PathBuf, String)>,
+    /// The output file as it was when the merge opened or was last saved here
+    /// (`None`: it did not exist), to notice when something else wrote it since.
+    on_disk: Option<u64>,
     /// What the syntax-aware merge offered, and its whole result when that is offered as a whole.
     structured: Option<(StructuredView, Option<String>)>,
 }
@@ -217,7 +220,19 @@ fn new_tab(
         .filter(|d| !text::is_binary(d))
         .map(|d| text::decode(&d).text)
         .filter(|t| !same_but_labels(t, session.result_text()));
-    Ok(MergeTab { session, output, labels, syntax, highlighters: None, git_result, startup, repo, structured: None })
+    let on_disk = disk_stamp(&output);
+    Ok(MergeTab {
+        session,
+        output,
+        labels,
+        syntax,
+        highlighters: None,
+        git_result,
+        startup,
+        repo,
+        on_disk,
+        structured: None,
+    })
 }
 
 #[tauri::command]
@@ -247,6 +262,9 @@ pub async fn open_merge(state: State<'_, AppState>, request: MergeRequest) -> Cm
             };
             if file.stages[1].is_none() || file.stages[2].is_none() {
                 return Err(format!("{path} was deleted on one side; keep or delete it as a whole file."));
+            }
+            if file.stages.iter().flatten().any(|s| matches!(s.file_mode(), FileMode::Symlink | FileMode::Gitlink)) {
+                return Err(format!("{path} is a link or a submodule; take one version as a whole."));
             }
             let output = state.workdir.join(&path);
             let git_result = std::fs::read(&output).ok();
@@ -548,6 +566,11 @@ pub async fn merge_structured(
         let (base, local, remote, name, labels) = {
             let t = tab.lock();
             let s = &t.session;
+            // With a side unchanged (or both sides the same) the merge is that side:
+            // there is nothing for syntax to add, and copying large texts is wasted.
+            if s.local.text == s.remote.text || s.base.text == s.local.text || s.base.text == s.remote.text {
+                return Ok(t.info(id, None));
+            }
             (s.base.text.clone(), s.local.text.clone(), s.remote.text.clone(), t.output.clone(), t.labels.clone())
         };
         let labels = [labels[0].as_str(), labels[1].as_str(), labels[2].as_str()];
@@ -630,12 +653,31 @@ pub async fn structured_merge_conflict(
     .await
 }
 
+/// A hash of a file's bytes, or `None` when it does not exist.
+fn disk_stamp(path: &Path) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let data = std::fs::read(path).ok()?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    data.hash(&mut h);
+    Some(h.finish())
+}
+
+fn stamp_of(data: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    data.hash(&mut h);
+    h.finish()
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MergeSaved {
     info: MergeInfo,
     /// Saved without conflicts.
     clean: bool,
+    /// Not saved: the file changed on disk since the merge opened or was last
+    /// saved here (another program, or another merge of the same file).
+    stale: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -654,6 +696,7 @@ pub async fn merge_save(
     state: State<'_, AppState>,
     id: u64,
     with_markers: bool,
+    overwrite: bool,
 ) -> CmdResult<MergeSaved> {
     let tab = merge(&state, id)?;
     let saved = blocking(move || {
@@ -662,21 +705,28 @@ pub async fn merge_save(
         if !clean && !with_markers {
             return Err("The result still has conflicts.".into());
         }
+        if !overwrite && disk_stamp(&tab.output) != tab.on_disk {
+            return Ok(None);
+        }
         let data = tab.session.result().encode().map_err(|e| format!("Cannot save: {e}."))?;
         parallax_core::vfs::local::replace_file(&tab.output, &data, None, None)
             .map_err(|e| format!("{}: {e}", tab.output.display()))?;
+        tab.on_disk = Some(stamp_of(&data));
         tab.session.mark_saved();
-        Ok((tab.info(id, None), clean, tab.startup, tab.repo.clone()))
+        Ok(Some((tab.info(id, None), clean, tab.startup, tab.repo.clone())))
     })
     .await?;
-    let (info, clean, startup, repo) = saved;
+    let Some((info, clean, startup, repo)) = saved else {
+        let info = merge(&state, id)?.lock().info(id, None);
+        return Ok(MergeSaved { info, clean: false, stale: true });
+    };
     if startup {
         state.exit_code.store(if clean { 0 } else { 1 }, Ordering::Relaxed);
     }
     if let Some((workdir, path)) = repo {
         let _ = app.emit("merge-saved", MergeSavedEvent { workdir: workdir.display().to_string(), path, clean });
     }
-    Ok(MergeSaved { info, clean })
+    Ok(MergeSaved { info, clean, stale: false })
 }
 
 // ---- conflicted files of a repository ----
@@ -688,6 +738,8 @@ pub struct ConflictFileView {
     kind: ConflictKind,
     /// Both versions are text, so it can be merged line by line.
     text: bool,
+    /// A link or a submodule rather than a file, on either side.
+    special: Option<FileMode>,
 }
 
 #[derive(Serialize)]
@@ -707,12 +759,20 @@ pub async fn repo_conflicts(dir: String) -> CmdResult<RepoConflictsView> {
             .files
             .iter()
             .map(|f| {
-                let text = matches!(f.kind, ConflictKind::BothModified | ConflictKind::BothAdded)
+                let special = f
+                    .stages
+                    .iter()
+                    .flatten()
+                    .map(|s| s.file_mode())
+                    .find(|m| matches!(m, FileMode::Symlink | FileMode::Gitlink));
+                // A link's target is text too, but not something to merge by lines.
+                let text = special.is_none()
+                    && matches!(f.kind, ConflictKind::BothModified | ConflictKind::BothAdded)
                     && f.stages
                         .iter()
                         .flatten()
                         .all(|s| conflicts::stage_content(&state.workdir, s).is_ok_and(|d| !text::is_binary(&d)));
-                ConflictFileView { path: f.path.clone(), kind: f.kind, text }
+                ConflictFileView { path: f.path.clone(), kind: f.kind, text, special }
             })
             .collect();
         Ok(RepoConflictsView {
@@ -725,26 +785,34 @@ pub async fn repo_conflicts(dir: String) -> CmdResult<RepoConflictsView> {
     .await
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TakenSide {
+    /// That side deleted the file, so it was removed.
+    deleted: bool,
+    /// The kind of file written, to record when staging.
+    mode: Option<FileMode>,
+}
+
 /// Resolves a conflicted file as a whole: the local or the remote version goes
-/// into the work tree, or the file is removed when that side deleted it. Returns
-/// whether the file was deleted.
+/// into the work tree as the kind of file it is (link, executable, plain file),
+/// or the file is removed when that side deleted it.
 #[tauri::command]
-pub async fn take_conflict_side(workdir: String, path: String, remote: bool) -> CmdResult<bool> {
+pub async fn take_conflict_side(workdir: String, path: String, remote: bool) -> CmdResult<TakenSide> {
     blocking(move || {
         let state = conflicts::repo_conflicts(Path::new(&workdir)).map_err(err)?;
         let file = state.files.iter().find(|f| f.path == path).ok_or_else(|| format!("{path} is not conflicted"))?;
         let target = state.workdir.join(&file.path);
         match &file.stages[if remote { 2 } else { 1 }] {
             Some(stage) => {
-                let data = conflicts::stage_content(&state.workdir, stage).map_err(err)?;
-                parallax_core::vfs::local::replace_file(&target, &data, None, None).map_err(err)?;
-                Ok(false)
+                conflicts::write_stage(&state.workdir, &file.path, stage).map_err(err)?;
+                Ok(TakenSide { deleted: false, mode: Some(stage.file_mode()) })
             }
             None => {
-                if target.exists() {
+                if std::fs::symlink_metadata(&target).is_ok() {
                     std::fs::remove_file(&target).map_err(err)?;
                 }
-                Ok(true)
+                Ok(TakenSide { deleted: true, mode: None })
             }
         }
     })
@@ -753,11 +821,11 @@ pub async fn take_conflict_side(workdir: String, path: String, remote: bool) -> 
 
 /// Stages resolved files: `git add`, or `git rm` for those resolved by deleting.
 #[tauri::command]
-pub async fn stage_conflicts(workdir: String, paths: Vec<(String, bool)>) -> CmdResult<()> {
+pub async fn stage_conflicts(workdir: String, paths: Vec<(String, bool, Option<FileMode>)>) -> CmdResult<()> {
     blocking(move || {
         let paths: Vec<(String, Resolution)> = paths
             .into_iter()
-            .map(|(p, delete)| (p, if delete { Resolution::Delete } else { Resolution::WorkTree }))
+            .map(|(p, delete, mode)| (p, if delete { Resolution::Delete } else { Resolution::WorkTree(mode) }))
             .collect();
         conflicts::stage(Path::new(&workdir), &paths).map_err(err)
     })

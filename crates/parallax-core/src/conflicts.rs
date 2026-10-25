@@ -228,11 +228,103 @@ pub fn stage_content(workdir: &Path, stage: &Stage) -> Result<Vec<u8>> {
     git(workdir, &["cat-file", "blob", &stage.oid])
 }
 
+/// The kind of file a Git mode records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FileMode {
+    Regular,
+    Executable,
+    Symlink,
+    /// A submodule's commit.
+    Gitlink,
+}
+
+impl FileMode {
+    pub fn of(mode: &str) -> FileMode {
+        match mode {
+            "100755" => FileMode::Executable,
+            "120000" => FileMode::Symlink,
+            "160000" => FileMode::Gitlink,
+            _ => FileMode::Regular,
+        }
+    }
+}
+
+impl Stage {
+    pub fn file_mode(&self) -> FileMode {
+        FileMode::of(&self.mode)
+    }
+}
+
+/// Puts one version of a conflicted path into the work tree as the kind of file
+/// it was: a symbolic link, an executable or a plain file. Submodules are left to
+/// Git.
+pub fn write_stage(workdir: &Path, path: &str, stage: &Stage) -> Result<()> {
+    let target = workdir.join(path);
+    match stage.file_mode() {
+        FileMode::Gitlink => Err(Error::Unsupported(format!(
+            "{path} is a submodule; resolve it with Git (check out the commit you want in the submodule, then git add it)"
+        ))),
+        FileMode::Symlink => {
+            let link = stage_content(workdir, stage)?;
+            if let Ok(meta) = std::fs::symlink_metadata(&target) {
+                if meta.is_dir() {
+                    return Err(Error::Unsupported(format!("{path} is a folder in the work tree")));
+                }
+                std::fs::remove_file(&target).map_err(|e| Error::io(path, e))?;
+            }
+            write_link(&target, &link).map_err(|e| Error::io(path, e))
+        }
+        mode => {
+            let data = stage_content(workdir, stage)?;
+            // A link in its place is replaced, not followed.
+            if std::fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink()) {
+                std::fs::remove_file(&target).map_err(|e| Error::io(path, e))?;
+            }
+            crate::vfs::local::replace_file(&target, &data, None, None).map_err(|e| Error::io(path, e))?;
+            set_executable(&target, mode == FileMode::Executable).map_err(|e| Error::io(path, e))
+        }
+    }
+}
+
+#[cfg(unix)]
+fn write_link(target: &Path, link: &[u8]) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    std::os::unix::fs::symlink(std::ffi::OsStr::from_bytes(link), target)
+}
+
+/// Without symbolic links, Git writes the link's target into a plain file; so does this.
+#[cfg(not(unix))]
+fn write_link(target: &Path, link: &[u8]) -> std::io::Result<()> {
+    std::fs::write(target, link)
+}
+
+#[cfg(unix)]
+fn set_executable(path: &Path, executable: bool) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(path)?.permissions();
+    let mode = perms.mode();
+    // As Git does: executable for whoever may read it.
+    let new = if executable { mode | ((mode & 0o444) >> 2) } else { mode & !0o111 };
+    if new != mode {
+        perms.set_mode(new);
+        std::fs::set_permissions(path, perms)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_executable(_: &Path, _: bool) -> std::io::Result<()> {
+    Ok(())
+}
+
 /// How a conflicted path is resolved when it is staged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Resolution {
-    /// The file in the work tree, as it is now.
-    WorkTree,
+    /// The file in the work tree, as it is now; with the kind of file to record
+    /// when it is known (a whole version was taken). File systems without
+    /// executable bits or links cannot tell Git that themselves.
+    WorkTree(Option<FileMode>),
     /// The path is removed from the index and the work tree.
     Delete,
 }
@@ -246,12 +338,28 @@ pub fn stage(workdir: &Path, paths: &[(String, Resolution)]) -> Result<()> {
             return Err(Error::Unsupported(format!("{path} is not a conflicted file")));
         }
     }
-    let pick = |r: Resolution| paths.iter().filter(move |(_, x)| *x == r).map(|(p, _)| p.as_str()).collect::<Vec<_>>();
-    let (add, remove) = (pick(Resolution::WorkTree), pick(Resolution::Delete));
+    let add: Vec<&str> =
+        paths.iter().filter(|(_, r)| matches!(r, Resolution::WorkTree(_))).map(|(p, _)| p.as_str()).collect();
+    let remove: Vec<&str> = paths.iter().filter(|(_, r)| *r == Resolution::Delete).map(|(p, _)| p.as_str()).collect();
     if !add.is_empty() {
         let mut args = vec!["add", "--"];
-        args.extend(add);
+        args.extend(&add);
         git(workdir, &args)?;
+    }
+    for (path, resolution) in paths {
+        let Resolution::WorkTree(Some(mode)) = resolution else { continue };
+        match mode {
+            FileMode::Executable => git(workdir, &["update-index", "--chmod=+x", "--", path]).map(drop)?,
+            FileMode::Regular => git(workdir, &["update-index", "--chmod=-x", "--", path]).map(drop)?,
+            // Recorded as a link even where the work tree has a plain file instead.
+            FileMode::Symlink
+                if !std::fs::symlink_metadata(workdir.join(path)).is_ok_and(|m| m.file_type().is_symlink()) =>
+            {
+                let oid = git_text(workdir, &["hash-object", "-w", "--", path])?;
+                git(workdir, &["update-index", "--cacheinfo", &format!("120000,{oid},{path}")])?;
+            }
+            FileMode::Symlink | FileMode::Gitlink => {}
+        }
     }
     if !remove.is_empty() {
         let mut args = vec!["rm", "-q", "--ignore-unmatch", "--"];
@@ -323,9 +431,65 @@ mod tests {
         assert_eq!(stage_content(&state.workdir, a.stages[2].as_ref().unwrap()).unwrap(), b"1\nX\n3\n");
 
         std::fs::write(d.join("a.txt"), "1\nM and X\n3\n").unwrap();
-        stage(&state.workdir, &[("a.txt".into(), Resolution::WorkTree), ("b.txt".into(), Resolution::Delete)]).unwrap();
+        stage(&state.workdir, &[("a.txt".into(), Resolution::WorkTree(None)), ("b.txt".into(), Resolution::Delete)])
+            .unwrap();
         assert!(repo_conflicts(d).unwrap().files.is_empty());
         assert!(!d.join("b.txt").exists());
-        assert!(stage(&state.workdir, &[("a.txt".into(), Resolution::WorkTree)]).is_err());
+        assert!(stage(&state.workdir, &[("a.txt".into(), Resolution::WorkTree(None))]).is_err());
+    }
+
+    /// Taking a whole version keeps what kind of file it is: a link stays a link,
+    /// the executable bit follows the version taken.
+    #[cfg(unix)]
+    #[test]
+    fn whole_versions_keep_links_and_executable_bits() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        if !run(d, &["init", "-q"]) {
+            return;
+        }
+        std::os::unix::fs::symlink("base-target", d.join("link")).unwrap();
+        std::fs::write(d.join("run.sh"), "echo base\n").unwrap();
+        std::fs::set_permissions(d.join("run.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(run(d, &["add", "."]) && run(d, &["commit", "-qm", "base"]));
+        assert!(run(d, &["checkout", "-qb", "feature"]));
+        std::fs::remove_file(d.join("link")).unwrap();
+        std::os::unix::fs::symlink("remote-target", d.join("link")).unwrap();
+        std::fs::write(d.join("run.sh"), "echo remote\n").unwrap();
+        assert!(run(d, &["commit", "-qam", "feature"]));
+        assert!(run(d, &["checkout", "-q", "main"]));
+        std::fs::remove_file(d.join("link")).unwrap();
+        std::os::unix::fs::symlink("local-target", d.join("link")).unwrap();
+        std::fs::write(d.join("run.sh"), "echo local\n").unwrap();
+        std::fs::set_permissions(d.join("run.sh"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(run(d, &["commit", "-qam", "main"]));
+        assert!(!run(d, &["merge", "-q", "feature"]));
+
+        let state = repo_conflicts(d).unwrap();
+        let file = |p: &str| state.files.iter().find(|f| f.path == p).unwrap().clone();
+        let (link, script) = (file("link"), file("run.sh"));
+        assert_eq!(link.stages[2].as_ref().unwrap().file_mode(), FileMode::Symlink);
+        write_stage(d, "link", link.stages[2].as_ref().unwrap()).unwrap();
+        assert_eq!(std::fs::read_link(d.join("link")).unwrap(), Path::new("remote-target"));
+        let remote = script.stages[2].as_ref().unwrap();
+        assert_eq!(remote.file_mode(), FileMode::Executable);
+        write_stage(d, "run.sh", remote).unwrap();
+        assert_ne!(std::fs::metadata(d.join("run.sh")).unwrap().permissions().mode() & 0o111, 0);
+        stage(
+            d,
+            &[
+                ("link".into(), Resolution::WorkTree(Some(FileMode::Symlink))),
+                ("run.sh".into(), Resolution::WorkTree(Some(FileMode::Executable))),
+            ],
+        )
+        .unwrap();
+        let index = git_text(d, &["ls-files", "-s", "--", "link", "run.sh"]).unwrap();
+        assert!(index.lines().any(|l| l.starts_with("120000 ") && l.ends_with("\tlink")), "{index}");
+        assert!(index.lines().any(|l| l.starts_with("100755 ") && l.ends_with("\trun.sh")), "{index}");
+
+        // Back to a plain file: the executable bit goes.
+        write_stage(d, "run.sh", script.stages[1].as_ref().unwrap()).unwrap();
+        assert_eq!(std::fs::metadata(d.join("run.sh")).unwrap().permissions().mode() & 0o111, 0);
     }
 }

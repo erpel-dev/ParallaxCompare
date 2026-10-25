@@ -169,6 +169,9 @@ impl Mergiraf {
         if !path.is_file() {
             return Err(Error::Unsupported(format!("{NOT_FOUND} ({} is not a file)", path.display())));
         }
+        // The merge runs in a temporary folder: a relative path must not change
+        // meaning there.
+        let path = std::path::absolute(&path).map_err(|e| Error::io(path.display().to_string(), e))?;
         let out = crate::process::run(
             Command::new(&path).arg("--version"),
             "mergiraf",
@@ -338,6 +341,33 @@ cp "$local" "$out"
         std::fs::write(&path, script).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path
+    }
+
+    /// A relative path works for the merge too, which runs in another folder.
+    #[cfg(unix)]
+    #[test]
+    fn relative_program_paths_are_made_absolute() {
+        let dir = tempfile::tempdir().unwrap();
+        fake_mergiraf(dir.path());
+        let cwd = std::env::current_dir().unwrap();
+        let relative = pathdiff(dir.path().join("mergiraf"), &cwd);
+        let m = Mergiraf::find(Some(&relative)).unwrap();
+        assert!(m.path.is_absolute(), "{:?}", m.path);
+        let out = m.merge(b"a\n", b"b\n", b"c\n", "x.rs", ["l", "b", "r"], Duration::from_secs(5)).unwrap();
+        assert_eq!(out.data, b"b\n");
+    }
+
+    /// `path` relative to `from` (both absolute), with `..` as needed.
+    #[cfg(unix)]
+    fn pathdiff(path: PathBuf, from: &Path) -> PathBuf {
+        let (p, f): (Vec<_>, Vec<_>) = (path.components().collect(), from.components().collect());
+        let common = p.iter().zip(&f).take_while(|(a, b)| a == b).count();
+        let mut out = PathBuf::new();
+        for _ in common..f.len() {
+            out.push("..");
+        }
+        p[common..].iter().for_each(|c| out.push(c));
+        out
     }
 
     #[cfg(unix)]

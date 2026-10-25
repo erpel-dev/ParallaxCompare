@@ -156,6 +156,32 @@ fn count_lines(text: &str) -> u32 {
     merge::split_lines(text).len() as u32
 }
 
+/// The text a block holds for a choice that depends only on the inputs (`None`
+/// for an edit or a syntax-aware solution). `lines` are base, local and remote.
+fn fixed_content(
+    block: &Block,
+    lines: &[Vec<&str>; 3],
+    choice: Choice,
+    options: &MergeOptions,
+    nl: &str,
+) -> Option<String> {
+    let part = |side: usize, range: &Range<u32>| &lines[side][range.start as usize..range.end as usize];
+    let (bp, lp, rp) = (part(0, &block.base), part(1, &block.local), part(2, &block.remote));
+    Some(match choice {
+        Choice::Auto => match block.merged() {
+            Some((merge::Side3::Remote, _)) => join(&[rp], nl),
+            _ => join(&[lp], nl),
+        },
+        Choice::Unresolved => merge::conflict_text(block, &lines[0], &lines[1], &lines[2], options),
+        Choice::Local => join(&[lp], nl),
+        Choice::Remote => join(&[rp], nl),
+        Choice::LocalRemote => join(&[lp, rp], nl),
+        Choice::RemoteLocal => join(&[rp, lp], nl),
+        Choice::Base => join(&[bp], nl),
+        Choice::Edited | Choice::Syntax => return None,
+    })
+}
+
 /// Joins parts of lines so that each part but the last ends with a terminator.
 fn join(parts: &[&[&str]], newline: &str) -> String {
     let mut out = String::new();
@@ -172,9 +198,24 @@ impl MergeSession {
     /// Merges the three texts. The result is saved like `local`: its encoding, BOM
     /// and line terminator for new lines.
     pub fn new(base: TextDoc, local: TextDoc, remote: TextDoc, options: MergeOptions) -> Self {
-        let blocks = {
-            let (b, l, r) = (full_lines(&base), full_lines(&local), full_lines(&remote));
-            merge::merge_lines(&b, &l, &r, &options)
+        // The lines of the three texts are split once: splitting them again for
+        // every block made opening a merge with many conflicts quadratic.
+        let (blocks, contents) = {
+            let lines = [full_lines(&base), full_lines(&local), full_lines(&remote)];
+            let mut blocks = merge::merge_lines(&lines[0], &lines[1], &lines[2], &options);
+            // Three empty texts give no blocks; typed text needs one to belong to.
+            if blocks.is_empty() {
+                blocks.push(Block { kind: BlockKind::Unchanged, base: 0..0, local: 0..0, remote: 0..0 });
+            }
+            let contents: Vec<(Choice, String)> = blocks
+                .iter()
+                .map(|block| {
+                    let choice = if block.kind == BlockKind::Conflict { Choice::Unresolved } else { Choice::Auto };
+                    let content = fixed_content(block, &lines, choice, &options, local.newline);
+                    (choice, content.expect("automatic and unresolved blocks have fixed content"))
+                })
+                .collect();
+            (blocks, contents)
         };
         let mut session = MergeSession {
             result: TextDoc::empty_like(&local),
@@ -192,9 +233,7 @@ impl MergeSession {
         };
         let mut text = String::new();
         let mut row = 0;
-        for i in 0..session.blocks.len() {
-            let choice = if session.blocks[i].kind == BlockKind::Conflict { Choice::Unresolved } else { Choice::Auto };
-            let content = session.content(i, choice);
+        for (i, (choice, content)) in contents.into_iter().enumerate() {
             if !text.is_empty() && !text.ends_with(['\n', '\r']) && !content.is_empty() {
                 text.push_str(session.local.newline);
             }
@@ -231,31 +270,21 @@ impl MergeSession {
         &self.options
     }
 
+    /// The lines of base, local and remote, with their terminators.
+    fn input_lines(&self) -> [Vec<&str>; 3] {
+        [full_lines(&self.base), full_lines(&self.local), full_lines(&self.remote)]
+    }
+
     /// The text a block holds for a choice. Unresolved conflicts get Git's markers.
     fn content(&self, i: usize, choice: Choice) -> String {
-        let block = &self.blocks[i];
-        let (b, l, r) = (full_lines(&self.base), full_lines(&self.local), full_lines(&self.remote));
-        fn part<'a>(lines: &[&'a str], range: &Range<u32>) -> Vec<&'a str> {
-            lines[range.start as usize..range.end as usize].to_vec()
-        }
-        let (bp, lp, rp) = (part(&b, &block.base), part(&l, &block.local), part(&r, &block.remote));
-        let nl = self.local.newline;
         match choice {
-            Choice::Auto => match block.merged() {
-                Some((merge::Side3::Remote, _)) => join(&[&rp], nl),
-                _ => join(&[&lp], nl),
-            },
-            Choice::Unresolved => merge::conflict_text(block, &b, &l, &r, &self.options),
-            Choice::Local => join(&[&lp], nl),
-            Choice::Remote => join(&[&rp], nl),
-            Choice::LocalRemote => join(&[&lp, &rp], nl),
-            Choice::RemoteLocal => join(&[&rp, &lp], nl),
-            Choice::Base => join(&[&bp], nl),
             Choice::Edited => self.block_text(i),
             Choice::Syntax => match self.syntax.get(i) {
                 Some(Some((text, _))) => text.clone(),
                 _ => self.block_text(i),
             },
+            fixed => fixed_content(&self.blocks[i], &self.input_lines(), fixed, &self.options, self.local.newline)
+                .expect("every other choice has fixed content"),
         }
     }
 
@@ -626,13 +655,15 @@ impl MergeSession {
     fn syntax_gaps(&self, merged: &str) -> Option<Vec<(usize, String)>> {
         // This merge without its conflicts: the lines of the automatic blocks, and
         // where each conflict sits among them.
+        let lines = self.input_lines();
         let mut skeleton: Vec<String> = Vec::new();
         let mut gaps: Vec<(usize, usize)> = Vec::new();
         for (i, block) in self.blocks.iter().enumerate() {
             if block.kind == BlockKind::Conflict {
                 gaps.push((i, skeleton.len()));
             } else {
-                let text = self.content(i, Choice::Auto);
+                let text = fixed_content(block, &lines, Choice::Auto, &self.options, self.local.newline)
+                    .expect("automatic blocks have fixed content");
                 skeleton.extend(merge::split_lines(&text).iter().map(|l| l.to_string()));
             }
         }
@@ -768,6 +799,31 @@ mod tests {
         assert_eq!(s.result_text(), merged);
         assert_eq!(s.stats().unresolved, 1, "a smaller conflict is still a conflict");
         assert!(!s.is_clean());
+    }
+
+    /// An empty result can be typed into, and undone back to empty.
+    #[test]
+    fn typing_into_an_empty_result() {
+        for (base, local, remote) in [("", "", ""), ("gone\n", "", "")] {
+            let mut s = session(base, local, remote);
+            assert_eq!((s.result_text(), s.result_row_count()), ("", 0));
+            s.replace(Pos { line: 0, col: 0 }, Pos { line: 0, col: u32::MAX }, "hello");
+            assert_eq!((s.result_text(), s.result_row_count()), ("hello", 1), "{base:?}");
+            s.undo();
+            assert_eq!((s.result_text(), s.result_row_count()), ("", 0));
+        }
+    }
+
+    /// Opening is linear in the input: thousands of separate conflicts open fast.
+    #[test]
+    fn many_conflicts_open_in_linear_time() {
+        let make = |side: &str| (0..4000).map(|i| format!("c{i} {side}\n1\n2\n3\n4\n5\n6\n")).collect::<String>();
+        let (base, local, remote) = (make("base"), make("local"), make("remote"));
+        let started = std::time::Instant::now();
+        let s = session(&base, &local, &remote);
+        assert_eq!(s.stats().conflicts, 4000);
+        // Quadratic splitting took seconds here even in release builds.
+        assert!(started.elapsed() < std::time::Duration::from_secs(3), "{:?}", started.elapsed());
     }
 
     #[test]

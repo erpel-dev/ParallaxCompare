@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-  import { api, type ConflictKind, type RepoConflicts } from "./api";
+  import { api, type ConflictKind, type FileMode, type RepoConflicts } from "./api";
   import { notify } from "./toast.svelte";
   import { syntaxMerge } from "./syntaxMerge.svelte";
 
@@ -20,8 +20,9 @@
   let repo = $state.raw<RepoConflicts | null>(null);
   let error = $state("");
   let busy = $state(false);
-  /** Files resolved here but not staged yet: how, and whether staging removes them. */
-  let resolved = $state<Record<string, { how: string; remove: boolean }>>({});
+  /** Files resolved here but not staged yet: how, whether staging removes them, and
+   * the kind of file to record when a whole version was taken. */
+  let resolved = $state<Record<string, { how: string; remove: boolean; mode?: FileMode | null }>>({});
   let unlisten: UnlistenFn | undefined;
   /** Conflicts the syntax-aware merge leaves in each text file (0: it solves the file), once checked. */
   let syntaxLeft = $state<Record<string, number>>({});
@@ -85,8 +86,9 @@
   async function takeSide(path: string, remote: boolean) {
     if (!repo) return;
     try {
-      const removed = await api.takeConflictSide(repo.workdir, path, remote);
-      resolved[path] = { how: removed ? `${remote ? "remote" : "local"} deletion kept` : `took ${remote ? "remote" : "local"}`, remove: removed };
+      const taken = await api.takeConflictSide(repo.workdir, path, remote);
+      const side = remote ? "remote" : "local";
+      resolved[path] = { how: taken.deleted ? `${side} deletion kept` : `took ${side}`, remove: taken.deleted, mode: taken.mode };
     } catch (e) {
       notify(String(e));
     }
@@ -138,7 +140,7 @@
     if (!repo || !ready.length) return;
     busy = true;
     try {
-      await api.stageConflicts(repo.workdir, ready.map((p) => [p, resolved[p].remove]));
+      await api.stageConflicts(repo.workdir, ready.map((p) => [p, resolved[p].remove, resolved[p].mode ?? null]));
       notify(`Staged ${ready.length} file${ready.length === 1 ? "" : "s"}.`, "info");
       resolved = {};
       await refresh();
@@ -198,7 +200,7 @@
                   {f.path}
                 {/if}
               </td>
-              <td><span class="chip {f.kind}">{kindLabel[f.kind]}</span>{#if !f.text && (f.kind === "bothModified" || f.kind === "bothAdded")}<span class="chip">binary</span>{/if}{#if syntaxOn && syntaxLeft[f.path] === 0}<span class="chip sa" title={`${syntaxMerge.found?.name ?? "The syntax-aware merge"} merges this file without conflicts`}>✦ solvable by syntax</span>{/if}</td>
+              <td><span class="chip {f.kind}">{kindLabel[f.kind]}</span>{#if f.special === "symlink"}<span class="chip" title="A symbolic link: take one version as a whole">link</span>{:else if f.special === "gitlink"}<span class="chip" title="A submodule: resolve it with Git">submodule</span>{/if}{#if !f.text && !f.special && (f.kind === "bothModified" || f.kind === "bothAdded")}<span class="chip">binary</span>{/if}{#if syntaxOn && syntaxLeft[f.path] === 0}<span class="chip sa" title={`${syntaxMerge.found?.name ?? "The syntax-aware merge"} merges this file without conflicts`}>✦ solvable by syntax</span>{/if}</td>
               <td class="state">{done ? `✓ ${done.how}` : "unresolved"}</td>
               <td class="actions">
                 {#if syntaxOn && syntaxLeft[f.path] === 0 && !done}<button class="sa" onclick={() => solve([f.path])} title="Write the syntax-aware result into the work tree">✦ Solve</button>{/if}
