@@ -1,0 +1,321 @@
+{
+  "testedBase": "df58244 with issue 13/14 fixes",
+  "workers": 4,
+  "callOrder": [
+    "stat",
+    "list",
+    "read",
+    "local_path"
+  ],
+  "model": "Only backing VFS stat calls are delayed. Archive bytes are local; no SMB/NFS mount, bandwidth, server caching or Windows runtime is emulated.",
+  "cases": [
+    {
+      "entries": 100,
+      "statDelayMs": 2,
+      "mode": "default",
+      "round": 0,
+      "seconds": 0.012259,
+      "leftCalls": [
+        2,
+        0,
+        0,
+        1
+      ],
+      "rightCalls": [
+        2,
+        0,
+        0,
+        1
+      ],
+      "files": 100,
+      "same": 0,
+      "different": 100
+    },
+    {
+      "entries": 100,
+      "statDelayMs": 2,
+      "mode": "default",
+      "round": 1,
+      "seconds": 0.010446,
+      "leftCalls": [
+        2,
+        0,
+        0,
+        0
+      ],
+      "rightCalls": [
+        2,
+        0,
+        0,
+        0
+      ],
+      "files": 100,
+      "same": 0,
+      "different": 100
+    },
+    {
+      "entries": 1000,
+      "statDelayMs": 0,
+      "mode": "default",
+      "round": 0,
+      "seconds": 0.036808,
+      "leftCalls": [
+        2,
+        0,
+        0,
+        1
+      ],
+      "rightCalls": [
+        2,
+        0,
+        0,
+        1
+      ],
+      "files": 1000,
+      "same": 0,
+      "different": 1000
+    },
+    {
+      "entries": 1000,
+      "statDelayMs": 0,
+      "mode": "default",
+      "round": 1,
+      "seconds": 0.00723,
+      "leftCalls": [
+        2,
+        0,
+        0,
+        0
+      ],
+      "rightCalls": [
+        2,
+        0,
+        0,
+        0
+      ],
+      "files": 1000,
+      "same": 0,
+      "different": 1000
+    },
+    {
+      "entries": 1000,
+      "statDelayMs": 2,
+      "mode": "default",
+      "round": 0,
+      "seconds": 0.042956,
+      "leftCalls": [
+        2,
+        0,
+        0,
+        1
+      ],
+      "rightCalls": [
+        2,
+        0,
+        0,
+        1
+      ],
+      "files": 1000,
+      "same": 0,
+      "different": 1000
+    },
+    {
+      "entries": 1000,
+      "statDelayMs": 2,
+      "mode": "default",
+      "round": 1,
+      "seconds": 0.01529,
+      "leftCalls": [
+        2,
+        0,
+        0,
+        0
+      ],
+      "rightCalls": [
+        2,
+        0,
+        0,
+        0
+      ],
+      "files": 1000,
+      "same": 0,
+      "different": 1000
+    },
+    {
+      "entries": 1000,
+      "statDelayMs": 10,
+      "mode": "default",
+      "round": 0,
+      "seconds": 0.065582,
+      "leftCalls": [
+        2,
+        0,
+        0,
+        1
+      ],
+      "rightCalls": [
+        2,
+        0,
+        0,
+        1
+      ],
+      "files": 1000,
+      "same": 0,
+      "different": 1000
+    },
+    {
+      "entries": 1000,
+      "statDelayMs": 10,
+      "mode": "default",
+      "round": 1,
+      "seconds": 0.047579,
+      "leftCalls": [
+        2,
+        0,
+        0,
+        0
+      ],
+      "rightCalls": [
+        2,
+        0,
+        0,
+        0
+      ],
+      "files": 1000,
+      "same": 0,
+      "different": 1000
+    },
+    {
+      "entries": 1000,
+      "statDelayMs": 2,
+      "mode": "equal",
+      "round": 0,
+      "seconds": 0.018153,
+      "leftCalls": [
+        2,
+        0,
+        0,
+        1
+      ],
+      "rightCalls": [
+        2,
+        0,
+        0,
+        1
+      ],
+      "files": 1000,
+      "same": 1000,
+      "different": 0
+    },
+    {
+      "entries": 1000,
+      "statDelayMs": 2,
+      "mode": "equal",
+      "round": 1,
+      "seconds": 0.010141,
+      "leftCalls": [
+        2,
+        0,
+        0,
+        0
+      ],
+      "rightCalls": [
+        2,
+        0,
+        0,
+        0
+      ],
+      "files": 1000,
+      "same": 1000,
+      "different": 0
+    },
+    {
+      "entries": 1000,
+      "statDelayMs": 2,
+      "mode": "bytes",
+      "round": 0,
+      "seconds": 0.017255,
+      "leftCalls": [
+        2,
+        0,
+        0,
+        1
+      ],
+      "rightCalls": [
+        2,
+        0,
+        0,
+        1
+      ],
+      "files": 1000,
+      "same": 0,
+      "different": 1000
+    },
+    {
+      "entries": 1000,
+      "statDelayMs": 2,
+      "mode": "bytes",
+      "round": 1,
+      "seconds": 0.009608,
+      "leftCalls": [
+        2,
+        0,
+        0,
+        0
+      ],
+      "rightCalls": [
+        2,
+        0,
+        0,
+        0
+      ],
+      "files": 1000,
+      "same": 0,
+      "different": 1000
+    },
+    {
+      "entries": 1000,
+      "statDelayMs": 2,
+      "mode": "verify",
+      "round": 0,
+      "seconds": 0.046512,
+      "leftCalls": [
+        2,
+        0,
+        0,
+        1
+      ],
+      "rightCalls": [
+        2,
+        0,
+        0,
+        1
+      ],
+      "files": 1000,
+      "same": 1000,
+      "different": 0
+    },
+    {
+      "entries": 1000,
+      "statDelayMs": 2,
+      "mode": "verify",
+      "round": 1,
+      "seconds": 0.017791,
+      "leftCalls": [
+        2,
+        0,
+        0,
+        0
+      ],
+      "rightCalls": [
+        2,
+        0,
+        0,
+        0
+      ],
+      "files": 1000,
+      "same": 1000,
+      "different": 0
+    }
+  ]
+}

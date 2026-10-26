@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { splitPatterns, joinPatterns } from "./patterns";
   import { onMount, tick } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { ask } from "@tauri-apps/plugin-dialog";
@@ -23,7 +24,7 @@
     selfMatches,
     countNodes,
     differingFolders,
-    filesBelow,
+    copyFilesBelow,
     findNode,
     flatFiles,
     flatten,
@@ -96,7 +97,7 @@
   // svelte-ignore state_referenced_locally
   const initialOptions = restore?.options ?? defaultCompareOptions();
   let options = $state(initialOptions);
-  let excludesText = $state(initialOptions.excludes.join(", "));
+  let excludesText = $state(joinPatterns(initialOptions.excludes, true));
   let result = $state.raw<CompareResult | null>(null);
   // The result tree is large and mutated in place; this counter drives re-rendering.
   let version = $state(0);
@@ -291,14 +292,16 @@
   }
 
   // ---- File patterns ----
-  let patternText = $state("");
+  let patternText = $state(joinPatterns(initialOptions.includes));
   let patternInput = $state<HTMLInputElement>();
   let patternTimer: ReturnType<typeof setTimeout> | undefined;
 
   /** Compares again with the patterns typed, when they changed. */
   function applyPatterns() {
     clearTimeout(patternTimer);
-    const list = patternText.split(/[\s,;]+/).filter(Boolean);
+    let list: string[];
+    try { list = splitPatterns(patternText); }
+    catch (e) { error = String(e); return; }
     if (list.join("\n") === options.includes.join("\n")) return;
     options.includes = list;
     run();
@@ -426,10 +429,9 @@
   });
 
   function applyExcludes() {
-    const next = excludesText
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
+    let next: string[];
+    try { next = splitPatterns(excludesText, true); }
+    catch (e) { error = String(e); return; }
     if (next.join("\n") !== options.excludes.join("\n")) {
       options.excludes = next;
       run();
@@ -655,20 +657,23 @@
     }
     if (!paths.length) return;
     // Files on the target side that the copy replaces, and those newer than their source.
+    const archives: string[] = [];
     const replaced: string[] = [];
     const newer: string[] = [];
     for (const p of paths) {
-      for (const f of filesBelow(findNode(result.root, p)!, p)) {
+      for (const f of copyFilesBelow(findNode(result.root, p)!, p, toRight)) {
         const [src, dst] = toRight ? [f.node.left, f.node.right] : [f.node.right, f.node.left];
-        if (!src || !dst || f.node.status === "same") continue;
+        if (src?.kind === "archive") archives.push(f.path);
+        if (!src || !dst || (f.node.status === "same" && src.kind !== "archive")) continue;
         replaced.push(f.path);
         if (src.mtime !== null && dst.mtime !== null && dst.mtime > src.mtime) newer.push(f.path);
       }
     }
     const side = toRight ? "right" : "left";
-    if (replaced.length) {
+    if (replaced.length || archives.length) {
       const message =
-        `Copying replaces ${replaced.length} file${replaced.length > 1 ? "s" : ""} on the ${side} side:\n${list(replaced)}` +
+        (replaced.length ? `Copying replaces ${replaced.length} file${replaced.length > 1 ? "s" : ""} on the ${side} side:\n${list(replaced)}` : "") +
+        (archives.length ? `\n\nArchives are copied whole, including entries hidden by file patterns, exclusions or status filters:\n${list(archives)}` : "") +
         (newer.length ? `\n\n${newer.length} of them ${newer.length > 1 ? "are" : "is"} newer than the copy:\n${list(newer, 6)}` : "");
       const ok = await ask(message, { title: "Replace files", kind: "warning", okLabel: "Replace", cancelLabel: "Cancel" });
       if (!ok) return;
@@ -741,6 +746,20 @@
       const nodes = await api.refreshPaths(session.id, outer, $state.snapshot(options));
       if (result?.root !== root) return;
       outer.forEach((p, i) => replaceNode(root, p, nodes[i]));
+      // A removed last match may leave empty ancestors. Ask the engine only for
+      // those folders: patterns may explicitly include an empty folder by name.
+      let removed = outer.filter((_, i) => nodes[i] === null);
+      while (options.includes.length && removed.length) {
+        const parents = [...new Set(removed.map((p) => p.split("/").slice(0, -1).join("/")))].filter((p) => {
+          const node = p ? findNode(root, p) : undefined;
+          return node && !node.unexpanded && !node.children?.length;
+        });
+        if (!parents.length) break;
+        const fresh = await api.refreshPaths(session.id, parents, $state.snapshot(options));
+        if (result?.root !== root) return;
+        parents.forEach((p, i) => replaceNode(root, p, fresh[i]));
+        removed = parents.filter((_, i) => fresh[i] === null);
+      }
       version++;
     } catch (e) {
       error = String(e);
@@ -984,7 +1003,7 @@
         spellcheck="false"
         title={"Compare only files matching these patterns, separated by spaces, commas or semicolons, e.g. *.java *hello*w*c.\n" +
           "* matches any text, ? one character, [abc] one of them, {java,kt} either. A pattern with / matches the path (src/**/*.rs); a matching folder takes all files in it. Case does not matter.\n" +
-          "Folders without matching files are left out. Enter applies at once, Esc clears."}
+          'Quote names containing separators, e.g. "report final.txt" or "report,final.txt". Folders without matching files are left out. Enter applies at once, Esc clears.'}
         oninput={() => {
           clearTimeout(patternTimer);
           patternTimer = setTimeout(applyPatterns, 500);
@@ -1034,6 +1053,7 @@
           onkeydown={(e) => e.key === "Enter" && applyExcludes()}
           onblur={applyExcludes}
           placeholder="*.o, build/**"
+          title={'Case-sensitive globs. Commas outside braces, classes and quotes separate patterns. Quote names containing commas, e.g. "report,final.txt".'}
         />
       </div>
     </Dropdown>

@@ -597,8 +597,9 @@ async fn run_op(
 fn refresh(session: &Session, paths: &[String], options: &CompareOptions) -> Vec<Option<Node>> {
     paths
         .iter()
-        .map(|path| compare::compare_path(&session.left, &session.right, path, options, &Control::default()).ok())
-        .map(|r| r.map(|r| r.root))
+        .map(|path| {
+            compare::refresh_path(&session.left, &session.right, path, options, &Control::default()).ok().flatten()
+        })
         .collect()
 }
 

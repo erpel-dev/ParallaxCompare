@@ -12,7 +12,7 @@ use std::io::{self, Cursor, Write};
 use std::num::NonZeroU64;
 use std::time::{Duration, SystemTime};
 
-use super::{ArchiveFormat, ArchiveFs, Backend, civil_to_unix, tar_reader};
+use super::{ArchiveData, ArchiveFormat, ArchiveFs, ArchiveReader, Backend, civil_to_unix, tar_reader};
 use crate::progress::Progress;
 use crate::vfs::{Change, Data, EntryKind, Vfs, normalize};
 use crate::{Error, Result};
@@ -104,7 +104,7 @@ fn threads() -> u32 {
     std::thread::available_parallelism().map_or(1, |n| n.get() as u32)
 }
 
-fn write_zip(archive: &zip::ZipArchive<Cursor<Data>>, edits: &Edits, progress: &Progress) -> Result<Vec<u8>> {
+fn write_zip(archive: &zip::ZipArchive<ArchiveReader>, edits: &Edits, progress: &Progress) -> Result<Vec<u8>> {
     let mut old = archive.clone();
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
     progress.expect(old.len() as u64);
@@ -157,7 +157,12 @@ fn unix_to_civil(secs: i64) -> (i64, u32, u32, u32, u32, u32) {
     (y, m, d, rest / 3600, rest % 3600 / 60, rest % 60)
 }
 
-fn write_7z(data: &Data, archive: &sevenz_rust2::Archive, edits: &Edits, progress: &Progress) -> Result<Vec<u8>> {
+fn write_7z(
+    data: &ArchiveData,
+    archive: &sevenz_rust2::Archive,
+    edits: &Edits,
+    progress: &Progress,
+) -> Result<Vec<u8>> {
     use sevenz_rust2::{ArchiveEntry, ArchiveWriter, BlockDecoder, Password, SourceReader};
 
     let mut writer = ArchiveWriter::new(Cursor::new(Vec::new())).map_err(Error::archive)?;
@@ -177,7 +182,7 @@ fn write_7z(data: &Data, archive: &sevenz_rust2::Archive, edits: &Edits, progres
     progress.expect(files_in.iter().sum());
 
     let password = Password::empty();
-    let mut source = Cursor::new(&**data);
+    let mut source = data.reader();
     for (block, &changed) in changed.iter().enumerate() {
         if !changed {
             progress.advance(files_in[block])?;
@@ -295,7 +300,7 @@ fn cancelled_or(progress: &Progress, e: impl std::fmt::Display) -> Error {
     progress.check().err().unwrap_or_else(|| Error::archive(e))
 }
 
-fn write_tar(data: &Data, format: ArchiveFormat, edits: &Edits, progress: &Progress) -> Result<Vec<u8>> {
+fn write_tar(data: &ArchiveData, format: ArchiveFormat, edits: &Edits, progress: &Progress) -> Result<Vec<u8>> {
     let mut old = tar::Archive::new(tar_reader(data, format)?);
     let mut tar = tar::Builder::new(Vec::new());
     for entry in old.entries().map_err(Error::archive)? {

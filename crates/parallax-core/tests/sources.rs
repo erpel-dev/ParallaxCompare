@@ -1690,3 +1690,88 @@ fn unchanged_tracked_files_carry_their_index_id() {
     assert_eq!(status_of(&list, "sub/c.txt"), Status::Same);
     assert_eq!(status_of(&list, "b.txt"), Status::Different);
 }
+
+#[test]
+fn unicode_globs_match_characters_and_fold_case() {
+    use parallax_core::compare::{Excludes, Includes};
+    let one = Includes::new(&["?.txt".into()]).unwrap();
+    for name in ["é.txt", "中.txt", "😀.txt", "Ä.TXT", "a\n.txt"] {
+        assert_eq!(one.covers(name), name != "a\n.txt", "{name:?}");
+    }
+    assert!(!Includes::new(&["??.txt".into()]).unwrap().covers("é.txt"));
+    assert!(Includes::new(&["ä.txt".into()]).unwrap().covers("Ä.TXT"));
+    for (pattern, yes, no) in [
+        ("[ä-ö].txt", "Ö.TXT", "z.txt"),
+        ("*.{java,kt}", "Main.KT", "Main.rs"),
+        ("src/?.txt", "src/中.txt", "src/sub/a.txt"),
+        (r"literal\?.txt", "literal?.txt", "literalX.txt"),
+        (r"back\\x.txt", r"back\x.txt", "backx.txt"),
+        ("?.txt", "\n.txt", "ab.txt"),
+    ] {
+        let matcher = Includes::new(&[pattern.into()]).unwrap();
+        assert!(matcher.covers(yes), "{pattern:?} / {yes:?}");
+        assert!(!matcher.covers(no), "{pattern:?} / {no:?}");
+    }
+    let excludes = Excludes::new(&["ä.txt".into(), "?.bin".into()]).unwrap();
+    assert!(!excludes.matches("Ä.TXT", "Ä.TXT"), "excludes remain case sensitive");
+    assert!(excludes.matches("中.bin", "中.bin"));
+}
+
+#[test]
+fn filtered_git_shortcuts_and_incremental_refresh_obey_patterns() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    write(a.path(), &[("root.txt", "same"), ("sub/inner.txt", "same"), ("existing.bin", "hidden")]);
+    git(a.path(), &["init", "-q"]);
+    git(a.path(), &["add", "."]);
+    git(a.path(), &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "base"]);
+    let rev = format!("{}@HEAD", a.path().display());
+    let opts = CompareOptions { includes: vec!["missing*.txt".into()], ..Default::default() };
+    assert!(statuses(&rev, &rev, &opts).is_empty());
+    let opts = CompareOptions { includes: vec!["*.txt".into()], ..Default::default() };
+    assert_eq!(statuses(&rev, &rev, &opts).len(), 3);
+    write(b.path(), &[("root.txt", "same"), ("sub/inner.txt", "same")]);
+    let (left, right) = pair(a.path(), b.path());
+    let refresh = |p| compare::refresh_path(&left, &right, p, &opts, &Control::default()).unwrap();
+    assert!(refresh("existing.bin").is_none());
+    write(b.path(), &[("new.bin", "new"), ("sub/new.txt", "shown")]);
+    assert!(refresh("new.bin").is_none());
+    assert!(refresh("sub/new.txt").is_some());
+    fs::remove_file(a.path().join("sub/inner.txt")).unwrap();
+    fs::remove_dir_all(b.path().join("sub")).unwrap();
+    left.vfs.changed(&left.path("sub"));
+    right.vfs.changed(&right.path("sub"));
+    assert!(refresh("sub").is_none(), "empty filtered folders disappear");
+    let excluded = CompareOptions { excludes: vec!["sub".into()], ..opts };
+    assert!(compare::refresh_path(&left, &right, "sub/inner.txt", &excluded, &Control::default()).unwrap().is_none());
+}
+
+#[test]
+fn filtered_parent_copy_includes_matching_archives_as_whole_files() {
+    use parallax_core::compare::Filter;
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    write(a.path(), &[("wrapper/normal.txt", "new"), ("wrapper/hidden.bin", "left")]);
+    write(b.path(), &[("wrapper/normal.txt", "old"), ("wrapper/hidden.bin", "right")]);
+    let matching = zip_bytes(&[("keep.txt", "new"), ("hidden.bin", "included atomically")]);
+    fs::write(a.path().join("wrapper/bundle.zip"), &matching).unwrap();
+    fs::write(a.path().join("wrapper/no-match.zip"), zip_bytes(&[("only.bin", "hidden")])).unwrap();
+    fs::write(a.path().join("wrapper/excluded.zip"), &matching).unwrap();
+    let (left, right) = pair(a.path(), b.path());
+    let opts =
+        CompareOptions { includes: vec!["*.txt".into()], excludes: vec!["excluded.zip".into()], ..Default::default() };
+    let filter = Filter::new(&opts).unwrap();
+    let count = ops::copy(&left, &right, &["wrapper".into()], &filter, &Progress::default()).unwrap();
+    assert_eq!(count, 2);
+    assert_eq!(fs::read(b.path().join("wrapper/bundle.zip")).unwrap(), matching);
+    assert_eq!(fs::read_to_string(b.path().join("wrapper/hidden.bin")).unwrap(), "right");
+    assert!(!b.path().join("wrapper/no-match.zip").exists());
+    assert!(!b.path().join("wrapper/excluded.zip").exists());
+    // The same traversal when the target itself is inside an archive.
+    let target = b.path().join("target.zip");
+    fs::write(&target, zip_bytes(&[("wrapper/hidden.bin", "right")])).unwrap();
+    let target = SourceSpec::parse(target.to_str().unwrap()).open(SourceOptions::default()).unwrap();
+    ops::copy(&left, &target, &["wrapper".into()], &filter, &Progress::default()).unwrap();
+    assert_eq!(&*target.vfs.read(&target.path("wrapper/bundle.zip")).unwrap(), matching.as_slice());
+    assert!(target.stat("wrapper/no-match.zip").is_err());
+}

@@ -115,6 +115,16 @@ pub enum WatchRoot {
 }
 
 impl Source {
+    pub(crate) fn read_operation(&self) -> Self {
+        Self {
+            spec: self.spec.clone(),
+            vfs: self.vfs.read_operation().unwrap_or_else(|| self.vfs.clone()),
+            root: self.root.clone(),
+            info: self.info.clone(),
+            watch: self.watch.clone(),
+        }
+    }
+
     pub fn path(&self, rel: &str) -> String {
         join(&self.root, rel)
     }

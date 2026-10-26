@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use parking_lot::Mutex;
 
@@ -20,65 +20,19 @@ use crate::{Error, Result};
 /// first one's changes.
 static WRITING: Mutex<()> = Mutex::new(());
 
-/// How often each archive file was written in this process, by rewriting it or by
-/// replacing it as a whole. A source that opened an archive before another source
-/// wrote it sees the count change and reads the archive again before writing,
-/// instead of rewriting it from its old copy.
-static GENERATIONS: LazyLock<Mutex<HashMap<String, u64>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-
 pub struct ArchiveMount {
     base: Arc<dyn Vfs>,
     /// Whether archives found while listing are offered as folders. Paths that
     /// explicitly point into an archive are always resolved.
     expand: bool,
-    cache: Mutex<HashMap<String, Cached>>,
-}
-
-/// An opened archive, and what its file was like when it was read.
-struct Cached {
-    archive: Arc<ArchiveFs>,
-    generation: u64,
-    /// Size and modification time, to notice other programs writing it.
-    stamp: Option<(u64, Option<i64>)>,
-    /// The bytes it was read from. Other programs can replace an archive keeping
-    /// its size and (whole-second) modification time, so a write compares them too.
-    data: Data,
+    cache: Arc<Mutex<HashMap<String, Arc<ArchiveFs>>>>,
+    // Present only on a comparison-scoped view. No network metadata lookup per member.
+    types: Option<Mutex<HashMap<String, bool>>>,
 }
 
 impl ArchiveMount {
     pub fn new(base: Arc<dyn Vfs>, expand: bool) -> Self {
-        ArchiveMount { base, expand, cache: Mutex::new(HashMap::new()) }
-    }
-
-    /// The identity of an archive stored at `path` of the base: its real path when
-    /// it is a local file.
-    fn identity(&self, path: &str) -> String {
-        match self.base.local_path(path).and_then(|p| p.canonicalize().ok()) {
-            Some(p) => p.display().to_string(),
-            None => format!("{}/{path}", self.base.label()),
-        }
-    }
-
-    fn generation(&self, path: &str) -> u64 {
-        GENERATIONS.lock().get(&self.identity(path)).copied().unwrap_or(0)
-    }
-
-    /// Forgets the opened copy of the archive at `path` of the base (and archives
-    /// read from it) when the file changed since it was read.
-    fn revalidate(&self, path: &str) {
-        let stale = match self.cache.lock().get(path) {
-            Some(cached) => {
-                let stamp = self.base.stat(path).ok().map(|e| (e.size, e.mtime));
-                cached.generation != self.generation(path)
-                    || cached.stamp != stamp
-                    || self.base.read(path).map_or(true, |now| *now != *cached.data)
-            }
-            None => false,
-        };
-        if stale {
-            let prefix = format!("{path}/");
-            self.cache.lock().retain(|outer, _| outer != path && !outer.starts_with(&prefix));
-        }
+        ArchiveMount { base, expand, cache: Arc::new(Mutex::new(HashMap::new())), types: None }
     }
 
     /// Maps a mount path to the provider that owns it and the path inside it.
@@ -93,7 +47,11 @@ impl ArchiveMount {
             let candidate = join(&inner, part);
             outer = join(&outer, part);
             if let Some(format) = detect_format(part) {
-                let is_file = vfs.stat(&candidate).map(|e| e.kind == EntryKind::File).unwrap_or(false);
+                let stat = || vfs.stat(&candidate).is_ok_and(|e| e.kind == EntryKind::File);
+                let is_file = match &self.types {
+                    Some(types) => *types.lock().entry(outer.clone()).or_insert_with(stat),
+                    None => stat(),
+                };
                 if is_file {
                     let archive = self.open_archive(&*vfs, &candidate, &outer, format)?;
                     vfs = archive;
@@ -114,21 +72,17 @@ impl ArchiveMount {
         outer: &str,
         format: super::archive::ArchiveFormat,
     ) -> Result<Arc<ArchiveFs>> {
-        if let Some(cached) = self.cache.lock().get(outer) {
-            return Ok(cached.archive.clone());
+        // Serialize first opens too: parallel member reads share one parsed index.
+        let mut cache = self.cache.lock();
+        if let Some(archive) = cache.get(outer) {
+            return Ok(archive.clone());
         }
-        // Taken before reading, so a write in between counts as one.
-        let generation = if inner == outer { self.generation(outer) } else { 0 };
-        let stamp = vfs.stat(inner).ok().map(|e| (e.size, e.mtime));
-        // Large archives on disk are memory-mapped, so opening one reads only its
-        // index. Writing replaces the file by renaming a new one over it, which
-        // leaves the mapped old file intact on Unix. Windows cannot replace a mapped
-        // file, so there the archive is copied into memory.
-        let data = vfs.read(inner)?;
-        let data = if cfg!(windows) { Data::from_vec(data.to_vec()) } else { data };
         let label = format!("{}/{}", vfs.label(), inner);
-        let archive = Arc::new(ArchiveFs::open(data.clone(), format, label)?);
-        self.cache.lock().insert(outer.to_string(), Cached { archive: archive.clone(), generation, stamp, data });
+        let archive = Arc::new(match vfs.local_path(inner) {
+            Some(path) => ArchiveFs::open_file(&path, format, label)?,
+            None => ArchiveFs::open(vfs.read(inner)?, format, label)?,
+        });
+        cache.insert(outer.to_string(), archive.clone());
         Ok(archive)
     }
 
@@ -141,6 +95,15 @@ impl ArchiveMount {
 }
 
 impl Vfs for ArchiveMount {
+    fn read_operation(&self) -> Option<Arc<dyn Vfs>> {
+        Some(Arc::new(Self {
+            base: self.base.clone(),
+            expand: self.expand,
+            cache: self.cache.clone(),
+            types: Some(Mutex::new(HashMap::new())),
+        }))
+    }
+
     fn label(&self) -> String {
         self.base.label()
     }
@@ -181,6 +144,9 @@ impl Vfs for ArchiveMount {
         // is opened again on next use.
         let prefix = format!("{path}/");
         self.cache.lock().retain(|outer, _| !path.is_empty() && outer != path && !outer.starts_with(&prefix));
+        if let Some(types) = &self.types {
+            types.lock().clear();
+        }
         self.base.changed(path);
     }
 
@@ -195,21 +161,15 @@ impl Vfs for ArchiveMount {
         let _writing = WRITING.lock();
         let (mut direct, nested) = split_by_archive(&*self.base, changes);
         for (outer, inner) in nested {
-            self.revalidate(&outer);
+            // Always reopen the current container before a rewrite. Size/mtime can
+            // stay unchanged when another tab or program replaces it.
+            self.changed(&outer);
             let archive = self.open_archive(&*self.base, &outer, &outer, archive_format(&outer))?;
             let data = Data::from_vec(rewrite(&archive, inner, progress)?);
             direct.push(Change::Put { path: outer, kind: EntryKind::File, data, mtime: None });
         }
         let paths: Vec<String> = direct.iter().map(|c| c.path().to_string()).collect();
         let result = self.base.apply(direct, progress);
-        // Every file written counts, also when it failed halfway: an archive copied over
-        // another, or rewritten, is read again by the other sources that opened it.
-        {
-            let mut generations = GENERATIONS.lock();
-            for path in paths.iter().filter(|p| detect_format(split_parent(p).1).is_some()) {
-                *generations.entry(self.identity(path)).or_insert(0) += 1;
-            }
-        }
         for path in &paths {
             self.changed(path);
         }
