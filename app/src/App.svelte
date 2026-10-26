@@ -62,6 +62,13 @@
 
   let tabs = $state<Tab[]>([]);
   let active = $state(0);
+  let starting = $state(true);
+  let startupError = $state("");
+
+  function dismissStartup() {
+    starting = false;
+    if (!tabs.length) newTab();
+  }
   // The pages stay in the order they were opened, so reordering tabs never moves
   // (and resets) an open view.
   const pages = $derived([...tabs].sort((a, b) => a.key - b.key));
@@ -553,20 +560,37 @@
     getCurrentWindow().onCloseRequested(async (e) => {
       if (!(await confirmDiscard(tabs.filter((t) => (t.kind === "text" || t.kind === "merge") && t.dirty)))) e.preventDefault();
     });
-    const startup = await api.startupRequest().catch(() => null);
-    if (startup?.kind === "compare") {
-      await start({
-        left: startup.left,
-        right: startup.right,
-        mergeBase: startup.mergeBase,
-        options: { expandArchives: true, ignored: "mark" },
-      });
-    } else if (startup?.kind === "merge") {
-      openMerge({ kind: "startup" }, "Merge");
-    } else if (startup?.kind === "conflicts") {
-      openConflicts(startup.dir);
+    try {
+      const startup = await api.startupRequest();
+      if (!starting) return;
+      if (startup?.kind === "compare") {
+        const request: Request = {
+          left: startup.left, right: startup.right, mergeBase: startup.mergeBase,
+          options: { expandArchives: true, ignored: "mark" },
+        };
+        const session = await api.openSession(request.left, request.right, request.options, request.mergeBase);
+        // Dismissing cannot interrupt a filesystem call. Release the result when
+        // it arrives rather than reopening a comparison the user dismissed.
+        if (!starting) {
+          await api.closeSession(session.id);
+          return;
+        }
+        const tab = sessionTab(session, request);
+        tabs.push(tab);
+        if (!active) active = tab.key;
+        remember(request);
+      } else if (startup?.kind === "merge" || startup?.kind === "conflicts") {
+        const previous = active;
+        if (startup.kind === "merge") openMerge({ kind: "startup" }, "Merge");
+        else openConflicts(startup.dir);
+        if (previous) active = previous;
+      }
+    } catch (e) {
+      if (starting) startupError = String(e);
+    } finally {
+      if (!startupError) starting = false;
+      if (!starting && !tabs.length) newTab();
     }
-    if (!tabs.length) newTab();
   });
 </script>
 
@@ -608,6 +632,21 @@
     {/each}
     <button class="add" onclick={newTab} title="New comparison (Ctrl+T)">＋</button>
   </div>
+
+  {#if starting}
+    <aside class="startup" aria-label="Opening comparison">
+      <div>
+        {#if startupError}
+          <strong>Could not open the comparison</strong>
+          <p role="alert">{startupError}</p>
+        {:else}
+          <strong role="status">Opening comparison…</strong>
+          <p>You can open another tab while the sources load.</p>
+        {/if}
+      </div>
+      <button onclick={dismissStartup}>Dismiss</button>
+    </aside>
+  {/if}
 
   <main bind:this={mainEl}>
     {#each pages as tab (tab.key)}
@@ -742,6 +781,20 @@
     background: none;
     border: none;
     color: var(--dim);
+  }
+  .startup {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--line);
+    background: var(--panel);
+  }
+  .startup p {
+    margin: 4px 0 0;
+    color: var(--dim);
+    overflow-wrap: anywhere;
   }
   main {
     flex: 1;

@@ -62,7 +62,15 @@ pub enum StartupRequest {
     Conflicts { dir: String },
 }
 
-impl StartupRequest {
+/// Command-line intent only. Parsing this must never inspect files or repositories:
+/// it runs before the window exists; resolving it runs on a blocking worker.
+pub enum StartupArgs {
+    Compare { left: String, right: String, merge_base: bool },
+    Merge { args: crate::merge::MergeArgs },
+    Conflicts { dir: String },
+}
+
+impl StartupArgs {
     pub fn from_args(args: impl Iterator<Item = String>) -> Option<Self> {
         let mut merge_base = false;
         let mut merge = false;
@@ -82,20 +90,29 @@ impl StartupRequest {
             // Git passes $BASE empty when there is none (an add/add conflict).
             let [base, local, remote] = <[String; 3]>::try_from(paths).ok()?;
             let output = output.unwrap_or_else(|| local.clone());
-            return Some(StartupRequest::Merge { args: crate::merge::MergeArgs { base, local, remote, output } });
+            return Some(StartupArgs::Merge { args: crate::merge::MergeArgs { base, local, remote, output } });
         }
         match paths.as_slice() {
-            [left, right] => Some(StartupRequest::Compare {
-                left: SourceSpec::parse(left),
-                right: SourceSpec::parse(right),
+            [left, right] => Some(Self::Compare { left: left.clone(), right: right.clone(), merge_base }),
+            [dir] => Some(Self::Conflicts { dir: dir.clone() }),
+            _ => None,
+        }
+    }
+
+    fn resolve(self) -> Option<StartupRequest> {
+        match self {
+            Self::Compare { left, right, merge_base } => Some(StartupRequest::Compare {
+                left: SourceSpec::parse(&left),
+                right: SourceSpec::parse(&right),
                 merge_base,
             }),
-            [dir]
-                if std::path::Path::new(dir).is_dir()
-                    && parallax_core::conflicts::repo_conflicts(std::path::Path::new(dir))
+            Self::Merge { args } => Some(StartupRequest::Merge { args }),
+            Self::Conflicts { dir }
+                if std::path::Path::new(&dir).is_dir()
+                    && parallax_core::conflicts::repo_conflicts(std::path::Path::new(&dir))
                         .is_ok_and(|c| !c.files.is_empty()) =>
             {
-                Some(StartupRequest::Conflicts { dir: dir.clone() })
+                Some(StartupRequest::Conflicts { dir })
             }
             _ => None,
         }
@@ -164,7 +181,7 @@ impl FileDiff {
 }
 
 pub struct AppState {
-    startup: Mutex<Option<StartupRequest>>,
+    startup: Mutex<Option<StartupArgs>>,
     sessions: Mutex<HashMap<u64, Arc<Session>>>,
     diffs: Mutex<HashMap<u64, Arc<Mutex<FileDiff>>>>,
     pub(crate) merges: Mutex<HashMap<u64, Arc<Mutex<crate::merge::MergeTab>>>>,
@@ -177,9 +194,9 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(startup: Option<StartupRequest>) -> Self {
+    pub fn new(startup: Option<StartupArgs>) -> Self {
         let merge = match &startup {
-            Some(StartupRequest::Merge { args }) => Some(args.clone()),
+            Some(StartupArgs::Merge { args }) => Some(args.clone()),
             _ => None,
         };
         AppState {
@@ -215,8 +232,9 @@ pub(crate) async fn blocking<T: Send + 'static>(f: impl FnOnce() -> CmdResult<T>
 }
 
 #[tauri::command]
-pub fn startup_request(state: State<'_, AppState>) -> Option<StartupRequest> {
-    state.startup.lock().take()
+pub async fn startup_request(state: State<'_, AppState>) -> CmdResult<Option<StartupRequest>> {
+    let args = state.startup.lock().take();
+    blocking(move || Ok(args.and_then(StartupArgs::resolve))).await
 }
 
 /// Reads a path typed into a path bar: `repo@rev:sub` is a Git revision. A web
@@ -1647,6 +1665,64 @@ pub struct PathsChanged {
     /// The file comparison whose save this was.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin: Option<u64>,
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> Option<StartupArgs> {
+        StartupArgs::from_args(values.iter().map(|v| v.to_string()))
+    }
+
+    #[test]
+    fn startup_keeps_source_text_unresolved_until_requested() {
+        let parsed = args(&["--merge-base", "repo@main:src", "archive.zip!/nested"]).unwrap();
+        let StartupArgs::Compare { left, right, merge_base } = parsed else { panic!("comparison intent") };
+        assert_eq!(left, "repo@main:src");
+        assert_eq!(right, "archive.zip!/nested");
+        assert!(merge_base);
+        // Even a missing single path remains uninspected during argument parsing.
+        let missing = std::env::temp_dir().join(format!("parallax-missing-startup-{}", std::process::id()));
+        let StartupArgs::Conflicts { dir } = args(&[missing.to_str().unwrap()]).unwrap() else {
+            panic!("deferred repository inspection")
+        };
+        assert_eq!(dir, missing.to_string_lossy());
+        assert!(StartupArgs::Conflicts { dir }.resolve().is_none());
+    }
+
+    #[test]
+    fn deferred_comparison_retains_the_frontend_contract() {
+        let request = args(&["left.txt", "right.txt"]).unwrap().resolve().unwrap();
+        assert_eq!(
+            serde_json::to_value(request).unwrap(),
+            serde_json::json!({
+                "kind":"compare", "left":{"type":"local","path":"left.txt"},
+                "right":{"type":"local","path":"right.txt"}, "mergeBase":false
+            })
+        );
+        assert!(args(&[]).is_none());
+        assert!(args(&["a", "b", "c"]).is_none());
+        assert!(args(&["--merge", "a", "b"]).is_none());
+    }
+
+    #[test]
+    fn merge_startup_keeps_unsaved_exit_status_and_empty_base() {
+        let state = AppState::new(args(&["--merge", "", "local", "remote", "--output", "result"]));
+        assert_eq!(state.exit_code(), 1, "closing before saving must fail git mergetool");
+        let merge = state.startup_merge.lock().clone().unwrap();
+        assert_eq!(
+            (merge.base.as_str(), merge.local.as_str(), merge.remote.as_str(), merge.output.as_str()),
+            ("", "local", "remote", "result")
+        );
+        let request = state.startup.lock().take().unwrap().resolve().unwrap();
+        assert_eq!(serde_json::to_value(request).unwrap(), serde_json::json!({"kind":"merge"}));
+        let StartupArgs::Merge { args: merge } = args(&["--merge", "base", "local", "remote"]).unwrap() else {
+            panic!("merge intent")
+        };
+        assert_eq!(merge.output, "local");
+        assert_eq!(AppState::new(None).exit_code(), 0);
+    }
 }
 
 #[cfg(test)]

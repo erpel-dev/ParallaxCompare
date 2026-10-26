@@ -172,6 +172,8 @@ parallax-compare dist/ release-1.4.7z
 parallax-compare old.txt new.txt
 ```
 
+When launched with sources, the window shows **Opening comparison…** while they are checked and opened. You can open another tab or **Dismiss** the request; a dismissed comparison stays closed when a slow operation finishes. Startup access errors remain visible until dismissed.
+
 As a Git difftool:
 
 ```sh
