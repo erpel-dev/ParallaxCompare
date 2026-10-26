@@ -1526,3 +1526,50 @@ fn two_sources_writing_one_archive_keep_both_edits() {
     let read = |p: &str| String::from_utf8(fresh.vfs.read(&fresh.path(p)).unwrap().to_vec()).unwrap();
     assert_eq!((read("a.txt").as_str(), read("b.txt").as_str()), ("FIRST EDIT", "SECOND EDIT"));
 }
+
+/// An archive replaced as a whole, by another source or another program, is read
+/// again before an entry is saved into it, also when the new archive has the same
+/// size and modification time: saving one entry keeps the others as they are now.
+#[test]
+fn entries_saved_into_a_replaced_archive_keep_the_new_contents() {
+    use parallax_core::vfs::{Change, Data};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("target.zip");
+    let old = zip_bytes(&[("a.txt", "OLD A"), ("b.txt", "OLD B")]);
+    let new = zip_bytes(&[("a.txt", "NEW A"), ("b.txt", "NEW B")]);
+    assert_eq!(old.len(), new.len());
+    let open =
+        |p: &std::path::Path| SourceSpec::parse(&p.display().to_string()).open(SourceOptions::default()).unwrap();
+    let read = |p: &str| {
+        let fresh = open(&path);
+        String::from_utf8(fresh.vfs.read(&fresh.path(p)).unwrap().to_vec()).unwrap()
+    };
+    let put = |s: &Source, p: &str, data: &[u8]| {
+        let change =
+            Change::Put { path: s.path(p), kind: EntryKind::File, data: Data::from_vec(data.into()), mtime: None };
+        s.vfs.apply(vec![change], &Progress::default()).unwrap();
+    };
+    let mtime = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    let set_mtime = || fs::File::options().write(true).open(&path).unwrap().set_modified(mtime).unwrap();
+
+    // Replaced through the folder holding it, as a folder comparison copies it.
+    fs::write(&path, &old).unwrap();
+    set_mtime();
+    let entry = open(&path);
+    entry.vfs.read(&entry.path("a.txt")).unwrap();
+    let folder = open(dir.path());
+    put(&folder, "target.zip", &new);
+    set_mtime();
+    put(&entry, "a.txt", b"MY A");
+    assert_eq!((read("a.txt").as_str(), read("b.txt").as_str()), ("MY A", "NEW B"));
+
+    // Replaced by another program, with the same size and modification time.
+    fs::write(&path, &old).unwrap();
+    set_mtime();
+    let entry = open(&path);
+    entry.vfs.read(&entry.path("a.txt")).unwrap();
+    fs::write(&path, &new).unwrap();
+    set_mtime();
+    put(&entry, "a.txt", b"MY A");
+    assert_eq!((read("a.txt").as_str(), read("b.txt").as_str()), ("MY A", "NEW B"));
+}

@@ -188,6 +188,9 @@ fn scalar(value: String, style: TScalarStyle, tag: Option<&Tag>) -> Scalar {
     }
 }
 
+/// The tag of a merge key: a `<<` key written plain, or tagged `!!merge`.
+const MERGE: &str = "!!merge";
+
 /// The text a key sorts by: strings as they are, other scalars as written.
 fn key_text(key: &Node) -> String {
     match key {
@@ -252,11 +255,13 @@ fn finish_map(entries: Vec<(Node, Node)>, warnings: &mut Vec<String>) -> Vec<(No
     // keys the same: the integer 1 and the string "1" are different keys.
     let mut all: Vec<(String, String, u8, usize, Node, Node)> = Vec::with_capacity(entries.len());
     for (i, (k, v)) in entries.into_iter().enumerate() {
-        if k == Node::Scalar(Scalar::Str("<<".into())) {
+        if matches!(&k, Node::Scalar(Scalar::Tagged(t, _)) if t == MERGE) {
             let sources = match v {
                 Node::Map(..) => vec![v],
                 Node::Seq(items, _) if items.iter().all(|n| matches!(n, Node::Map(..))) => items,
                 other => {
+                    // Nothing to merge: an ordinary key named `<<`.
+                    let k = Node::Scalar(Scalar::Str("<<".into()));
                     all.push(("<<".into(), key_identity(&k, "<<"), 1, i, k, other));
                     continue;
                 }
@@ -331,6 +336,12 @@ fn parse_yaml(text: &str) -> Result<Yaml> {
                 }
                 _ => return Err(bad("unbalanced mapping".into())),
             },
+            // Only a plain `<<` key is a merge key; a quoted or `!!str` one is an ordinary key.
+            Event::Scalar(value, TScalarStyle::Plain, anchor, None)
+                if value == "<<" && matches!(stack.last(), Some(Frame::Map { key: None, .. })) =>
+            {
+                (Node::Scalar(Scalar::Tagged(MERGE.to_string(), value)), anchor)
+            }
             Event::Scalar(value, style, anchor, tag) => (Node::Scalar(scalar(value, style, tag.as_ref())), anchor),
             Event::Alias(id) => {
                 let node = anchors.get(&id).ok_or_else(|| bad(format!("unknown alias at line {}", mark.line())))?;
@@ -655,6 +666,21 @@ mod tests {
         assert_eq!(same_yaml(b"null: a\n\"null\": b\n", b"null: x\n\"null\": b\n"), Some(false));
         // The same key twice is still one key, the last one.
         assert_eq!(normalized_yaml(b"1: a\n1: b\n").unwrap(), "# ! duplicate key 1, the last one is used\n1: b\n");
+    }
+
+    /// Only a plain `<<` key merges; a quoted or `!!str` one is an ordinary key.
+    #[test]
+    fn quoted_merge_keys_are_ordinary_keys() {
+        assert_eq!(same_yaml(b"\"<<\": {x: 1}\n", b"x: 1\n"), Some(false));
+        assert_eq!(same_yaml(b"'<<': {x: 1}\n", b"x: 1\n"), Some(false));
+        assert_eq!(same_yaml(b"!!str <<: {x: 1}\n", b"x: 1\n"), Some(false));
+        assert_eq!(normalized_yaml(b"\"<<\": {x: 1}\n").unwrap(), "\"<<\":\n  x: 1\n");
+        assert_eq!(same_yaml(b"<<: {x: 1}\n", b"x: 1\n"), Some(true));
+        assert_eq!(same_yaml(b"b: &b {x: 1}\nc:\n  <<: [*b]\n", b"b: {x: 1}\nc: {x: 1}\n"), Some(true));
+        assert_eq!(same_yaml(b"!!merge <<: {x: 1}\n", b"x: 1\n"), Some(true));
+        // `<<` as a value, or with nothing to merge, is text.
+        assert_eq!(normalized_yaml(b"v: <<\n").unwrap(), normalized_yaml(b"v: \"<<\"\n").unwrap());
+        assert_eq!(same_yaml(b"<<: 1\n", b"\"<<\": 1\n"), Some(true));
     }
 
     /// An explicit core tag decides the type.

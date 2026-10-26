@@ -17,7 +17,7 @@ pub struct LocalFs {
     root: PathBuf,
     /// When set, the tree was walked once up front with `.gitignore` rules applied.
     /// Copies and deletes update it through [`Vfs::changed`].
-    snapshot: Option<RwLock<HashMap<String, Vec<Entry>>>>,
+    snapshot: Option<RwLock<Snapshot>>,
     /// Files Git tracks, shown even where ignore rules match, for walking again.
     tracked: Vec<String>,
 }
@@ -34,8 +34,8 @@ impl LocalFs {
     /// they are shown even when an ignore rule matches them.
     pub fn with_gitignore(root: impl Into<PathBuf>, tracked: &[String]) -> Result<Self> {
         let root = root.into();
-        let dirs = snapshot_of(&root, tracked);
-        Ok(LocalFs { root, snapshot: Some(RwLock::new(dirs)), tracked: tracked.to_vec() })
+        let snapshot = snapshot_of(&root, tracked);
+        Ok(LocalFs { root, snapshot: Some(RwLock::new(snapshot)), tracked: tracked.to_vec() })
     }
 
     pub fn root(&self) -> &Path {
@@ -59,18 +59,55 @@ impl LocalFs {
     }
 }
 
-fn snapshot_of(root: &Path, tracked: &[String]) -> HashMap<String, Vec<Entry>> {
-    let mut dirs: HashMap<String, Vec<Entry>> = HashMap::new();
-    dirs.insert(String::new(), Vec::new());
-    insert_walked(&mut dirs, walk(root, root, None));
-    add_tracked(root, &mut dirs, tracked);
-    dirs
+/// The tree as walked up front: the entries of each folder, and the folders that
+/// could not be read, which list as errors instead of as empty folders.
+#[derive(Default)]
+struct Snapshot {
+    dirs: HashMap<String, Vec<Entry>>,
+    unreadable: HashMap<String, (std::io::ErrorKind, String)>,
+}
+
+impl Snapshot {
+    fn insert(&mut self, walked: Walked) {
+        insert_walked(&mut self.dirs, walked.entries);
+        for (rel, kind, message) in walked.errors {
+            // Only folders: other errors, such as a broken ignore file, leave the listing complete.
+            if rel.is_empty() || self.dirs.contains_key(&rel) {
+                self.unreadable.insert(rel, (kind, message));
+            }
+        }
+    }
+}
+
+fn snapshot_of(root: &Path, tracked: &[String]) -> Snapshot {
+    let mut snapshot = Snapshot::default();
+    snapshot.dirs.insert(String::new(), Vec::new());
+    snapshot.insert(walk(root, root, None));
+    add_tracked(root, &mut snapshot.dirs, tracked);
+    snapshot
+}
+
+/// What a walk found: entries with their paths relative to the root, and the
+/// paths that could not be read, with their error.
+#[derive(Default)]
+struct Walked {
+    entries: Vec<(String, Entry)>,
+    errors: Vec<(String, std::io::ErrorKind, String)>,
+}
+
+/// The path an error of the walk is about, if it names one.
+fn error_path(err: &ignore::Error) -> Option<&Path> {
+    match err {
+        ignore::Error::WithPath { path, .. } => Some(path),
+        ignore::Error::WithDepth { err, .. } | ignore::Error::WithLineNumber { err, .. } => error_path(err),
+        _ => None,
+    }
 }
 
 /// Walks the tree below `start` (a folder inside `root`) in parallel with ignore
 /// rules applied, returning each entry with its path relative to `root`.
-fn walk(root: &Path, start: &Path, max_depth: Option<usize>) -> Vec<(String, Entry)> {
-    let found = Mutex::new(Vec::new());
+fn walk(root: &Path, start: &Path, max_depth: Option<usize>) -> Walked {
+    let found = Mutex::new(Walked::default());
     let walker = ignore::WalkBuilder::new(start)
         .hidden(false)
         .git_global(false)
@@ -81,8 +118,17 @@ fn walk(root: &Path, start: &Path, max_depth: Option<usize>) -> Vec<(String, Ent
     walker.run(|| {
         let found = &found;
         Box::new(move |result| {
-            let Ok(dent) = result else {
-                return ignore::WalkState::Continue;
+            let dent = match result {
+                Ok(dent) => dent,
+                Err(err) => {
+                    // A folder that cannot be read must not look empty (and so equal).
+                    if let (Some(io), Some(rel)) =
+                        (err.io_error(), error_path(&err).and_then(|p| p.strip_prefix(root).ok()))
+                    {
+                        found.lock().errors.push((path_to_rel(rel), io.kind(), io.to_string()));
+                    }
+                    return ignore::WalkState::Continue;
+                }
             };
             if dent.depth() == 0 {
                 return ignore::WalkState::Continue;
@@ -91,7 +137,7 @@ fn walk(root: &Path, start: &Path, max_depth: Option<usize>) -> Vec<(String, Ent
                 return ignore::WalkState::Continue;
             };
             if let Some(entry) = entry_from_path(dent.path(), dent.file_name().to_string_lossy().into_owned()) {
-                found.lock().push((path_to_rel(rel), entry));
+                found.lock().entries.push((path_to_rel(rel), entry));
             }
             ignore::WalkState::Continue
         })
@@ -196,7 +242,12 @@ impl Vfs for LocalFs {
 
     fn list(&self, dir: &str) -> Result<Vec<Entry>> {
         if let Some(snapshot) = &self.snapshot {
-            return snapshot.read().get(dir).cloned().ok_or_else(|| Error::NotFound(dir.to_string()));
+            let snapshot = snapshot.read();
+            if let Some((kind, message)) = snapshot.unreadable.get(dir) {
+                let abs = self.abs_checked(dir)?;
+                return Err(Error::io(abs.display().to_string(), std::io::Error::new(*kind, message.clone())));
+            }
+            return snapshot.dirs.get(dir).cloned().ok_or_else(|| Error::NotFound(dir.to_string()));
         }
         let abs = self.abs_checked(dir)?;
         let rd = fs::read_dir(&abs).map_err(|e| Error::io(abs.display().to_string(), e))?;
@@ -216,7 +267,7 @@ impl Vfs for LocalFs {
             return Ok(root_entry());
         }
         if let Some(snapshot) = &self.snapshot {
-            return find_entry(&snapshot.read(), path);
+            return find_entry(&snapshot.read().dirs, path);
         }
         let (_, name) = split_parent(path);
         let abs = self.abs_checked(path)?;
@@ -291,19 +342,18 @@ impl Vfs for LocalFs {
             return;
         };
         if path.is_empty() {
-            let dirs = snapshot_of(&self.root, &self.tracked);
-            *snapshot.write() = dirs;
+            *snapshot.write() = snapshot_of(&self.root, &self.tracked);
             return;
         }
         let (parent, name) = split_parent(path);
         let was_listed = {
-            let dirs = snapshot.read();
-            if !dirs.contains_key(parent) {
+            let snapshot = snapshot.read();
+            if !snapshot.dirs.contains_key(parent) {
                 // The parent folder was created as well.
-                drop(dirs);
+                drop(snapshot);
                 return self.changed(parent);
             }
-            dirs[parent].iter().any(|e| e.name == name)
+            snapshot.dirs[parent].iter().any(|e| e.name == name)
         };
         let (Some(parent_abs), Some(path_abs)) = (self.abs(parent), self.abs(path)) else {
             return;
@@ -311,23 +361,25 @@ impl Vfs for LocalFs {
         // Listing the parent tells whether ignore rules hide `path`. An entry that was
         // already shown stays (Git-tracked files are shown even when ignored).
         let entry = walk(&self.root, &parent_abs, Some(1))
+            .entries
             .into_iter()
             .find(|(rel, _)| rel == path)
             .map(|(_, e)| e)
             .or_else(|| was_listed.then(|| entry_from_path(&path_abs, name.to_string())).flatten());
         let below = match &entry {
             Some(e) if e.kind == EntryKind::Dir => walk(&self.root, &path_abs, None),
-            _ => Vec::new(),
+            _ => Walked::default(),
         };
 
-        let mut dirs = snapshot.write();
+        let mut snapshot = snapshot.write();
         let prefix = format!("{path}/");
-        dirs.retain(|dir, _| dir != path && !dir.starts_with(&prefix));
-        let siblings = dirs.entry(parent.to_string()).or_default();
+        snapshot.dirs.retain(|dir, _| dir != path && !dir.starts_with(&prefix));
+        snapshot.unreadable.retain(|dir, _| dir != path && !dir.starts_with(&prefix));
+        let siblings = snapshot.dirs.entry(parent.to_string()).or_default();
         siblings.retain(|e| e.name != name);
         if let Some(entry) = entry {
-            insert_walked(&mut dirs, vec![(path.to_string(), entry)]);
-            insert_walked(&mut dirs, below);
+            insert_walked(&mut snapshot.dirs, vec![(path.to_string(), entry)]);
+            snapshot.insert(below);
         }
     }
 }
@@ -482,6 +534,36 @@ mod tests {
         assert_eq!(fs::read(dir.path().join("outside.txt")).unwrap(), b"out");
         write("sub/new.txt").unwrap();
         assert_eq!(fs::read(root.join("sub/new.txt")).unwrap(), b"written");
+    }
+
+    /// A folder the walk cannot read lists as an error, not as an empty folder that
+    /// would compare equal to anything empty.
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_folders_are_errors_in_the_snapshot() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        assert!(std::process::Command::new("git").arg("init").arg("-q").arg(root).status().unwrap().success());
+        fs::create_dir(root.join("restricted")).unwrap();
+        fs::write(root.join("restricted/secret.txt"), b"secret").unwrap();
+        fs::write(root.join("visible.txt"), b"visible").unwrap();
+        fs::set_permissions(root.join("restricted"), fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = fs::read_dir(root.join("restricted")).is_ok();
+        let tracked = ["restricted/secret.txt".to_string(), "visible.txt".to_string()];
+        let vfs = LocalFs::with_gitignore(root, &tracked).unwrap();
+        let listed = vfs.list("restricted");
+        fs::set_permissions(root.join("restricted"), fs::Permissions::from_mode(0o755)).unwrap();
+        // Root reads every folder: there is nothing to test then.
+        if readable {
+            return;
+        }
+        assert!(matches!(listed, Err(Error::Io { .. })), "{listed:?}");
+        assert_eq!(vfs.stat("restricted").unwrap().kind, EntryKind::Dir);
+        assert!(vfs.list("").unwrap().iter().any(|e| e.name == "visible.txt"));
+        // Once readable again, a refresh lists it.
+        vfs.changed("restricted");
+        assert_eq!(vfs.list("restricted").unwrap().len(), 1);
     }
 
     #[cfg(unix)]

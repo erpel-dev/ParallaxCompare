@@ -306,7 +306,8 @@
     <span class="path mono"><span dir="ltr">{info.display}{suffix ? ` › ${suffix}` : ""}</span></span>
   {/if}
   {#if info.rev}
-    <span class="ref mono">⎇ {info.rev}{info.commit && info.commit !== info.rev ? ` · ${info.commit}` : ""}</span>
+    {@const commit = info.commit && info.commit !== info.rev ? info.commit : ""}
+    <span class="ref mono" title="{info.rev}{commit ? ` · ${commit}` : ''}"><span class="refname">⎇ {info.rev}</span>{#if commit}<span class="refcommit"> · {commit}</span>{/if}</span>
   {/if}
   {#if modified}
     <span class="mod" title="Unsaved changes">● modified</span>
@@ -424,7 +425,7 @@
   }
   .path {
     flex: 1;
-    min-width: 0;
+    min-width: 6em;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -552,11 +553,25 @@
     padding: 0 6px;
     line-height: 18px;
   }
+  /* A long branch name is cut, so the path next to it stays readable. */
   .ref {
+    display: flex;
+    flex: 0 1 auto;
+    min-width: 3em;
+    max-width: 45%;
     color: #e6a974;
     white-space: nowrap;
   }
+  .refname {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .refcommit {
+    flex: none;
+    white-space: pre;
+  }
   .ro {
+    white-space: nowrap;
     color: var(--dim);
     font-size: 11px;
   }

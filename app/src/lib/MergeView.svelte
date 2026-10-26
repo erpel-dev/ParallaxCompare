@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount, tick } from "svelte";
+  import { onDestroy, onMount, tick, untrack } from "svelte";
   import { ask } from "@tauri-apps/plugin-dialog";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { api, END, type Choice, type InputRowView, type LineView, type MergeInfo, type MergeRequest, type ResultRowView } from "./api";
@@ -136,27 +136,36 @@
   /** How far local, base, remote and the result are scrolled sideways, in pixels. */
   let hx = $state([0, 0, 0, 0]);
   let hbars = $state<(HTMLDivElement | undefined)[]>([undefined, undefined, undefined, undefined]);
-  const TAB = 8;
+  /**
+   * How wide each column's scroll range is, in pixels: the widest line in view as
+   * drawn, measured rather than counted in characters, since tabs, wide characters
+   * and fallback fonts make lines wider or narrower than their length.
+   */
+  let widest = $state([0, 0, 0, 0]);
 
-  /** The width of a line in characters, as shown. */
-  function chars(line: LineView | null | undefined): number {
-    if (!line) return 0;
-    let n = line.t.length + (line.o ? 1 : 0) + (line.x ? 1 : 0);
-    for (const c of line.t) if (c === "\t") n += TAB - 1;
-    return n;
+  function measureWidths() {
+    const w = [0, 0, 0, 0];
+    const range = document.createRange();
+    const take = (code: Element | null, k: number) => {
+      const cell = code?.parentElement;
+      if (!code || !cell) return;
+      range.selectNodeContents(code);
+      // From the cell's left edge (past the line number) to the end of the text, and a little room.
+      const start = code.getBoundingClientRect().left - cell.getBoundingClientRect().left;
+      w[k] = Math.max(w[k], Math.ceil(start + range.getBoundingClientRect().width + 16));
+    };
+    for (const row of topEl?.querySelectorAll(".irow") ?? []) {
+      row.querySelectorAll(":scope > .cell").forEach((cell, k) => take(cell.querySelector(":scope > .code"), k));
+    }
+    for (const code of resultEl?.querySelectorAll(".rrow > .code") ?? []) take(code, 3);
+    if (w.some((x, k) => x !== widest[k])) widest = w;
   }
 
-  /** The widest line in view of each column, in characters. */
-  const widest = $derived.by(() => {
-    const w = [0, 0, 0, 0];
-    for (const row of topRows[1]) {
-      if (!row) continue;
-      w[0] = Math.max(w[0], chars(row.l));
-      w[1] = Math.max(w[1], chars(row.b));
-      w[2] = Math.max(w[2], chars(row.r));
-    }
-    for (const row of resultRows[1]) if (row?.l) w[3] = Math.max(w[3], chars(row.l));
-    return w;
+  // Measured again whenever other rows are drawn.
+  $effect(() => {
+    void topRows;
+    void resultRows;
+    tick().then(measureWidths);
   });
 
   /** A sideways wheel (or Shift+wheel) scrolls that column; returns whether it did. */
@@ -189,6 +198,7 @@
     if (!info || editing) return;
     editing = { line: 0 };
     draft = original = "";
+    caret = [0, 0];
     await tick();
     input?.focus();
   }
@@ -313,6 +323,7 @@
     const text = row.l.x || row.l.o ? (await api.mergeResultText(info.id, row.l.n, row.l.n + 1)).replace(/\r?\n$|\r$/, "") : lineText(row.l);
     editing = { line: row.l.n };
     draft = original = text;
+    caret = [col ?? text.length, col ?? text.length];
     current = row.k === "conflict" ? row.i : current;
     await tick();
     input?.focus();
@@ -350,6 +361,7 @@
       change(() => api.mergeEdit(id, { line, col: 0 }, { line, col: END }, head + "\n" + tail));
       editing = { line: line + 1 };
       draft = original = tail;
+      caret = [0, 0];
       await tick();
       input?.focus();
       input?.setSelectionRange(0, 0);
@@ -403,6 +415,92 @@
     const id = info.id;
     editing = null;
     change(() => api.mergeEdit(id, { line, col: 0 }, { line, col: END }, merged));
+  }
+
+  // ---- whole input lines ----
+
+  /** A long input line shown whole, read-only: the panes show at most 10,000 characters of it. */
+  let inspected = $state<{ title: string; text: string } | null>(null);
+
+  async function inspect(column: number, line: number) {
+    if (!info) return;
+    try {
+      const text = (await api.mergeInputLine(info.id, column, line)).replace(/\r?\n$|\r$/, "");
+      const side = ["Local", "Base", "Remote"][column];
+      inspected = { title: `${side}, line ${line + 1} · ${text.length.toLocaleString()} characters`, text };
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function copyInspected() {
+    if (!inspected) return;
+    try {
+      await navigator.clipboard.writeText(inspected.text);
+      notify("Copied the line.", "info");
+    } catch (e) {
+      notify(String(e));
+    }
+  }
+
+  // ---- typing on while the editor is drawn again ----
+  // An edit reloads the result's rows, which draws the line editor anew. The new
+  // editor takes the focus and the caret of the old one, and keys typed while
+  // there is none are held and typed into it.
+
+  /** Where the caret is in the line being edited, kept while the editor is drawn again. */
+  let caret: [number, number] = [0, 0];
+  let held: { key: string; shift: boolean }[] = [];
+
+  function attachEditor(el: HTMLInputElement) {
+    // Runs once per editor drawn, not again when the state it reads changes.
+    const line = untrack(() => {
+      el.focus();
+      const [a, b] = [Math.min(caret[0], el.value.length), Math.min(caret[1], el.value.length)];
+      el.setSelectionRange(a, b);
+      replayHeld(el);
+      return editing?.line;
+    });
+    return () => {
+      // Only when the same line is drawn again; a move to another line sets its own caret.
+      if (editing?.line === line) caret = [el.selectionStart ?? 0, el.selectionEnd ?? 0];
+    };
+  }
+
+  /** Holds a key that reached no element while a line is being edited; true when it did. */
+  function holdEditorKey(e: KeyboardEvent): boolean {
+    if (!editing || input?.isConnected || e.ctrlKey || e.metaKey || e.altKey) return false;
+    if (e.key.length !== 1 && !["Enter", "Backspace", "Delete", "Tab", "Escape"].includes(e.key)) return false;
+    held.push({ key: e.key, shift: e.shiftKey });
+    e.preventDefault();
+    return true;
+  }
+
+  /** Types the held keys; stops at one that edits the result, until the editor is back. */
+  function replayHeld(el: HTMLInputElement) {
+    while (held.length && editing && el.isConnected) {
+      const { key, shift } = held.shift()!;
+      const [a, b] = [el.selectionStart ?? 0, el.selectionEnd ?? 0];
+      const put = (text: string, from: number, to: number, at: number) => {
+        draft = draft.slice(0, from) + text + draft.slice(to);
+        el.value = draft;
+        el.setSelectionRange(at, at);
+      };
+      if (key.length === 1) {
+        put(key, a, b, a + 1);
+        continue;
+      }
+      const e = new KeyboardEvent("keydown", { key, shiftKey: shift, cancelable: true });
+      editKey(e);
+      if (key === "Tab" || e.defaultPrevented === false) {
+        // What the input itself does with the key.
+        if (key === "Backspace" && (a > 0 || b > a)) put("", b > a ? a : a - 1, b, b > a ? a : a - 1);
+        else if (key === "Delete" && (b > a || a < draft.length)) put("", a, b > a ? b : a + 1, a);
+        continue;
+      }
+      // Enter and joining lines change the result: the rest waits for the new editor.
+      break;
+    }
   }
 
   /** The row showing result line `line`, if loaded. */
@@ -617,14 +715,30 @@
     bind:value={draft}
     onkeydown={editKey}
     onpaste={onPaste}
-    onblur={() => commit()}
+    onblur={(e) => e.currentTarget.isConnected && commit()}
     spellcheck="false"
     aria-label="Edit line {n + 1}"
+    {@attach attachEditor}
   />
 {/snippet}
 
+{#if inspected}
+  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+  <div class="inspect-back" onclick={() => (inspected = null)}>
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+    <div class="inspect" role="dialog" aria-label={inspected.title} tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.key === "Escape" && (inspected = null)} {@attach (el) => el.focus()}>
+      <div class="inspect-head">
+        <span>{inspected.title}</span>
+        <button onclick={copyInspected}>Copy</button>
+        <button onclick={() => (inspected = null)}>Close</button>
+      </div>
+      <textarea readonly spellcheck="false" value={inspected.text}></textarea>
+    </div>
+  </div>
+{/if}
+
 <!-- Keys that reach no element (after the button that had focus went away) still count while this tab shows. -->
-<svelte:window onkeydown={(e) => e.target === document.body && root?.offsetParent && onKey(e)} />
+<svelte:window onkeydown={(e) => e.target === document.body && root?.offsetParent && (holdEditorKey(e) || onKey(e))} />
 
 <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
 <div class="merge" bind:this={root} tabindex="0" onkeydown={onKey} role="application" aria-label="Merge">
@@ -760,7 +874,7 @@
                 {#each [["l", row.l, 0], ["b", row.b, 1], ["r", row.r, 2]] as const as [side, line, column] (side)}
                   <div class="cell {line ? inputTint(row, side) : 'fill'}">
                     {#if line}
-                      <span class="no">{line.n + 1}</span><span class="code" style:text-indent="{-hx[column]}px">{#if line.o}<span class="cut">…</span>{/if}{#each segments(line) as seg, si (si)}<span class:mark={seg.mark} style:color={seg.color}>{seg.text}</span>{/each}{#if line.x}<span class="cut">…</span>{/if}</span>
+                      <span class="no">{line.n + 1}</span><span class="code" style:text-indent="{-hx[column]}px">{#if line.o}<button class="cut more" onclick={() => inspect(column, line.n)} title="{line.o.toLocaleString()} characters left out before this; click to see the whole line">…</button>{/if}{#each segments(line) as seg, si (si)}<span class:mark={seg.mark} style:color={seg.color}>{seg.text}</span>{/each}{#if line.x}<button class="cut more" onclick={() => inspect(column, line.n)} title="{line.x.toLocaleString()} more characters; click to see the whole line">…</button>{/if}</span>
                     {/if}
                   </div>
                 {/each}
@@ -776,7 +890,7 @@
     <div class="hbars three">
       {#each [0, 1, 2] as k (k)}
         <div class="hbar" bind:this={hbars[k]} onscroll={(e) => (hx[k] = e.currentTarget.scrollLeft)}>
-          <div style:width="calc(62px + {widest[k]}ch)"></div>
+          <div style:width="{widest[k]}px"></div>
         </div>
       {/each}
     </div>
@@ -860,7 +974,7 @@
 
     <div class="hbars">
       <div class="hbar" bind:this={hbars[3]} onscroll={(e) => (hx[3] = e.currentTarget.scrollLeft)}>
-        <div style:width="calc(62px + {widest[3]}ch)"></div>
+        <div style:width="{widest[3]}px"></div>
       </div>
     </div>
 
@@ -1112,6 +1226,54 @@
   .rrow.empty .hint {
     color: var(--faint);
     font-style: italic;
+  }
+  .inspect-back {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    display: grid;
+    place-items: center;
+    background: rgb(0 0 0 / 0.35);
+  }
+  .inspect {
+    display: flex;
+    flex-direction: column;
+    width: min(900px, 90vw);
+    height: min(600px, 80vh);
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    box-shadow: 0 8px 30px rgb(0 0 0 / 0.3);
+  }
+  .inspect-head {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--line);
+  }
+  .inspect-head span {
+    flex: 1;
+  }
+  .inspect textarea {
+    flex: 1;
+    margin: 0;
+    padding: 8px 10px;
+    border: 0;
+    resize: none;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    background: transparent;
+    color: inherit;
+    word-break: break-all;
+  }
+  button.cut.more {
+    border: 0;
+    padding: 0 2px;
+    background: none;
+    font: inherit;
+    cursor: pointer;
+    text-decoration: underline dotted;
   }
   .cut {
     color: var(--faint);

@@ -56,6 +56,7 @@ fn main() {
             merge::merge_resolve,
             merge::merge_edit,
             merge::merge_result_text,
+            merge::merge_input_line,
             merge::merge_undo,
             merge::merge_use_git_result,
             merge::syntax_engine,

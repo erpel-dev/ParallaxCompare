@@ -256,8 +256,9 @@ pub async fn open_merge(state: State<'_, AppState>, request: MergeRequest) -> Cm
             let state = conflicts::repo_conflicts(Path::new(&workdir)).map_err(err)?;
             let file =
                 state.files.iter().find(|f| f.path == path).ok_or_else(|| format!("{path} is not conflicted"))?;
-            let read = |i: usize| match &file.stages[i] {
-                Some(stage) => conflicts::stage_content(&state.workdir, stage).map_err(err),
+            let mut stages = conflicts::StageReader::new(&state.workdir);
+            let mut read = |i: usize| match &file.stages[i] {
+                Some(stage) => stages.read(stage).map_err(err),
                 None => Ok(Vec::new()),
             };
             if file.stages[1].is_none() || file.stages[2].is_none() {
@@ -483,6 +484,23 @@ pub async fn merge_result_text(state: State<'_, AppState>, id: u64, start: u32, 
     Ok(doc.text[a..b].to_string())
 }
 
+/// One whole line of local (0), base (1) or remote (2), which the inputs pane may show cut.
+#[tauri::command]
+pub async fn merge_input_line(state: State<'_, AppState>, id: u64, column: u8, line: u32) -> CmdResult<String> {
+    let tab = merge(&state, id)?;
+    let tab = tab.lock();
+    let doc = match column {
+        0 => &tab.session.local,
+        1 => &tab.session.base,
+        2 => &tab.session.remote,
+        _ => return Err(format!("no input column {column}")),
+    };
+    if line as usize >= doc.len() {
+        return Err(format!("no line {}", line + 1));
+    }
+    Ok(doc.line(line as usize).to_string())
+}
+
 #[tauri::command]
 pub async fn merge_undo(state: State<'_, AppState>, id: u64, redo: bool) -> CmdResult<MergeInfo> {
     let tab = merge(&state, id)?;
@@ -627,25 +645,28 @@ pub async fn structured_merge_conflict(
 ) -> CmdResult<Option<u32>> {
     blocking(move || {
         let e = self::engine(&engine, mergiraf)?;
-        let state = conflicts::repo_conflicts(Path::new(&workdir)).map_err(err)?;
-        let file = state.files.iter().find(|f| f.path == path).ok_or_else(|| format!("{path} is not conflicted"))?;
+        // One `git ls-files` instead of the whole state: this runs for every file of the list.
+        let workdir = Path::new(&workdir);
+        let file = conflicts::conflict_file(workdir, &path)
+            .map_err(err)?
+            .ok_or_else(|| format!("{path} is not conflicted"))?;
         let [base, Some(local), Some(remote)] = &file.stages else {
             return Err(format!("{path} was deleted on one side; keep or delete it as a whole file."));
         };
-        let read = |s: &conflicts::Stage| conflicts::stage_content(&state.workdir, s).map_err(err);
+        let mut stages = conflicts::StageReader::new(workdir);
+        let mut read = |s: &conflicts::Stage| stages.read(s).map_err(err);
         let base = match base {
             Some(b) => read(b)?,
             None => Vec::new(),
         };
-        let l = &state.labels;
-        let labels = [l.local.as_str(), l.base.as_str(), l.remote.as_str()];
-        let Some(out) =
-            e.merge_file(&base, &read(local)?, &read(remote)?, &path, labels, MERGIRAF_TIMEOUT).map_err(err)?
-        else {
+        let (local, remote) = (read(local)?, read(remote)?);
+        // Only a clean result is written, so the labels of conflicts do not matter.
+        let labels = ["local", "base", "remote"];
+        let Some(out) = e.merge_file(&base, &local, &remote, &path, labels, MERGIRAF_TIMEOUT).map_err(err)? else {
             return Ok(None);
         };
         if write && out.conflicts == 0 {
-            let target = state.workdir.join(&file.path);
+            let target = workdir.join(&file.path);
             parallax_core::vfs::local::replace_file(&target, &out.data, None, None).map_err(err)?;
         }
         Ok(Some(out.conflicts as u32))
@@ -662,7 +683,7 @@ fn disk_stamp(path: &Path) -> Option<u64> {
     Some(h.finish())
 }
 
-fn stamp_of(data: &[u8]) -> u64 {
+pub(crate) fn stamp_of(data: &[u8]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     data.hash(&mut h);
@@ -755,6 +776,7 @@ pub struct RepoConflictsView {
 pub async fn repo_conflicts(dir: String) -> CmdResult<RepoConflictsView> {
     blocking(move || {
         let state = conflicts::repo_conflicts(Path::new(&dir)).map_err(err)?;
+        let mut stages = conflicts::StageReader::new(&state.workdir);
         let files = state
             .files
             .iter()
@@ -768,10 +790,7 @@ pub async fn repo_conflicts(dir: String) -> CmdResult<RepoConflictsView> {
                 // A link's target is text too, but not something to merge by lines.
                 let text = special.is_none()
                     && matches!(f.kind, ConflictKind::BothModified | ConflictKind::BothAdded)
-                    && f.stages
-                        .iter()
-                        .flatten()
-                        .all(|s| conflicts::stage_content(&state.workdir, s).is_ok_and(|d| !text::is_binary(&d)));
+                    && f.stages.iter().flatten().all(|s| stages.read(s).is_ok_and(|d| !text::is_binary(&d)));
                 ConflictFileView { path: f.path.clone(), kind: f.kind, text, special }
             })
             .collect();

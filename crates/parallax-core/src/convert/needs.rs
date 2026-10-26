@@ -73,14 +73,15 @@ pub struct Extension {
     pub fields: BTreeMap<String, String>,
 }
 
-/// Values that are lists of ids or tags: sorted, so that their order is no change.
+/// Values of the fields Sphinx-Needs keeps as lists of ids or tags: sorted, so that
+/// their order is no change. Other fields, such as `needs_extra_options`, are text
+/// whose order counts, even when it looks like a list.
 fn normalize_value(key: &str, value: &str) -> String {
     let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    let parts: Vec<&str> = value.split([',', ';', '|']).map(str::trim).filter(|p| !p.is_empty()).collect();
-    let listy = key == "tags" || key.ends_with("links") || key.ends_with("_back");
-    let id_like = parts.len() > 1 && parts.iter().all(|p| !p.contains(' '));
-    if listy || id_like {
-        let mut parts = parts;
+    let listy =
+        matches!(key, "tags" | "constraints" | "parent_needs") || key.ends_with("links") || key.ends_with("_back");
+    if listy {
+        let mut parts: Vec<&str> = value.split([',', ';', '|']).map(str::trim).filter(|p| !p.is_empty()).collect();
         parts.sort_unstable();
         parts.dedup();
         parts.join(", ")
@@ -424,6 +425,26 @@ Requirements
 .. needextend:: REQ_001
    :status: closed
 ";
+
+    /// Only the list fields of Sphinx-Needs ignore order; an extra option is text.
+    #[test]
+    fn only_list_fields_ignore_order() {
+        let rst = |code: &str, tags: &str| {
+            format!(".. req:: R\n   :id: R_1\n   :product_code: {code}\n   :tags: {tags}\n   :links: A_1; B_1\n")
+        };
+        assert!(same_rst_needs(&rst("alpha,beta", "x, y"), &rst("alpha,beta", "y | x")));
+        for (a, b) in [("alpha,beta", "beta,alpha"), ("a;b", "b;a"), ("a|b", "b|a")] {
+            assert!(!same_rst_needs(&rst(a, "x"), &rst(b, "x")), "{a} / {b}");
+        }
+        let json = |code: &str, links: &str| {
+            format!(
+                r#"{{"versions": {{"1": {{"needs": {{"R_1": {{"id": "R_1", "type": "req", "product_code": "{code}", "links": {links}}}}}}}}}}}"#
+            )
+        };
+        let same = |a: String, b: String| same_needs_json(a.as_bytes(), b.as_bytes()).unwrap();
+        assert!(same(json("a,b", r#"["A_1", "B_1"]"#), json("a,b", r#"["B_1", "A_1"]"#)));
+        assert!(!same(json("a,b", "[]"), json("b,a", "[]")));
+    }
 
     #[test]
     fn needs_from_rst() {

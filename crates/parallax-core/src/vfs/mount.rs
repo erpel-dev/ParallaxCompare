@@ -20,9 +20,10 @@ use crate::{Error, Result};
 /// first one's changes.
 static WRITING: Mutex<()> = Mutex::new(());
 
-/// How often each archive file was rewritten in this process. A source that opened
-/// an archive before another source wrote it sees the count change and reads the
-/// archive again before writing, instead of rewriting it from its old copy.
+/// How often each archive file was written in this process, by rewriting it or by
+/// replacing it as a whole. A source that opened an archive before another source
+/// wrote it sees the count change and reads the archive again before writing,
+/// instead of rewriting it from its old copy.
 static GENERATIONS: LazyLock<Mutex<HashMap<String, u64>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub struct ArchiveMount {
@@ -39,6 +40,9 @@ struct Cached {
     generation: u64,
     /// Size and modification time, to notice other programs writing it.
     stamp: Option<(u64, Option<i64>)>,
+    /// The bytes it was read from. Other programs can replace an archive keeping
+    /// its size and (whole-second) modification time, so a write compares them too.
+    data: Data,
 }
 
 impl ArchiveMount {
@@ -65,7 +69,9 @@ impl ArchiveMount {
         let stale = match self.cache.lock().get(path) {
             Some(cached) => {
                 let stamp = self.base.stat(path).ok().map(|e| (e.size, e.mtime));
-                cached.generation != self.generation(path) || cached.stamp != stamp
+                cached.generation != self.generation(path)
+                    || cached.stamp != stamp
+                    || self.base.read(path).map_or(true, |now| *now != *cached.data)
             }
             None => false,
         };
@@ -121,8 +127,8 @@ impl ArchiveMount {
         let data = vfs.read(inner)?;
         let data = if cfg!(windows) { Data::from_vec(data.to_vec()) } else { data };
         let label = format!("{}/{}", vfs.label(), inner);
-        let archive = Arc::new(ArchiveFs::open(data, format, label)?);
-        self.cache.lock().insert(outer.to_string(), Cached { archive: archive.clone(), generation, stamp });
+        let archive = Arc::new(ArchiveFs::open(data.clone(), format, label)?);
+        self.cache.lock().insert(outer.to_string(), Cached { archive: archive.clone(), generation, stamp, data });
         Ok(archive)
     }
 
@@ -188,7 +194,6 @@ impl Vfs for ArchiveMount {
         }
         let _writing = WRITING.lock();
         let (mut direct, nested) = split_by_archive(&*self.base, changes);
-        let rewritten: Vec<String> = nested.keys().cloned().collect();
         for (outer, inner) in nested {
             self.revalidate(&outer);
             let archive = self.open_archive(&*self.base, &outer, &outer, archive_format(&outer))?;
@@ -197,14 +202,16 @@ impl Vfs for ArchiveMount {
         }
         let paths: Vec<String> = direct.iter().map(|c| c.path().to_string()).collect();
         let result = self.base.apply(direct, progress);
-        if result.is_ok() {
+        // Every file written counts, also when it failed halfway: an archive copied over
+        // another, or rewritten, is read again by the other sources that opened it.
+        {
             let mut generations = GENERATIONS.lock();
-            for outer in &rewritten {
-                *generations.entry(self.identity(outer)).or_insert(0) += 1;
+            for path in paths.iter().filter(|p| detect_format(split_parent(p).1).is_some()) {
+                *generations.entry(self.identity(path)).or_insert(0) += 1;
             }
         }
-        for path in paths {
-            self.changed(&path);
+        for path in &paths {
+            self.changed(path);
         }
         result
     }

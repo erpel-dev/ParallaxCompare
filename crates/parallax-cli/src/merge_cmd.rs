@@ -205,10 +205,11 @@ fn merge_repo(cli: &MergeCli, dir: &std::path::Path) -> Result<bool> {
     let opts = cli.options(labels);
     let engine = cli.engine()?;
     let mut clean = true;
+    let mut stages = conflicts::StageReader::new(&state.workdir);
     for file in &state.files {
         let outcome = match (file.kind, &file.stages) {
             (ConflictKind::BothModified | ConflictKind::BothAdded, [base, Some(local), Some(remote)]) => {
-                let read = |s: &conflicts::Stage| conflicts::stage_content(&state.workdir, s);
+                let mut read = |s: &conflicts::Stage| stages.read(s);
                 let base = match base {
                     Some(b) => read(b)?,
                     None => Vec::new(),

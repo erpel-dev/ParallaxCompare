@@ -137,6 +137,11 @@ struct FileDiff {
     /// bytes per side, which saving applies the edited text to.
     view: View,
     data: [Option<Data>; 2],
+    /// Per editable side: a hash of the file as it was read or last saved, so a save
+    /// notices that another program changed it in the meantime.
+    on_disk: [Option<u64>; 2],
+    /// Per side: the file's size as it was read or last saved.
+    sizes: [u64; 2],
 }
 
 impl FileDiff {
@@ -1072,6 +1077,9 @@ pub async fn open_file_diff(
         left_info.editable = editable[0];
         right_info.editable = editable[1];
         let exists = [left_data.is_some(), right_data.is_some()];
+        let on_disk = [(editable[0], &left_data), (editable[1], &right_data)]
+            .map(|(editable, data)| data.as_deref().filter(|_| editable).map(crate::merge::stamp_of));
+        let sizes = [left_info.size, right_info.size];
         let info = FileDiffInfo {
             id: 0,
             rows: diff.rows.len() as u32,
@@ -1100,6 +1108,8 @@ pub async fn open_file_diff(
                 exists,
                 view: chosen,
                 data: if convert::can_write_back(chosen) { [left_data, right_data] } else { [None, None] },
+                on_disk,
+                sizes,
             },
         ))
     })
@@ -1312,6 +1322,10 @@ pub struct EditInfo {
     focus_row: Option<u32>,
     /// Where typing continues after an edit from the line editor.
     caret: Option<Caret>,
+    /// The size of each file as it was read or last saved.
+    sizes: [u64; 2],
+    /// A save found the file changed on disk since it was read, and wrote nothing.
+    stale: bool,
 }
 
 #[derive(Serialize)]
@@ -1348,6 +1362,8 @@ fn edit_info(fd: &FileDiff, focus: Option<Edited>, caret: Option<(Side, usize)>)
         line_endings: SIDES.map(|s| e.doc(s).line_ending),
         focus_row: focus.map(|f| e.row_of_line(f.side, f.line)),
         caret,
+        sizes: fd.sizes,
+        stale: false,
     }
 }
 
@@ -1516,11 +1532,27 @@ pub async fn update_diff(
     .await
 }
 
-/// Writes one side back to its file (or into its archive).
+/// Writes one side back to its file (or into its archive). Unless `overwrite` is
+/// set, a file that another program changed (or created or deleted) since it was
+/// read is left alone, and the result says it is stale.
 #[tauri::command]
-pub async fn save_side(app: AppHandle, state: State<'_, AppState>, id: u64, side: Side) -> CmdResult<EditInfo> {
+pub async fn save_side(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: u64,
+    side: Side,
+    overwrite: Option<bool>,
+) -> CmdResult<EditInfo> {
+    let stale = Arc::new(AtomicBool::new(false));
+    let found_stale = stale.clone();
     let info = with_diff(state, id, move |fd| {
         check_editable(fd, side)?;
+        let source = fd.source(side);
+        let now = source.vfs.read(&source.path(&fd.path)).ok().map(|d| crate::merge::stamp_of(&d));
+        if now != fd.on_disk[side as usize] && !overwrite.unwrap_or(false) {
+            found_stale.store(true, Ordering::Relaxed);
+            return Ok((None, None));
+        }
         let bytes = if fd.view == View::Text {
             fd.edit.doc(side).encode().map_err(|e| format!("Cannot save: {e}."))?
         } else {
@@ -1540,6 +1572,8 @@ pub async fn save_side(app: AppHandle, state: State<'_, AppState>, id: u64, side
         let _guard = fd.session.writing(std::slice::from_ref(&fd.path));
         let change = Change::Put { path: source.path(&fd.path), kind, data: written.clone(), mtime: None };
         source.vfs.apply(vec![change], &Progress::default()).map_err(err)?;
+        fd.on_disk[side as usize] = Some(crate::merge::stamp_of(&written));
+        fd.sizes[side as usize] = written.len() as u64;
         if fd.data[side as usize].is_some() {
             fd.data[side as usize] = Some(written);
         }
@@ -1548,6 +1582,9 @@ pub async fn save_side(app: AppHandle, state: State<'_, AppState>, id: u64, side
         Ok((None, None))
     })
     .await?;
+    if stale.load(Ordering::Relaxed) {
+        return Ok(EditInfo { stale: true, ..info });
+    }
     if let Some(fd) = app.state::<AppState>().diffs.lock().get(&id) {
         let fd = fd.lock();
         let changed =

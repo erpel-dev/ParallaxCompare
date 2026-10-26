@@ -586,8 +586,8 @@
       stats: e.stats,
       identical: e.identical,
       note: null,
-      left: { ...info.left, lines: e.lines[0], exists: e.exists[0], lineEnding: e.lineEndings[0] },
-      right: { ...info.right, lines: e.lines[1], exists: e.exists[1], lineEnding: e.lineEndings[1] },
+      left: { ...info.left, lines: e.lines[0], exists: e.exists[0], lineEnding: e.lineEndings[0], size: e.sizes[0] },
+      right: { ...info.right, lines: e.lines[1], exists: e.exists[1], lineEnding: e.lineEndings[1], size: e.sizes[1] },
     };
     anchor = null;
     dirty = e.dirty;
@@ -653,7 +653,9 @@
   /** Opens the line editor with the caret at `col` (the end without), typing `insert` there. */
   function openEditor(side: 0 | 1, index: number, col?: number, insert = "") {
     const row = cache.get(index);
-    if (!row || !editable[side]) return;
+    // Two empty files have no rows: their first line is typed as a new one.
+    const empty = info?.rows === 0 && index === 0;
+    if ((!row && !empty) || !editable[side]) return;
     const line = lineOf(side, row);
     if (line?.x || line?.o) {
       error = "This line is too long to edit here.";
@@ -799,6 +801,8 @@
     const text = e.clipboardData?.getData("text/plain") ?? "";
     if (!input || !/[\r\n]/.test(text)) return;
     e.preventDefault();
+    // Handled: the view around the editor must not hold it back to paste it again.
+    e.stopPropagation();
     pasteText(text);
   }
 
@@ -1033,7 +1037,7 @@
 
   /** Ctrl+V outside the line editor: lines go above the current one, or replace the selected ones. */
   function onViewPaste(e: ClipboardEvent) {
-    if (holdPaste(e)) return;
+    if (e.defaultPrevented || holdPaste(e)) return;
     if (editing || selected === null || !editable[activeSide]) return;
     const text = e.clipboardData?.getData("text/plain") ?? "";
     if (!text) return;
@@ -1087,7 +1091,23 @@
       if (!dirty[side]) continue;
       busy = "Saving…";
       try {
-        applyEdit(await api.saveSide(id, SIDE_NAMES[side]));
+        let saved = await api.saveSide(id, SIDE_NAMES[side], false);
+        if (saved.stale) {
+          busy = "";
+          const name = side === 0 ? "left" : "right";
+          const replace = await ask(
+            `The ${name} file changed on disk after it was opened. Replace it with your version, losing the other changes?`,
+            { title: "File changed on disk", kind: "warning", okLabel: "Replace", cancelLabel: "Keep the file" },
+          );
+          if (!replace) {
+            changedOnDisk = true;
+            continue;
+          }
+          busy = "Saving…";
+          saved = await api.saveSide(id, SIDE_NAMES[side], true);
+        }
+        applyEdit(saved);
+        if (!saved.dirty[0] && !saved.dirty[1]) changedOnDisk = false;
       } catch (e) {
         error = String(e);
         return;
@@ -1358,6 +1378,15 @@
       keyboardMenu();
       e.preventDefault();
       return;
+    }
+    // Two empty files: typing, Enter or F2 starts the first line.
+    if (info?.rows === 0 && info.view === "text" && !mod && !e.altKey && (e.key.length === 1 || e.key === "Enter" || e.key === "F2")) {
+      const side = editable[activeSide] ? activeSide : activeSide === 0 ? 1 : 0;
+      if (editable[side]) {
+        e.preventDefault();
+        openEditor(side, 0, undefined, e.key.length === 1 ? e.key : "");
+        return;
+      }
     }
     // Typing on a selected line of an editable side edits it, from its end.
     if (e.key.length === 1 && !mod && !e.altKey && selected !== null && editable[activeSide]) {
@@ -1640,6 +1669,22 @@
       {#if eolFix.right}<button onclick={() => setLineEndings(1, eolFix.right!)}>Use {eolFix.right} on the right</button>{/if}
     </div>
   {/if}
+  {#snippet lineEditor(index: number, s: 0 | 1, fill: boolean, number: string)}
+    <div class="ln" class:fill>{number}</div>
+    <div class="code editing">
+      <input
+        class="edit"
+        bind:this={input}
+        bind:value={draft}
+        onkeydown={editKey}
+        onpaste={onPaste}
+        readonly={awaiting}
+        onblur={() => !awaiting && editing?.row === index && editing.side === s && commit(draft, null)}
+        spellcheck="false"
+      />
+    </div>
+  {/snippet}
+
   {#if changedOnDisk}
     <div class="banner warn">
       The file changed on disk. <button onclick={reloadFromDisk}>Reload</button> discards your unsaved edits.
@@ -1685,6 +1730,21 @@
       tabindex="0"
       role="grid"
     >
+      {#if info && !info.rows && info.view === "text" && !loading && (editable[0] || editable[1])}
+        <!-- Two empty files have no line to click: one row to start typing in. -->
+        <div class="row" role="row">
+          {#each [0, 1] as const as s (s)}
+            {#if s === 1}<div class="mid"></div>{/if}
+            {#if editing && editing.row === 0 && editing.side === s}
+              {@render lineEditor(0, s, true, "+")}
+            {:else}
+              <div class="ln fill"></div>
+              <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+              <div class="code fill" class:editable={editable[s]} onclick={() => openEditor(s, 0)}>{#if editable[s]}<span class="empty-doc">The file is empty. Click to type.</span>{/if}</div>
+            {/if}
+          {/each}
+        </div>
+      {/if}
       {#if info && !displayTotal && rowFilter !== "all" && !loading}
         <div class="filter-empty">No rows match this filter. <button onclick={() => setRowFilter("all")}>Show all rows</button></div>
       {/if}
@@ -1707,19 +1767,7 @@
                   </div>
                 {/if}
                 {#if editing && editing.row === index && editing.side === s}
-                  <div class="ln" class:fill={!line}>{line ? line.n + 1 : "+"}</div>
-                  <div class="code editing">
-                    <input
-                      class="edit"
-                      bind:this={input}
-                      bind:value={draft}
-                      onkeydown={editKey}
-                      onpaste={onPaste}
-                      readonly={awaiting}
-                      onblur={() => !awaiting && editing?.row === index && editing.side === s && commit(draft, null)}
-                      spellcheck="false"
-                    />
-                  </div>
+                  {@render lineEditor(index, s, !line, line ? String(line.n + 1) : "+")}
                 {:else if line}
                   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
                   <div class="ln" data-side={SIDE_NAMES[s]} onclick={() => (activeSide = s)}>{line.n + 1}</div>
@@ -1893,6 +1941,10 @@
     grid-template-columns: 48px minmax(0, 1fr) 36px 48px minmax(0, 1fr);
     height: 19px;
     white-space: pre;
+  }
+  .empty-doc {
+    color: var(--faint);
+    font-style: italic;
   }
   .row.cur {
     outline: 1px solid var(--accent);

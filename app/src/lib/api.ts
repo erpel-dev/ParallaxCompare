@@ -312,6 +312,10 @@ export interface EditInfo {
   lineEndings: [FileSide["lineEnding"], FileSide["lineEnding"]];
   focusRow: number | null;
   caret: { row: number; line: number; col: number } | null;
+  /** The size of each file as it was read or last saved. */
+  sizes: [number, number];
+  /** A save found the file changed on disk since it was read, and wrote nothing. */
+  stale: boolean;
 }
 
 export interface OpResult {
@@ -489,6 +493,7 @@ export const api = {
   mergeEdit: (id: number, from: { line: number; col: number }, to: { line: number; col: number }, text: string) =>
     invoke<MergeInfo>("merge_edit", { id, from, to, text }),
   mergeResultText: (id: number, start: number, end: number) => invoke<string>("merge_result_text", { id, start, end }),
+  mergeInputLine: (id: number, column: number, line: number) => invoke<string>("merge_input_line", { id, column, line }),
   mergeUndo: (id: number, redo: boolean) => invoke<MergeInfo>("merge_undo", { id, redo }),
   mergeUseGitResult: (id: number) => invoke<MergeInfo>("merge_use_git_result", { id }),
   syntaxEngine: (engine: string, mergiraf: string | null) => invoke<SyntaxEngine>("syntax_engine", { engine, mergiraf }),
@@ -557,7 +562,7 @@ export const api = {
   redo: (id: number) => invoke<EditInfo>("redo", { id }),
   updateDiff: (id: number, options: DiffOptions, syntax: string | null) =>
     invoke<EditInfo>("update_diff", { id, options, syntax }),
-  saveSide: (id: number, side: SideName) => invoke<EditInfo>("save_side", { id, side }),
+  saveSide: (id: number, side: SideName, overwrite: boolean) => invoke<EditInfo>("save_side", { id, side, overwrite }),
   syntaxNames: () => invoke<string[]>("syntax_names"),
 };
 

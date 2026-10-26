@@ -31,6 +31,7 @@
   const syntaxOn = $derived(syntaxMerge.enabled && !!checkedWith && syntaxMerge.found?.name === checkedWith);
   let checking = $state(false);
   let checkRun = 0;
+  let destroyed = false;
   const solvable = $derived(
     syntaxOn ? (repo?.files ?? []).filter((f) => syntaxLeft[f.path] === 0 && !resolved[f.path]).map((f) => f.path) : [],
   );
@@ -62,7 +63,12 @@
     refresh();
   });
 
-  onDestroy(() => unlisten?.());
+  onDestroy(() => {
+    unlisten?.();
+    // Stops the syntax checks: at most the file being checked finishes.
+    destroyed = true;
+    checkRun++;
+  });
 
   // A different engine chosen (in a merge tab) checks the files again.
   let checkedFor = "";
@@ -96,6 +102,7 @@
 
   /** Asks the syntax-aware merge, file by file, which conflicts it can solve; writes nothing. */
   async function checkSyntax(state: RepoConflicts) {
+    if (destroyed) return;
     const run = ++checkRun;
     syntaxLeft = {};
     checkedWith = "";

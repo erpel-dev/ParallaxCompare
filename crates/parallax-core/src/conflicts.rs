@@ -222,10 +222,51 @@ pub fn repo_conflicts(dir: &Path) -> Result<RepoConflicts> {
 
 /// The content of one stage of a conflicted file.
 pub fn stage_content(workdir: &Path, stage: &Stage) -> Result<Vec<u8>> {
-    if !stage.oid.chars().all(|c| c.is_ascii_hexdigit()) || stage.oid.is_empty() {
-        return Err(Error::Unsupported(format!("not an object id: {}", stage.oid)));
+    StageReader::new(workdir).read(stage)
+}
+
+/// Reads the contents of stages from the repository's object database in this
+/// process, each object once: starting `git cat-file` for every stage of every
+/// file takes seconds for a hundred conflicts.
+pub struct StageReader {
+    workdir: PathBuf,
+    repo: Option<gix::Repository>,
+    read: std::collections::HashMap<String, Vec<u8>>,
+}
+
+impl StageReader {
+    pub fn new(workdir: &Path) -> Self {
+        let repo = gix::open(workdir).ok();
+        StageReader { workdir: workdir.to_path_buf(), repo, read: Default::default() }
     }
-    git(workdir, &["cat-file", "blob", &stage.oid])
+
+    pub fn read(&mut self, stage: &Stage) -> Result<Vec<u8>> {
+        if !stage.oid.chars().all(|c| c.is_ascii_hexdigit()) || stage.oid.is_empty() {
+            return Err(Error::Unsupported(format!("not an object id: {}", stage.oid)));
+        }
+        if let Some(data) = self.read.get(&stage.oid) {
+            return Ok(data.clone());
+        }
+        let in_process = self.repo.as_ref().and_then(|repo| {
+            let id = gix::ObjectId::from_hex(stage.oid.as_bytes()).ok()?;
+            Some(repo.find_object(id).ok()?.detach().data)
+        });
+        // Git itself reads what this cannot, such as objects of another hash kind.
+        let data = match in_process {
+            Some(data) => data,
+            None => git(&self.workdir, &["cat-file", "blob", &stage.oid])?,
+        };
+        self.read.insert(stage.oid.clone(), data.clone());
+        Ok(data)
+    }
+}
+
+/// The stages of one conflicted path, or `None` when it does not conflict: a
+/// single `git ls-files` for when the rest of [`repo_conflicts`] is known.
+pub fn conflict_file(workdir: &Path, path: &str) -> Result<Option<ConflictFile>> {
+    let literal = format!(":(literal){path}");
+    let files = parse_unmerged(&git(workdir, &["ls-files", "-u", "-z", "--", &literal])?);
+    Ok(files.into_iter().find(|f| f.path == path))
 }
 
 /// The kind of file a Git mode records.
@@ -429,6 +470,18 @@ mod tests {
         assert_eq!(kinds, vec![("a.txt", ConflictKind::BothModified), ("b.txt", ConflictKind::DeletedByThem)]);
         let a = &state.files[0];
         assert_eq!(stage_content(&state.workdir, a.stages[2].as_ref().unwrap()).unwrap(), b"1\nX\n3\n");
+        // Read in this process, each object once, as Git reads it.
+        let mut reader = StageReader::new(&state.workdir);
+        assert!(reader.repo.is_some());
+        for stage in a.stages.iter().flatten() {
+            let by_git = git(&state.workdir, &["cat-file", "blob", &stage.oid]).unwrap();
+            assert_eq!(reader.read(stage).unwrap(), by_git);
+        }
+        assert_eq!(reader.read.len(), 3);
+        assert!(reader.read(&Stage { mode: "100644".into(), oid: "--help".into() }).is_err());
+        let one = conflict_file(&state.workdir, "a.txt").unwrap().unwrap();
+        assert_eq!(one.stages[2].as_ref().unwrap().oid, a.stages[2].as_ref().unwrap().oid);
+        assert!(conflict_file(&state.workdir, "a.*").unwrap().is_none());
 
         std::fs::write(d.join("a.txt"), "1\nM and X\n3\n").unwrap();
         stage(&state.workdir, &[("a.txt".into(), Resolution::WorkTree(None)), ("b.txt".into(), Resolution::Delete)])
