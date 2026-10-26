@@ -155,6 +155,10 @@ impl Change {
 }
 
 pub trait Vfs: Send + Sync {
+    /// A read-operation view, for memoizing metadata only during one comparison.
+    fn read_operation(&self) -> Option<Arc<dyn Vfs>> {
+        None
+    }
     /// Human-readable description of the tree root.
     fn label(&self) -> String;
     /// Children of a container, unsorted.

@@ -1,0 +1,92 @@
+[
+  {
+    "name": "brace alternatives",
+    "passed": true,
+    "detail": null
+  },
+  {
+    "name": "one Unicode scalar per question mark",
+    "passed": true,
+    "detail": null
+  },
+  {
+    "name": "Unicode case folding",
+    "passed": true,
+    "detail": null
+  },
+  {
+    "name": "quoted literal \"report final.txt\"",
+    "passed": true,
+    "detail": null
+  },
+  {
+    "name": "quoted literal \"report,final.txt\"",
+    "passed": true,
+    "detail": null
+  },
+  {
+    "name": "quoted literal \"report;final.txt\"",
+    "passed": true,
+    "detail": null
+  },
+  {
+    "name": "exclude brace alternatives and quoted comma",
+    "passed": true,
+    "detail": null
+  },
+  {
+    "name": "archive-warning cancellation keeps destination",
+    "passed": true,
+    "detail": null
+  },
+  {
+    "name": "archive-warning copies whole matching archive",
+    "passed": true,
+    "detail": null
+  },
+  {
+    "name": "nested-copy cancellation keeps destination",
+    "passed": true,
+    "detail": null
+  },
+  {
+    "name": "nested-copy copies whole matching archive",
+    "passed": true,
+    "detail": null
+  },
+  {
+    "name": "parent copy also copies regular matching files",
+    "passed": true,
+    "detail": null
+  },
+  {
+    "name": "ordinary directory copy preserves hidden files",
+    "passed": true,
+    "detail": null
+  },
+  {
+    "name": "no empty identical Git folder for a no-match filter",
+    "passed": true,
+    "detail": null
+  },
+  {
+    "name": "live refresh does not leak nonmatching files",
+    "passed": true,
+    "detail": null
+  },
+  {
+    "name": "live refresh inserts matching file",
+    "passed": true,
+    "detail": null
+  },
+  {
+    "name": "live removal prunes empty filtered ancestors",
+    "passed": true,
+    "detail": null
+  },
+  {
+    "name": "no JavaScript errors",
+    "passed": true,
+    "detail": null
+  }
+]

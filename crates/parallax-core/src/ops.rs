@@ -109,6 +109,40 @@ pub fn copy_file_as(from: &Source, to: &Source, src: &str, dst: &str, progress: 
     result
 }
 
+/// Archives are copied atomically. Include one when its name or any descendant
+/// matches, exactly as the filtered tree presents it. Never enter excluded paths.
+fn copy_keeps(from: &Source, rel: &str, entry: &Entry, filter: &Filter, progress: &Progress) -> Result<bool> {
+    progress.check()?;
+    if filter.excluded(rel) {
+        return Ok(false);
+    }
+    if filter.keeps(rel, entry) {
+        return Ok(true);
+    }
+    if entry.kind != EntryKind::Archive {
+        return Ok(false);
+    }
+    archive_has_match(from, rel, filter, progress)
+}
+
+fn archive_has_match(from: &Source, dir: &str, filter: &Filter, progress: &Progress) -> Result<bool> {
+    for child in from.vfs.list(&from.path(dir))? {
+        progress.check()?;
+        let rel = join(dir, &child.name);
+        if filter.excluded(&rel) {
+            continue;
+        }
+        if child.kind == EntryKind::Dir {
+            if filter.included(&rel) || archive_has_match(from, &rel, filter, progress)? {
+                return Ok(true);
+            }
+        } else if copy_keeps(from, &rel, &child, filter, progress)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// The writes that copy `rel` with everything below it; file contents are read in parallel.
 fn collect_changes(
     from: &Source,
@@ -126,7 +160,7 @@ fn collect_changes(
             let dir = found[i].0.clone();
             for child in from.vfs.list(&from.path(&dir))? {
                 let rel = join(&dir, &child.name);
-                if filter.keeps(&rel, &child) {
+                if copy_keeps(from, &rel, &child, filter, progress)? {
                     found.push((rel, child));
                 }
             }
@@ -162,8 +196,12 @@ fn copy_entry(
     progress.check()?;
     if entry.kind == EntryKind::Dir {
         fs::create_dir_all(target).map_err(io_err)?;
-        let mut children = from.vfs.list(&from.path(rel))?;
-        children.retain(|c| filter.keeps(&join(rel, &c.name), c));
+        let mut children = Vec::new();
+        for child in from.vfs.list(&from.path(rel))? {
+            if copy_keeps(from, &join(rel, &child.name), &child, filter, progress)? {
+                children.push(child);
+            }
+        }
         progress.expect(children.iter().filter(|c| c.kind != EntryKind::Dir).count() as u64);
         return children
             .par_iter()

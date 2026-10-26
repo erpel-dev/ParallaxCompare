@@ -210,10 +210,12 @@ export function refreshTarget(root: Node, path: string): string {
   return path;
 }
 
-/** Files below `node` (or `node` itself), with their paths. */
-export function filesBelow(node: Node, path: string): { node: Node; path: string }[] {
-  if (!isContainer(node) || node.unexpanded) return [{ node, path }];
-  return (node.children ?? []).flatMap((c) => filesBelow(c, joinPath(path, c.name)));
+/** Whole archives are one copy operation, regardless of expanded/filtered children. */
+export function copyFilesBelow(node: Node, path: string, left: boolean): { node: Node; path: string }[] {
+  const side = left ? node.left : node.right;
+  if (!side) return [];
+  if (side.kind !== "dir" || node.unexpanded) return [{ node, path }];
+  return (node.children ?? []).flatMap((c) => copyFilesBelow(c, joinPath(path, c.name), left));
 }
 
 export function findNode(root: Node, path: string): Node | undefined {

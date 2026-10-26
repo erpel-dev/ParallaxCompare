@@ -6,10 +6,12 @@
 //!
 //! Writing rewrites the whole archive, see [`write`].
 
+mod input;
 mod write;
+use input::{ArchiveData, ArchiveReader};
 
 use std::collections::{HashMap, HashSet};
-use std::io::{Cursor, Read};
+use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -181,7 +183,7 @@ struct Span {
 
 /// Where an entry of a tar archive is.
 enum TarContent {
-    /// Inside the uncompressed archive, which stays memory-mapped.
+    /// Inside the uncompressed archive, read by seeking to the entry.
     Direct(Span),
     /// Inside the decompressed stream, in the temporary file.
     Spooled(Span),
@@ -238,14 +240,14 @@ impl Spool {
 }
 
 /// The bytes of a tar entry.
-fn tar_read(data: &Data, spool: Option<&Spool>, content: &TarContent) -> Result<Vec<u8>> {
+fn tar_read(data: &ArchiveData, spool: Option<&Spool>, content: &TarContent) -> Result<Vec<u8>> {
     let slice = |span: &Span| -> Result<Vec<u8>> {
-        let (at, len) = (usize::try_from(span.at), usize::try_from(span.len));
-        match (at, len) {
-            (Ok(at), Ok(len)) => data.get(at..at.saturating_add(len)).map(<[u8]>::to_vec),
-            _ => None,
+        if span.at.checked_add(span.len).is_none_or(|end| end > data.len()) {
+            return Err(Error::Unsupported("the tar archive is truncated".into()));
         }
-        .ok_or_else(|| Error::Unsupported("the tar archive is truncated".into()))
+        let mut reader = data.reader();
+        reader.seek(SeekFrom::Start(span.at)).map_err(Error::archive)?;
+        read_entry(&mut reader.take(span.len), span.len)
     };
     match content {
         TarContent::Direct(span) => slice(span),
@@ -258,7 +260,7 @@ fn tar_read(data: &Data, spool: Option<&Spool>, content: &TarContent) -> Result<
 
 enum Backend {
     Zip {
-        archive: zip::ZipArchive<Cursor<Data>>,
+        archive: zip::ZipArchive<ArchiveReader>,
         index_of: HashMap<String, usize>,
     },
     /// 7z is decoded per block. A solid block holds many files that can only be
@@ -266,7 +268,7 @@ enum Backend {
     /// blocks of different files decode in parallel. A block with a single file
     /// (non-solid archives) is decoded on each read, like a zip entry.
     SevenZ {
-        data: Data,
+        data: ArchiveData,
         archive: Box<sevenz_rust2::Archive>,
         index_of: HashMap<String, usize>,
         /// Per block: the decoded files of a solid block, `None` for a single-file block.
@@ -275,7 +277,7 @@ enum Backend {
     /// tar streams are decompressed once while indexing; the decompressed stream
     /// is kept out of memory (see [`TarContent`]).
     Tar {
-        data: Data,
+        data: ArchiveData,
         format: ArchiveFormat,
         contents: HashMap<String, TarContent>,
         /// The decompressed stream of a compressed tar.
@@ -291,7 +293,15 @@ pub struct ArchiveFs {
 
 impl ArchiveFs {
     pub fn open(data: Data, format: ArchiveFormat, label: impl Into<String>) -> Result<Self> {
-        let label = label.into();
+        Self::from_input(ArchiveData::Bytes(data), format, label.into())
+    }
+
+    pub fn open_file(path: &std::path::Path, format: ArchiveFormat, label: impl Into<String>) -> Result<Self> {
+        let input = ArchiveData::file(path).map_err(|e| Error::io(path.display().to_string(), e))?;
+        Self::from_input(input, format, label.into())
+    }
+
+    fn from_input(data: ArchiveData, format: ArchiveFormat, label: String) -> Result<Self> {
         let mut index = Index::new();
         let backend = match format {
             ArchiveFormat::Zip => open_zip(data, &mut index)?,
@@ -302,18 +312,19 @@ impl ArchiveFs {
     }
 }
 
-fn open_zip(data: Data, index: &mut Index) -> Result<Backend> {
+fn open_zip(data: ArchiveData, index: &mut Index) -> Result<Backend> {
     // Offset 0 first: detecting it scans the whole file for central directory
     // headers, which reads every page of a large archive. Archives with data in
     // front (self-extracting ones) fail that and are detected after all.
     let known = zip::read::Config { archive_offset: zip::read::ArchiveOffset::Known(0) };
-    let mut archive = match zip::ZipArchive::with_config(known, Cursor::new(data.clone())) {
+    let archive = match zip::ZipArchive::with_config(known, data.reader()) {
         Ok(archive) => archive,
-        Err(_) => zip::ZipArchive::new(Cursor::new(data)).map_err(Error::archive)?,
+        Err(_) => zip::ZipArchive::new(data.reader()).map_err(Error::archive)?,
     };
     let mut index_of = HashMap::new();
     for i in 0..archive.len() {
-        let file = archive.by_index_raw(i).map_err(Error::archive)?;
+        // Central metadata is sufficient; do not seek to every local member header.
+        let file = archive.by_index_data(i).map_err(Error::archive)?;
         let Some(path) = file.name().ok().and_then(|n| normalize(&n)) else {
             continue;
         };
@@ -337,9 +348,9 @@ fn open_zip(data: Data, index: &mut Index) -> Result<Backend> {
     Ok(Backend::Zip { archive, index_of })
 }
 
-fn open_7z(data: Data, index: &mut Index) -> Result<Backend> {
-    let archive = sevenz_rust2::Archive::read(&mut Cursor::new(&*data), &sevenz_rust2::Password::empty())
-        .map_err(Error::archive)?;
+fn open_7z(data: ArchiveData, index: &mut Index) -> Result<Backend> {
+    let archive =
+        sevenz_rust2::Archive::read(&mut data.reader(), &sevenz_rust2::Password::empty()).map_err(Error::archive)?;
     let mut index_of = HashMap::new();
     for (i, file) in archive.files.iter().enumerate() {
         let Some(path) = normalize(&file.name) else {
@@ -368,22 +379,6 @@ fn open_7z(data: Data, index: &mut Index) -> Result<Backend> {
     Ok(Backend::SevenZ { data, archive: Box::new(archive), index_of, solid })
 }
 
-/// A range of shared data, read as a stream.
-struct DataSlice {
-    data: Data,
-    at: usize,
-    end: usize,
-}
-
-impl Read for DataSlice {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let n = buf.len().min(self.end - self.at);
-        buf[..n].copy_from_slice(&self.data[self.at..self.at + n]);
-        self.at += n;
-        Ok(n)
-    }
-}
-
 /// A symlink, when the entry has a Unix mode, which 7-Zip stores in the high 16
 /// bits of the attributes, flagged by 0x8000; otherwise a file.
 fn sevenz_kind(file: &sevenz_rust2::ArchiveEntry) -> EntryKind {
@@ -393,7 +388,8 @@ fn sevenz_kind(file: &sevenz_rust2::ArchiveEntry) -> EntryKind {
 }
 
 /// The decompressed tar stream of a tar archive.
-fn tar_reader(raw: &[u8], format: ArchiveFormat) -> Result<Box<dyn Read + '_>> {
+fn tar_reader(data: &ArchiveData, format: ArchiveFormat) -> Result<Box<dyn Read>> {
+    let raw = data.reader();
     Ok(match format {
         ArchiveFormat::Tar => Box::new(raw),
         ArchiveFormat::TarGz => Box::new(flate2::read::MultiGzDecoder::new(raw)),
@@ -404,11 +400,11 @@ fn tar_reader(raw: &[u8], format: ArchiveFormat) -> Result<Box<dyn Read + '_>> {
     })
 }
 
-fn open_tar(data: Data, format: ArchiveFormat, index: &mut Index) -> Result<Backend> {
+fn open_tar(data: ArchiveData, format: ArchiveFormat, index: &mut Index) -> Result<Backend> {
     let compressed = !matches!(format, ArchiveFormat::Tar);
     // A compressed stream is written to the temporary file, so how far it may
     // expand has to be bounded here; an uncompressed tar is read in place.
-    let limit = (data.len() as u64).saturating_mul(TAR_RATIO).clamp(TAR_MIN, TAR_MAX);
+    let limit = data.len().saturating_mul(TAR_RATIO).clamp(TAR_MIN, TAR_MAX);
     let mut expanded = 0u64;
     let mut spool: Option<Spool> = None;
     let mut contents: HashMap<String, TarContent> = HashMap::new();
@@ -494,7 +490,7 @@ fn count(expanded: &mut u64, size: u64, limit: u64) -> Result<()> {
 
 /// Decodes all files of one 7z block.
 fn decode_7z_block(
-    data: &Data,
+    data: &ArchiveData,
     archive: &sevenz_rust2::Archive,
     block: usize,
 ) -> Result<HashMap<String, Arc<Vec<u8>>>> {
@@ -512,7 +508,7 @@ fn decode_7z_block(
         1
     };
     let password = sevenz_rust2::Password::empty();
-    let mut source = Cursor::new(&**data);
+    let mut source = data.reader();
     let mut files = HashMap::new();
     sevenz_rust2::BlockDecoder::new(threads, block, archive, &password, &mut source)
         .for_each_entries(&mut |entry, r| {
@@ -557,11 +553,10 @@ impl Vfs for ArchiveFs {
                 let plain = !file.encrypted();
                 (plain.then(|| file.compression()), file.data_start(), file.compressed_size())
             };
-            let data = archive.into_inner().into_inner();
-            if let Some(start) = start
-                && let Some(end) = start.checked_add(len).filter(|&end| end <= data.len() as u64)
-            {
-                let raw = DataSlice { data, at: start as usize, end: end as usize };
+            let mut reader = archive.into_inner();
+            if let Some(start) = start {
+                reader.seek(SeekFrom::Start(start)).map_err(Error::archive)?;
+                let raw = reader.take(len);
                 match method {
                     Some(zip::CompressionMethod::Stored) => return Ok(Box::new(raw)),
                     Some(zip::CompressionMethod::Deflated) => {

@@ -14,8 +14,8 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
-use globset::{Glob, GlobSet, GlobSetBuilder};
 use rayon::prelude::*;
+use regex::{RegexSet, RegexSetBuilder};
 use serde::{Deserialize, Serialize};
 
 use crate::convert;
@@ -143,30 +143,74 @@ pub struct CompareResult {
     pub summary: Summary,
 }
 
+// Globset validates glob syntax, but its byte regexes make `?` count UTF-8 bytes.
+// Decode escaped UTF-8 literals and enable Unicode before compiling the regexes.
+fn glob_regex(pattern: &str, by_path: bool) -> Result<String> {
+    let glob = globset::GlobBuilder::new(pattern)
+        .literal_separator(by_path)
+        .backslash_escape(true)
+        .build()
+        .map_err(|e| Error::InvalidSource(format!("file pattern: {e}")))?;
+    let raw = glob.regex().replace("(?-u)", "");
+    let mut out = String::new();
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        if chars.peek() != Some(&'x') {
+            out.push(c);
+            if let Some(next) = chars.next() {
+                out.push(next);
+            }
+            continue;
+        }
+        let mut bytes = Vec::new();
+        loop {
+            chars.next(); // x
+            let hex: String = chars.by_ref().take(2).collect();
+            bytes.push(u8::from_str_radix(&hex, 16).map_err(|e| Error::InvalidSource(e.to_string()))?);
+            let mut ahead = chars.clone();
+            if ahead.next() == Some('\\') && ahead.next() == Some('x') {
+                chars.next(); // backslash of next byte
+            } else {
+                break;
+            }
+        }
+        let literal = String::from_utf8(bytes).map_err(|e| Error::InvalidSource(format!("file pattern: {e}")))?;
+        out.push_str(&regex::escape(&literal));
+    }
+    Ok(out)
+}
+
+fn pattern_set(patterns: Vec<String>, insensitive: bool) -> Result<RegexSet> {
+    RegexSetBuilder::new(patterns)
+        .case_insensitive(insensitive)
+        .dot_matches_new_line(true)
+        .build()
+        .map_err(|e| Error::InvalidSource(format!("file pattern: {e}")))
+}
+
 /// Include patterns: those without `/` match names, the others relative paths.
 pub struct Includes {
-    names: GlobSet,
-    paths: GlobSet,
+    names: RegexSet,
+    paths: RegexSet,
 }
 
 impl Includes {
     pub fn new(patterns: &[String]) -> Result<Self> {
-        let invalid = |e: globset::Error| Error::InvalidSource(format!("file pattern: {e}"));
-        let (mut names, mut paths) = (GlobSetBuilder::new(), GlobSetBuilder::new());
+        let (mut names, mut paths) = (Vec::new(), Vec::new());
         for pattern in patterns.iter().map(|p| p.trim()).filter(|p| !p.is_empty()) {
             let by_path = pattern.contains('/');
-            let glob = globset::GlobBuilder::new(pattern.trim_start_matches('/'))
-                .case_insensitive(true)
-                .literal_separator(by_path)
-                .build()
-                .map_err(invalid)?;
+            let regex = glob_regex(pattern.trim_start_matches('/'), by_path)?;
             if by_path {
-                paths.add(glob)
+                paths.push(regex)
             } else {
-                names.add(glob)
+                names.push(regex)
             };
         }
-        Ok(Includes { names: names.build().map_err(invalid)?, paths: paths.build().map_err(invalid)? })
+        Ok(Includes { names: pattern_set(names, true)?, paths: pattern_set(paths, true)? })
     }
 
     pub fn is_empty(&self) -> bool {
@@ -191,15 +235,12 @@ impl Includes {
 }
 
 /// Exclude patterns, matched against entry names and relative paths.
-pub struct Excludes(GlobSet);
+pub struct Excludes(RegexSet);
 
 impl Excludes {
     pub fn new(patterns: &[String]) -> Result<Self> {
-        let mut builder = GlobSetBuilder::new();
-        for pattern in patterns {
-            builder.add(Glob::new(pattern).map_err(|e| Error::InvalidSource(format!("exclude pattern: {e}")))?);
-        }
-        builder.build().map(Excludes).map_err(|e| Error::InvalidSource(format!("exclude pattern: {e}")))
+        let regexes = patterns.iter().map(|p| glob_regex(p, false)).collect::<Result<Vec<_>>>()?;
+        Ok(Excludes(pattern_set(regexes, false)?))
     }
 
     /// Whether the entry at `rel`, named `name`, is excluded.
@@ -234,6 +275,16 @@ pub struct Filter {
 impl Filter {
     pub fn new(opts: &CompareOptions) -> Result<Self> {
         Ok(Filter { excludes: Excludes::new(&opts.excludes)?, includes: Includes::new(&opts.includes)? })
+    }
+
+    /// Whether this path is excluded, including by an ancestor folder.
+    pub fn excluded(&self, rel: &str) -> bool {
+        self.excludes.covers(rel)
+    }
+
+    /// Whether a pattern covers this entry, including a matching ancestor.
+    pub fn included(&self, rel: &str) -> bool {
+        self.includes.covers(rel)
     }
 
     /// Everything.
@@ -354,7 +405,8 @@ pub fn compare_path(
     control: &Control,
 ) -> Result<CompareResult> {
     let started = Instant::now();
-    let engine = Engine::new(left, right, opts, control)?;
+    let (left, right) = (left.read_operation(), right.read_operation());
+    let engine = Engine::new(&left, &right, opts, control)?;
     let l = left.stat(rel).ok();
     let r = right.stat(rel).ok();
     if l.is_none() && r.is_none() {
@@ -382,6 +434,40 @@ pub fn compare_path(
     Ok(CompareResult { root, summary })
 }
 
+/// Refreshes a displayed path, applying the same filters as a full tree walk.
+/// A missing or filtered-out path has no replacement node.
+pub fn refresh_path(
+    left: &Source,
+    right: &Source,
+    rel: &str,
+    opts: &CompareOptions,
+    control: &Control,
+) -> Result<Option<Node>> {
+    let includes = Includes::new(&opts.includes)?;
+    if !rel.is_empty() && Excludes::new(&opts.excludes)?.covers(rel) {
+        return Ok(None);
+    }
+    let entries = [left.stat(rel).ok(), right.stat(rel).ok()];
+    if entries.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    let container = entries.iter().flatten().any(|e| e.kind.is_container());
+    if !rel.is_empty() && !container && !includes.covers(rel) {
+        return Ok(None);
+    }
+    let root = compare_path(left, right, rel, opts, control)?.root;
+    if !rel.is_empty()
+        && container
+        && root.children.is_empty()
+        && !root.unexpanded
+        && root.status != Status::Error
+        && !includes.covers(rel)
+    {
+        return Ok(None);
+    }
+    Ok(Some(root))
+}
+
 /// Compares the file at `lrel` on the left with the one at `rrel` on the right,
 /// e.g. a file that moved to another folder. Returns its status and, when it is
 /// similar, why.
@@ -393,7 +479,8 @@ pub fn compare_pair(
     opts: &CompareOptions,
 ) -> Result<(Status, Option<&'static str>)> {
     let control = Control::default();
-    let engine = Engine::new(left, right, opts, &control)?;
+    let (left, right) = (left.read_operation(), right.read_operation());
+    let engine = Engine::new(&left, &right, opts, &control)?;
     let (l, r) = (left.stat(lrel)?, right.stat(rrel)?);
     if l.kind == EntryKind::Dir || r.kind == EntryKind::Dir {
         return Err(Error::Unsupported("only files are compared across folders".into()));
@@ -459,6 +546,7 @@ impl<'a> Engine<'a> {
         let (lc, rc) = (l.kind.is_container(), r.kind.is_container());
         if lc && rc {
             if !is_root
+                && self.includes.covers(rel)
                 && let (Some(a), Some(b)) = (&l.quick_id, &r.quick_id)
                 && a.matches(b) == Some(true)
             {
