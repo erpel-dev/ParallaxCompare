@@ -1,0 +1,16 @@
+{
+  "testedCommit": "d30edf0167f72d8837cabc98cb629272f6e781b1",
+  "started": "2026-10-26T12:33:58.678798+00:00",
+  "ended": "2026-10-26T12:49:00.832899+00:00",
+  "durationSeconds": 902.1541856150143,
+  "repeatedFilterCycles": 370,
+  "initialPatternCases": 29,
+  "rapidChangeChecks": 20,
+  "failedChecks": [],
+  "findingCount": 6,
+  "priorities": {
+    "P2": 4,
+    "P1": 1,
+    "P3": 1
+  }
+}

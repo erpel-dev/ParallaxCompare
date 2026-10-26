@@ -1,0 +1,29 @@
+
+> parallax-compare@0.0.13 test
+> node --experimental-strip-types --test tests/*.test.ts
+
+✔ exact filters retain ancestors and exclude aggregate folder false positives (2.811113ms)
+✔ broad differences include one-sided and errors; Same excludes Similar (0.355306ms)
+✔ pending rows remain visible without inflating stable completed counts (0.218865ms)
+✔ archives compared as files and failed folders match their own status (0.299404ms)
+✔ flat view totals count a moved pair once and use its resolved status (8.809477ms)
+✔ filtered rows preserve original IDs and precise boundaries across gaps (1.421705ms)
+✔ all difference kinds combine, while minor rows stay separate (0.265323ms)
+✔ large files keep compact ranges rather than per-row indices (0.120318ms)
+✔ saved four-tab sources migrate without losing revision, scope or worktree intent (1.71531ms)
+✔ explicit saved source intent is accepted only when it matches the displayed text (0.336008ms)
+✔ Compare requires a current successful preview; remote access stays deferred (0.191775ms)
+✔ shape checks block known file/container conflicts without guessing unresolved shapes (0.143212ms)
+ℹ tests 12
+ℹ suites 0
+ℹ pass 12
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 226.23798
+npm notice
+npm notice New major version of npm available! 11.9.0 -> 12.2.1
+npm notice Changelog: https://github.com/npm/cli/releases/tag/v12.2.1
+npm notice To update run: npm install -g npm@12.2.1
+npm notice
