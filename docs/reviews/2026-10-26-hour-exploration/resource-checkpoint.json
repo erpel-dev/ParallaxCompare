@@ -1,0 +1,49 @@
+{
+  "window": "last 150 samples, 2 s apart",
+  "sampleCount": 150,
+  "note": "Summary only; full per-process samples are in runtime-evidence.tar.gz. RSS variation alone is not a leak finding.",
+  "processes": {
+    "WebKitNetworkPr": {
+      "rssKiBRange": [
+        54788,
+        54988
+      ],
+      "threadsRange": [
+        9,
+        10
+      ],
+      "fdsRange": [
+        22,
+        22
+      ]
+    },
+    "WebKitWebProces": {
+      "rssKiBRange": [
+        502288,
+        586876
+      ],
+      "threadsRange": [
+        36,
+        41
+      ],
+      "fdsRange": [
+        31,
+        31
+      ]
+    },
+    "parallax-compar": {
+      "rssKiBRange": [
+        289496,
+        290248
+      ],
+      "threadsRange": [
+        37,
+        39
+      ],
+      "fdsRange": [
+        46,
+        49
+      ]
+    }
+  }
+}

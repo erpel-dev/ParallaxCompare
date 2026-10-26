@@ -1,0 +1,585 @@
+[
+  {
+    "utc": "2026-10-26T09:57:11.305464+00:00",
+    "elapsed": 5216.884685546975,
+    "name": "text-stale-save",
+    "data": {
+      "actual": "our new draft\n",
+      "text": "←\n→\n↑\n⇄ Swap\n◀ Prev\nNext ▶\n1 / 1\nCopy ←\nCopy →\n↶\n↷\nFind\nOptions ▾\nSHOW\nAll rows\n1\nAll differences\n1\nSame\n0\nIgnored\n0\nChanged\n1\nRemoved (left only)\n0\nAdded (right only)\n0\nFILE\n/tmp/parallax-hour-20261026/left/changed.txt\n📂\n▾\nFILE\n/tmp/parallax-hour-20261026/right/changed.txt\n📂\n▾\nUTF-8 · LF · 11 · 1 lines\nUTF-8 · LF · 12 · 1 lines\nThe file changed on disk. Reload discards your unsaved edits.\n1\nleft value\n←\n→\n1\nour new draft\nLeft left value\nRight our new draft\nShowing 1 of 1 rows\n1 of 1 difference sections\nRow 1 of 1\nPlain text\nClick to edit · Shift+click or the line number selects lines · Ctrl+C/X/V, Delete · Alt+←/→: copy difference · F7 / F8: previous / next difference · Ctrl+F: find"
+    }
+  },
+  {
+    "utc": "2026-10-26T09:59:59.674433+00:00",
+    "elapsed": 5385.253656805959,
+    "name": "merge-enter-focus",
+    "data": {
+      "pauseMs": 0,
+      "focus": {
+        "tag": "BODY",
+        "editor": true,
+        "text": "RESULT\n/tmp/parallax-hour-20261026/merge/unicode/output.txt\nfrom local\nfrom remote\nsame on both\nedited\n● unsaved",
+        "cls": ""
+      },
+      "text": "↑ Previous conflict\n↓ Next conflict\nNo conflicts\n↶ Undo\n↷ Redo\n✦ Syntax-aware ▾\n💾 Save result\nLOCAL\n/tmp/parallax-hour-20261026/merge/unicode/local.txt\nBASE\n/tmp/parallax-hour-20261026/merge/unicode/base.txt\nREMOTE\n/tmp/parallax-hour-20261026/merge/unicode/remote.txt\n1\na😀é中\tb\n1\na😀é中\tb\n1\na😀é中\tb\n2\nsecond\n2\nsecond\n2\nsecond\nRESULT\n/tmp/parallax-hour-20261026/merge/unicode/output.txt\nfrom local\nfrom remote\nsame on both\nedited\n● unsaved\n1\nbefore\n2\n3\nsecond\n0 changes merged automatically\n0 conflicts\nUTF-8\nF7/F8 conflicts · Alt+←/→ take a side · Alt+↓ both · click a result line to edit"
+    }
+  },
+  {
+    "utc": "2026-10-26T09:59:59.828405+00:00",
+    "elapsed": 5385.407632889925,
+    "name": "merge-enter-content",
+    "data": {
+      "pauseMs": 0,
+      "actual": "before\n\nsecond\n",
+      "expected": "before\nABC\nsecond\n"
+    }
+  },
+  {
+    "utc": "2026-10-26T10:00:00.831560+00:00",
+    "elapsed": 5386.4107805269305,
+    "name": "merge-enter-focus",
+    "data": {
+      "pauseMs": 30,
+      "focus": {
+        "tag": "BODY",
+        "editor": true,
+        "text": "RESULT\n/tmp/parallax-hour-20261026/merge/unicode/output.txt\nfrom local\nfrom remote\nsame on both\nedited\n● unsaved",
+        "cls": ""
+      },
+      "text": "↑ Previous conflict\n↓ Next conflict\nNo conflicts\n↶ Undo\n↷ Redo\n✦ Syntax-aware ▾\n💾 Save result\nLOCAL\n/tmp/parallax-hour-20261026/merge/unicode/local.txt\nBASE\n/tmp/parallax-hour-20261026/merge/unicode/base.txt\nREMOTE\n/tmp/parallax-hour-20261026/merge/unicode/remote.txt\n1\na😀é中\tb\n1\na😀é中\tb\n1\na😀é中\tb\n2\nsecond\n2\nsecond\n2\nsecond\nRESULT\n/tmp/parallax-hour-20261026/merge/unicode/output.txt\nfrom local\nfrom remote\nsame on both\nedited\n● unsaved\n1\nbefore\n2\n3\nsecond\n0 changes merged automatically\n0 conflicts\nUTF-8\nF7/F8 conflicts · Alt+←/→ take a side · Alt+↓ both · click a result line to edit"
+    }
+  },
+  {
+    "utc": "2026-10-26T10:00:00.985816+00:00",
+    "elapsed": 5386.565137790982,
+    "name": "merge-enter-content",
+    "data": {
+      "pauseMs": 30,
+      "actual": "before\n\nsecond\n",
+      "expected": "before\nABC\nsecond\n"
+    }
+  },
+  {
+    "utc": "2026-10-26T10:00:02.346315+00:00",
+    "elapsed": 5387.92553831602,
+    "name": "merge-enter-focus",
+    "data": {
+      "pauseMs": 100,
+      "focus": {
+        "tag": "BODY",
+        "editor": true,
+        "text": "RESULT\n/tmp/parallax-hour-20261026/merge/unicode/output.txt\nfrom local\nfrom remote\nsame on both\nedited\n● unsaved",
+        "cls": ""
+      },
+      "text": "↑ Previous conflict\n↓ Next conflict\nNo conflicts\n↶ Undo\n↷ Redo\n✦ Syntax-aware ▾\n💾 Save result\nLOCAL\n/tmp/parallax-hour-20261026/merge/unicode/local.txt\nBASE\n/tmp/parallax-hour-20261026/merge/unicode/base.txt\nREMOTE\n/tmp/parallax-hour-20261026/merge/unicode/remote.txt\n1\na😀é中\tb\n1\na😀é中\tb\n1\na😀é中\tb\n2\nsecond\n2\nsecond\n2\nsecond\nRESULT\n/tmp/parallax-hour-20261026/merge/unicode/output.txt\nfrom local\nfrom remote\nsame on both\nedited\n● unsaved\n1\nbefore\n2\n3\nsecond\n0 changes merged automatically\n0 conflicts\nUTF-8\nF7/F8 conflicts · Alt+←/→ take a side · Alt+↓ both · click a result line to edit"
+    }
+  },
+  {
+    "utc": "2026-10-26T10:00:02.501986+00:00",
+    "elapsed": 5388.081216841936,
+    "name": "merge-enter-content",
+    "data": {
+      "pauseMs": 100,
+      "actual": "before\n\nsecond\n",
+      "expected": "before\nABC\nsecond\n"
+    }
+  },
+  {
+    "utc": "2026-10-26T10:00:04.406922+00:00",
+    "elapsed": 5389.986158076907,
+    "name": "merge-enter-focus",
+    "data": {
+      "pauseMs": 250,
+      "focus": {
+        "tag": "BODY",
+        "editor": true,
+        "text": "RESULT\n/tmp/parallax-hour-20261026/merge/unicode/output.txt\nfrom local\nfrom remote\nsame on both\nedited\n● unsaved",
+        "cls": ""
+      },
+      "text": "↑ Previous conflict\n↓ Next conflict\nNo conflicts\n↶ Undo\n↷ Redo\n✦ Syntax-aware ▾\n💾 Save result\nLOCAL\n/tmp/parallax-hour-20261026/merge/unicode/local.txt\nBASE\n/tmp/parallax-hour-20261026/merge/unicode/base.txt\nREMOTE\n/tmp/parallax-hour-20261026/merge/unicode/remote.txt\n1\na😀é中\tb\n1\na😀é中\tb\n1\na😀é中\tb\n2\nsecond\n2\nsecond\n2\nsecond\nRESULT\n/tmp/parallax-hour-20261026/merge/unicode/output.txt\nfrom local\nfrom remote\nsame on both\nedited\n● unsaved\n1\nbefore\n2\n3\nsecond\n0 changes merged automatically\n0 conflicts\nUTF-8\nF7/F8 conflicts · Alt+←/→ take a side · Alt+↓ both · click a result line to edit"
+    }
+  },
+  {
+    "utc": "2026-10-26T10:00:04.568577+00:00",
+    "elapsed": 5390.147807311965,
+    "name": "merge-enter-content",
+    "data": {
+      "pauseMs": 250,
+      "actual": "before\n\nsecond\n",
+      "expected": "before\nABC\nsecond\n"
+    }
+  },
+  {
+    "utc": "2026-10-26T10:04:04.012603+00:00",
+    "elapsed": 5629.591828124947,
+    "name": "git-modes-regression",
+    "data": {
+      "islink": true,
+      "target": "remote-target",
+      "mode": "0o755",
+      "index": "120000 42e9b5bddc881a5bafd4490f02029f93a57bec9f 0\tlink\n100755 2ee114f382e4c7e8c2cceecac6a17b4f0224d44d 0\tscript.sh\n",
+      "text": "Unmerged files on main\n/tmp/parallax-hour-20261026/regression-fixtures/M02-M03-mode-conflicts\n⟳ Refresh\nStage resolved files\nLOCALmain (ours)\nBASEbase\nREMOTEtheirs\nNo conflicts left.\nEvery file is resolved and staged. Continue the operation with Git, for example git commit, git rebase --continue or git cherry-pick --continue."
+    }
+  },
+  {
+    "utc": "2026-10-26T10:04:04.910364+00:00",
+    "elapsed": 5630.4895892809145,
+    "name": "separated-conflicts-open",
+    "data": {
+      "expectedConflicts": 500,
+      "seconds": 0.5383055079728365,
+      "label": "↑ Previous conflict\n↓ Next conflict\n500 of 500 conflicts left\n↶ Undo\n↷ Redo\n✦ Syntax-aware ▾\n💾 Save result\nweave 0.6.1 merged this file differently from the line merge, also outside the conflicts, and"
+    }
+  },
+  {
+    "utc": "2026-10-26T10:04:05.781830+00:00",
+    "elapsed": 5631.361109234975,
+    "name": "separated-conflicts-open",
+    "data": {
+      "expectedConflicts": 1000,
+      "seconds": 0.3288887310773134,
+      "label": "↑ Previous conflict\n↓ Next conflict\n1000 of 1000 conflicts left\n↶ Undo\n↷ Redo\n✦ Syntax-aware … ▾\n💾 Save result\nLOCAL\n/tmp/parallax-hour-20261026/regression-fixtures/M07-1000-conflicts/local.txt\nBASE\n/"
+    }
+  },
+  {
+    "utc": "2026-10-26T10:04:06.501253+00:00",
+    "elapsed": 5632.080476348987,
+    "name": "separated-conflicts-open",
+    "data": {
+      "expectedConflicts": 2000,
+      "seconds": 0.3381701949983835,
+      "label": "↑ Previous conflict\n↓ Next conflict\n2000 of 2000 conflicts left\n↶ Undo\n↷ Redo\n✦ Syntax-aware … ▾\n💾 Save result\nLOCAL\n/tmp/parallax-hour-20261026/regression-fixtures/M07-2000-conflicts/local.txt\nBASE\n/"
+    }
+  },
+  {
+    "utc": "2026-10-26T10:04:07.536525+00:00",
+    "elapsed": 5633.115748153999,
+    "name": "separated-conflicts-open",
+    "data": {
+      "expectedConflicts": 4000,
+      "seconds": 0.6468810880323872,
+      "label": "↑ Previous conflict\n↓ Next conflict\n4000 of 4000 conflicts left\n↶ Undo\n↷ Redo\n✦ Syntax-aware … ▾\n💾 Save result\nLOCAL\n/tmp/parallax-hour-20261026/regression-fixtures/M07-4000-conflicts/local.txt\nBASE\n/"
+    }
+  },
+  {
+    "utc": "2026-10-26T10:04:08.890295+00:00",
+    "elapsed": 5634.46951731795,
+    "name": "empty-merge-regression",
+    "data": {
+      "actual": "new content",
+      "text": "↑ Previous conflict\n↓ Next conflict\nNo conflicts\n↶ Undo\n↷ Redo\n✦ Syntax-aware ▾\n💾 Save result\nLOCAL\n/tmp/parallax-hour-20261026/merge/empty/local.txt\nBASE\n/tmp/parallax-hour-20261026/merge/empty/base.txt\nREMOTE\n/tmp/parallax-hour-20261026/merge/empty/remote.txt\nRESULT\n/tmp/parallax-hour-20261026/merge/empty/output.txt\nfrom local\nfrom remote\nsame on both\nedited\n1\nnew content\n0 changes merged automatically\n0 conflicts\nUTF-8\nSaved output.txt without conflicts.\nF7/F8 conflicts · Alt+←/→ take a side · Alt+↓ both · click a result line to edit"
+    }
+  },
+  {
+    "utc": "2026-10-26T10:05:38.585697+00:00",
+    "elapsed": 5724.164918841911,
+    "name": "archive-ui-after-copy",
+    "data": {
+      "a.txt": "NEW A\n",
+      "b.txt": "NEW B\n"
+    }
+  },
+  {
+    "utc": "2026-10-26T10:05:39.526890+00:00",
+    "elapsed": 5725.106121457997,
+    "name": "archive-ui-after-save",
+    "data": {
+      "b.txt": "OLD B\n",
+      "a.txt": "MY A\n"
+    }
+  },
+  {
+    "utc": "2026-10-26T10:06:27.478171+00:00",
+    "elapsed": 5773.057378566009,
+    "name": "permissions-compare",
+    "data": {
+      "uid": 1000,
+      "text": "←\n→\n↑\n⟳ Refresh\n⇄ Swap\n⇆ Compare these\nExpand\nCollapse\nFlat\nCopy →\n← Copy\nDelete ◀\nDelete ▶\nOptions ▾\nSHOW\nAll files\n1\nAll differences\n0\nSame\n1\nSimilar\n0\nDifferent\n0\nLeft only\n0\nRight only\n0\nErrors\n0\nDIR\n/tmp/parallax-hour-20261026/permissions/left\n📂\n▾\nDIR\n/tmp/parallax-hour-20261026/permissions/right\n📂\n▾\nName\nSize\nModified\nName\nSize\nModified\n▸ 📁restricted\n2026-10-26 10:06\n=\n▸ 📁restricted\n2026-10-26 10:06\n 📄visible.txt\n5\n2026-10-26 10:06\n=\n 📄visible.txt\n5\n2026-10-26 10:06\nShowing 1 of 1 files\ncompared in 1 ms"
+    }
+  },
+  {
+    "utc": "2026-10-26T10:08:06.440617+00:00",
+    "elapsed": 5872.019824813004,
+    "name": "needs-custom-normalized",
+    "data": "←\n→\n↑\n⇄ Swap\n◀ Prev\nNext ▶\n– / 0\nFind\nOptions ▾\nSHOW\nAll rows\n6\nAll differences\n0\nSame\n6\nIgnored\n0\nChanged\n0\nRemoved (left only)\n0\nAdded (right only)\n0\nFILE\n/tmp/parallax-hour-20261026/needs-custom/left/req.rst\n📂\n▾\nFILE\n/tmp/parallax-hour-20261026/needs-custom/right/req.rst\n📂\n▾\nNeeds · 93 · 6 lines\nNeeds · 93 · 6 lines\nNo differences in this view — the files differ only in bytes this view does not show.\n1\n=== 1 need: 1 req ===\n1\n=== 1 need: 1 req ===\n2\n2\n3\n--- REQ_001 [req] Ordered product code ---\n3\n--- REQ_001 [req] Ordered product code ---\n4\nproduct_code: alpha, beta\n4\nproduct_code: alpha, beta\n5\n    Same content.\n5\n    Same content.\n6\n6\nLeft \nRight \nShowing 6 of 6 rows\n0 of 0 difference sections\nNeeds\nF7 / F8: previous / next difference · Ctrl+F: find"
+  },
+  {
+    "utc": "2026-10-26T10:08:32.056671+00:00",
+    "elapsed": 5897.63589330297,
+    "name": "quoted-merge-normalized",
+    "data": "←\n→\n↑\n⇄ Swap\n◀ Prev\nNext ▶\n– / 0\nFind\nOptions ▾\nSHOW\nAll rows\n1\nAll differences\n0\nSame\n1\nIgnored\n0\nChanged\n0\nRemoved (left only)\n0\nAdded (right only)\n0\nFILE\n/tmp/parallax-hour-20261026/yaml-quoted-merge/left/data.yaml\n📂\n▾\nFILE\n/tmp/parallax-hour-20261026/yaml-quoted-merge/right/data.yaml\n📂\n▾\nNormalized YAML · 13 · 1 lines\nNormalized YAML · 5 · 1 lines\nNo differences in this view — the files differ only in bytes this view does not show.\n1\nx: 1\n1\nx: 1\nLeft \nRight \nShowing 1 of 1 rows\n0 of 0 difference sections\nNormalized YAML\nF7 / F8: previous / next difference · Ctrl+F: find"
+  },
+  {
+    "utc": "2026-10-26T10:11:53.234183+00:00",
+    "elapsed": 6098.81340528396,
+    "name": "conflict-list-performance",
+    "data": {
+      "files": 120,
+      "uniqueStageBlobs": 3,
+      "seconds": 7.609078306006268,
+      "text": "Unmerged files on main\n/tmp/parallax-hour-20261026/conflict-many\n✦ Merging by syntax…\n⟳ Refresh\nStage resolved files\nLOCALmain (ours)\nBASEbase\nREMOTEtheirs\nFile\tConflict\tState\tResolve\nfile0000.txt\tboth modified\tunresolved\tOpen merge Keep local Take remote Mark resolved\nfile0001.txt\tboth modified\tunresolved\tOpen merge Keep local Take remote Mark resolved\nfile0002.txt\tboth modified\tunresolved\tOpen merge Keep local Take remote Mark resolved\nfile0003.txt\tboth modified\tunresolved\tOpen merge Keep local Take remote Mark resolved\nfile0004.txt\tboth modified\tunresolved\tOpen merge Keep local Take remote Mark resolved\nfile0005.txt\tboth modified\tunresolved\tOpen merge Keep local Take remote Mark resolved\n"
+    }
+  },
+  {
+    "utc": "2026-10-26T10:11:54.255041+00:00",
+    "elapsed": 6099.834255716996,
+    "name": "closed-conflicts-tab",
+    "data": {
+      "completedBefore": 0,
+      "completedAtClose": 0,
+      "totalTabs": 0,
+      "utc": "2026-10-26T10:11:54.254980+00:00"
+    }
+  },
+  {
+    "utc": "2026-10-26T10:14:23.593799+00:00",
+    "elapsed": 6249.17308606091,
+    "name": "conflict-list-performance",
+    "data": {
+      "files": 120,
+      "uniqueStageBlobs": 3,
+      "seconds": 8.556751476950012,
+      "text": "Unmerged files on main\n/tmp/parallax-hour-20261026/conflict-many\n✦ Merging by syntax…\n⟳ Refresh\nStage resolved files\nLOCALmain (ours)\nBASEbase\nREMOTEtheirs\nFile\tConflict\tState\tResolve\nfile0000.txt\tboth modified\tunresolved\tOpen merge Keep local Take remote Mark resolved\nfile0001.txt\tboth modified\tunresolved\tOpen merge Keep local Take remote Mark resolved\nfile0002.txt\tboth modified\tunresolved\tOpen merge Keep local Take remote Mark resolved\nfile0003.txt\tboth modified\tunresolved\tOpen merge Keep local Take remote Mark resolved\nfile0004.txt\tboth modified\tunresolved\tOpen merge Keep local Take remote Mark resolved\nfile0005.txt\tboth modified\tunresolved\tOpen merge Keep local Take remote Mark resolved\n"
+    }
+  },
+  {
+    "utc": "2026-10-26T10:14:24.637690+00:00",
+    "elapsed": 6250.216911294963,
+    "name": "closed-conflicts-tab",
+    "data": {
+      "completedBefore": 0,
+      "completedAtClose": 0,
+      "totalTabs": 0,
+      "utc": "2026-10-26T10:14:24.637634+00:00"
+    }
+  },
+  {
+    "utc": "2026-10-26T10:20:25.400004+00:00",
+    "elapsed": 6610.979221064947,
+    "name": "merge-scroll-fonts",
+    "data": [
+      {
+        "indent": "-3249px",
+        "measuredTextWidth": 2846.16259765625,
+        "barFont": "12.5px / 17.5px JetBrains Mono, Cascadia Code, Fira Code, Consolas, DejaVu Sans Mono, monospace",
+        "barLeft": 3249,
+        "barScrollWidth": 3716,
+        "width": 421,
+        "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx LOCAL",
+        "family": "JetBrains Mono, Cascadia Code, Fira Code, Consolas, DejaVu Sans Mono, monospace",
+        "font": "12.5px / 19px JetBrains Mono, Cascadia Code, Fira Code, Consolas, DejaVu Sans Mono, monospace",
+        "size": "12.5px"
+      },
+      {
+        "indent": "-3240px",
+        "measuredTextWidth": 2836.587646484375,
+        "barFont": "12.5px / 17.5px JetBrains Mono, Cascadia Code, Fira Code, Consolas, DejaVu Sans Mono, monospace",
+        "barLeft": 3240,
+        "barScrollWidth": 3707,
+        "width": 420,
+        "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx BASE",
+        "family": "JetBrains Mono, Cascadia Code, Fira Code, Consolas, DejaVu Sans Mono, monospace",
+        "font": "12.5px / 19px JetBrains Mono, Cascadia Code, Fira Code, Consolas, DejaVu Sans Mono, monospace",
+        "size": "12.5px"
+      },
+      {
+        "indent": "-3258px",
+        "measuredTextWidth": 2857.3876953125,
+        "barFont": "12.5px / 17.5px JetBrains Mono, Cascadia Code, Fira Code, Consolas, DejaVu Sans Mono, monospace",
+        "barLeft": 3258,
+        "barScrollWidth": 3725,
+        "width": 420,
+        "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx REMOTE",
+        "family": "JetBrains Mono, Cascadia Code, Fira Code, Consolas, DejaVu Sans Mono, monospace",
+        "font": "12.5px / 19px JetBrains Mono, Cascadia Code, Fira Code, Consolas, DejaVu Sans Mono, monospace",
+        "size": "12.5px"
+      }
+    ]
+  },
+  {
+    "utc": "2026-10-26T10:21:24.322172+00:00",
+    "elapsed": 6669.9013965029735,
+    "name": "scroll-range-measure",
+    "data": [
+      {
+        "scrollWidth": 3716,
+        "font": "12.5px / 19px JetBrains Mono, Cascadia Code, Fira Code, Consolas, DejaVu Sans Mono, monospace",
+        "childFonts": [
+          {
+            "t": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxx ",
+            "font": "12.5px / 19px JetBrains Mono, Cascadia Code, Fira Code, Consolas, DejaVu Sans Mono, monospace",
+            "w": 2802.85009765625
+          },
+          {
+            "t": "LOCAL",
+            "font": "12.5px / 19px JetBrains Mono, Cascadia Code, Fira Code, Consolas, DejaVu Sans Mono, monospace",
+            "w": 43.3125
+          }
+        ],
+        "left": 0,
+        "codeWidth": 421,
+        "domTextWidth": 2846.16259765625,
+        "canvasFont": "12.5px JetBrains Mono, Cascadia Code, Fira Code, Consolas, DejaVu Sans Mono, monospace",
+        "canvasWidth": 2846.16259765625
+      },
+      {
+        "scrollWidth": 3707,
+        "font": "12.5px / 19px JetBrains Mono, Cascadia Code, Fira Code, Consolas, DejaVu Sans Mono, monospace",
+        "childFonts": [
+          {
+            "t": "xxxxxxxxxxxxxxxxxxxxxxxxx BASE",
+            "font": "12.5px / 19px JetBrains Mono, Cascadia Code, Fira Code, Consolas, DejaVu Sans Mono, monospace",
+            "w": 2836.587646484375
+          }
+        ],
+        "left": 0,
+        "codeWidth": 420,
+        "domTextWidth": 2836.587646484375,
+        "canvasFont": "12.5px JetBrains Mono, Cascadia Code, Fira Code, Consolas, DejaVu Sans Mono, monospace",
+        "canvasWidth": 2836.587646484375
+      },
+      {
+        "scrollWidth": 3725,
+        "font": "12.5px / 19px JetBrains Mono, Cascadia Code, Fira Code, Consolas, DejaVu Sans Mono, monospace",
+        "childFonts": [
+          {
+            "t": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxx ",
+            "font": "12.5px / 19px JetBrains Mono, Cascadia Code, Fira Code, Consolas, DejaVu Sans Mono, monospace",
+            "w": 2802.85009765625
+          },
+          {
+            "t": "REMOTE",
+            "font": "12.5px / 19px JetBrains Mono, Cascadia Code, Fira Code, Consolas, DejaVu Sans Mono, monospace",
+            "w": 54.53759765625
+          }
+        ],
+        "left": 0,
+        "codeWidth": 420,
+        "domTextWidth": 2857.3876953125,
+        "canvasFont": "12.5px JetBrains Mono, Cascadia Code, Fira Code, Consolas, DejaVu Sans Mono, monospace",
+        "canvasWidth": 2857.3876953125
+      }
+    ]
+  },
+  {
+    "utc": "2026-10-26T10:21:24.438597+00:00",
+    "elapsed": 6670.017817527987,
+    "name": "scroll-range-end",
+    "data": [
+      {
+        "codeBounds": {
+          "x": 46,
+          "height": 19,
+          "top": 100.171875,
+          "left": 46,
+          "right": 466.65625,
+          "width": 420.65625,
+          "bottom": 119.171875,
+          "y": 100.171875
+        },
+        "textBounds": {
+          "x": -3203,
+          "height": 15,
+          "top": 102.171875,
+          "left": -3203,
+          "right": -356.83740234375,
+          "width": 2846.16259765625,
+          "bottom": 117.171875,
+          "y": 102.171875
+        }
+      },
+      {
+        "codeBounds": {
+          "x": 513.65625,
+          "height": 19,
+          "top": 100.171875,
+          "left": 513.65625,
+          "right": 933.328125,
+          "width": 419.671875,
+          "bottom": 119.171875,
+          "y": 100.171875
+        },
+        "textBounds": {
+          "x": -2726.34375,
+          "height": 15,
+          "top": 102.171875,
+          "left": -2726.34375,
+          "right": 110.243896484375,
+          "width": 2836.587646484375,
+          "bottom": 117.171875,
+          "y": 102.171875
+        }
+      },
+      {
+        "codeBounds": {
+          "x": 980.328125,
+          "height": 19,
+          "top": 100.171875,
+          "left": 980.328125,
+          "right": 1400,
+          "width": 419.671875,
+          "bottom": 119.171875,
+          "y": 100.171875
+        },
+        "textBounds": {
+          "x": -2277.671875,
+          "height": 15,
+          "top": 102.171875,
+          "left": -2277.671875,
+          "right": 579.7158203125,
+          "width": 2857.3876953125,
+          "bottom": 117.171875,
+          "y": 102.171875
+        }
+      }
+    ]
+  },
+  {
+    "utc": "2026-10-26T10:24:11.744680+00:00",
+    "elapsed": 6837.323895575013,
+    "name": "saved-text-size",
+    "data": {
+      "bytesOnDisk": 103,
+      "meta": "UTF-8 · LF · 4 · 2 lines\nUTF-8 · LF · 6 · 2 lines",
+      "text": "←\n→\n↑\n⇄ Swap\n◀ Prev\nNext ▶\n1 / 1\nCopy ←\nCopy →\n↶\n↷\nFind\nOptions ▾\nSHOW\nAll rows\n2\nAll differences\n1\nSame\n1\nIgnored\n0\nChanged\n1\nRemoved (left only)\n0\nAdded (right only)\n0\nFILE\n/tmp/parallax-hour-20261026/edit-checks/left.txt\n📂\n▾\nFILE\n/tmp/parallax-hour-20261026/edit-checks/right.txt\n📂\n▾\nUTF-8 · LF · 4 · 2 lines\nUTF-8 · LF · 6 · 2 lines\n1\na\n←\n→\n1\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n2\nb\n2\nb\nLeft a\nRight xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nShowing 2 of 2 rows\n1 of 1 difference sections\nRow 1 of 2\nPlain text\nClick to edit · Shift+click or the line number selects lines · Ctrl+C/X/V, Delete · Alt+←/→: copy difference · F7 / F8: previous / next difference · Ctrl+F: find"
+    }
+  },
+  {
+    "utc": "2026-10-26T10:26:11.955799+00:00",
+    "elapsed": 6957.535021888907,
+    "name": "native-multiline-paste",
+    "data": {
+      "actual": "😀 line one\nline two\nline three😀 line one\nline two\nline three\nbeta\n",
+      "expected": "😀 line one\nline two\nline three\nbeta\n",
+      "pasteEvents": [
+        {
+          "text": "😀 line one\nline two\nline three",
+          "trusted": true
+        }
+      ],
+      "text": "←\n→\n↑\n⇄ Swap\n◀ Prev\nNext ▶\n1 / 1\nCopy ←\nCopy →\n↶\n↷\nFind\nOptions ▾\nSHOW\nAll rows\n6\nAll differences\n5\nSame\n1\nIgnored\n0\nChanged\n1\nRemoved (left only)\n0\nAdded (right only)\n4\nFILE\n/tmp/parallax-hour-20261026/native-paste/left.txt\n📂\n▾\nFILE\n/tmp/parallax-hour-20261026/native-paste/right.txt\n📂\n▾\nUTF-8 · LF · 11 · 2 lines\nUTF-8 · LF · 11 · 6 lines\n1\nalpha\n←\n→\n1\n😀 line one\n+\n2\nline two\n+\n3\nline three😀 line one\n+\n4\nline two\n+\n5\nline three\n2\nbeta\n6\nbeta\nLeft \nRight line three\nShowing 6 of 6 rows\n1 of 1 difference sections\nRow 5 of 6\nPlain text\nClick to edit · Shift+click or the line number selects lines · Ctrl+C/X/V, Delete · Alt+←/→: copy difference · F7 / F8: previous / next difference · Ctrl+F: find"
+    }
+  },
+  {
+    "utc": "2026-10-26T10:26:58.284222+00:00",
+    "elapsed": 7003.863451297977,
+    "name": "conflict-list-performance",
+    "data": {
+      "files": 120,
+      "uniqueStageBlobs": 3,
+      "seconds": 8.451772317988798,
+      "text": "Unmerged files on main\n/tmp/parallax-hour-20261026/conflict-many\n✦ Merging by syntax…\n⟳ Refresh\nStage resolved files\nLOCALmain (ours)\nBASEbase\nREMOTEtheirs\nFile\tConflict\tState\tResolve\nfile0000.txt\tboth modified\tunresolved\tOpen merge Keep local Take remote Mark resolved\nfile0001.txt\tboth modified\tunresolved\tOpen merge Keep local Take remote Mark resolved\nfile0002.txt\tboth modified\tunresolved\tOpen merge Keep local Take remote Mark resolved\nfile0003.txt\tboth modified\tunresolved\tOpen merge Keep local Take remote Mark resolved\nfile0004.txt\tboth modified\tunresolved\tOpen merge Keep local Take remote Mark resolved\nfile0005.txt\tboth modified\tunresolved\tOpen merge Keep local Take remote Mark resolved\n"
+    }
+  },
+  {
+    "utc": "2026-10-26T10:26:59.308721+00:00",
+    "elapsed": 7004.887942425907,
+    "name": "closed-conflicts-tab",
+    "data": {
+      "completedBefore": 0,
+      "completedAtClose": 0,
+      "totalTabs": 0,
+      "utc": "2026-10-26T10:26:59.308648+00:00"
+    }
+  },
+  {
+    "utc": "2026-10-26T10:30:23.298266+00:00",
+    "elapsed": 7208.877474574954,
+    "name": "isolated-merge-clipping",
+    "data": [
+      {
+        "length": 206,
+        "end": "xxxxxxxxxxxxxx LOCAL"
+      },
+      {
+        "length": 10001,
+        "end": "xxxxxxxxxxxxxxxxxxx…"
+      },
+      {
+        "length": 207,
+        "end": "xxxxxxxxxxxxx REMOTE"
+      }
+    ]
+  },
+  {
+    "utc": "2026-10-26T10:33:38.257566+00:00",
+    "elapsed": 7403.83679658093,
+    "name": "portable-merge-enter",
+    "data": {
+      "actual": "before\n\nbeta\n",
+      "expected": "before\nABC\nbeta\n"
+    }
+  },
+  {
+    "utc": "2026-10-26T10:33:39.185167+00:00",
+    "elapsed": 7404.764376476989,
+    "name": "long-branch-path-width",
+    "data": [
+      {
+        "text": "/tmp/parallax-hour-20261026/repo",
+        "scroll": 369,
+        "w": 371.109375
+      },
+      {
+        "text": "",
+        "scroll": 214,
+        "w": 14
+      }
+    ]
+  },
+  {
+    "utc": "2026-10-26T10:33:39.399401+00:00",
+    "elapsed": 7404.978626210941,
+    "name": "annotated-history-regression",
+    "data": {
+      "ok": true,
+      "value": {
+        "worktree": {
+          "type": "local",
+          "path": "/tmp/parallax-hour-20261026/repo/example.txt"
+        },
+        "commits": [
+          {
+            "summary": "Initial fixture",
+            "shortId": "48e1485",
+            "id": "48e1485f434af6365f3e5ea63ecb196fbb0a68e6",
+            "time": 1793002919,
+            "spec": {
+              "type": "gitRev",
+              "repo": "/tmp/parallax-hour-20261026/repo",
+              "rev": "48e1485",
+              "subpath": "example.txt"
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "utc": "2026-10-26T10:35:08.225522+00:00",
+    "elapsed": 7493.804728065967,
+    "name": "archive-unrelated-entry-reverted",
+    "data": "←\n→\n↑\n⇄ Swap\n◀ Prev\nNext ▶\n1 / 1\nCopy ←\nCopy →\n↶\n↷\nFind\nOptions ▾\nSHOW\nAll rows\n1\nAll differences\n1\nSame\n0\nIgnored\n0\nChanged\n1\nRemoved (left only)\n0\nAdded (right only)\n0\nARC\n/tmp/parallax-hour-20261026/archive-ui/source/target.zip!/b.txt\n📂\n▾\nARC\n/tmp/parallax-hour-20261026/archive-ui/dest/target.zip!/b.txt\n📂\n▾\nUTF-8 · LF · 6 · 1 lines\nUTF-8 · LF · 6 · 1 lines\n1\nNEW B\n←\n→\n1\nOLD B\nLeft NEW B\nRight OLD B\nShowing 1 of 1 rows\n1 of 1 difference sections\nRow 1 of 1\nPlain text\nClick to edit · Shift+click or the line number selects lines · Ctrl+C/X/V, Delete · Alt+←/→: copy difference · F7 / F8: previous / next difference · Ctrl+F: find"
+  },
+  {
+    "utc": "2026-10-26T10:38:07.243301+00:00",
+    "elapsed": 7672.822525654919,
+    "name": "large-edit-save-timing",
+    "data": {
+      "lines": 100000,
+      "seconds": 0.052067234995774925,
+      "last": "ne 0099994\nline 0099995\nline 0099996\nline 0099997\nline 0099998\nedited last line\n",
+      "text": "e 0099984\n99985\nline 0099984\n99986\nline 0099985\n99986\nline 0099985\n99987\nline 0099986\n99987\nline 0099986\n99988\nline 0099987\n99988\nline 0099987\n99989\nline 0099988\n99989\nline 0099988\n99990\nline 0099989\n99990\nline 0099989\n99991\nline 0099990\n99991\nline 0099990\n99992\nline 0099991\n99992\nline 0099991\n99993\nline 0099992\n99993\nline 0099992\n99994\nline 0099993\n99994\nline 0099993\n99995\nline 0099994\n99995\nline 0099994\n99996\nline 0099995\n99996\nline 0099995\n99997\nline 0099996\n99997\nline 0099996\n99998\nline 0099997\n99998\nline 0099997\n99999\nline 0099998\n99999\nline 0099998\n100000\nline 0099999\n←\n→\n100000\nedited last line\nLeft line 0099999\nRight edited last line\nShowing 100000 of 100000 rows\n1 of 1 difference sections\nRow 100000 of 100000\nPlain text\nClick to edit · Shift+click or the line number selects lines · Ctrl+C/X/V, Delete · Alt+←/→: copy difference · F7 / F8: previous / next difference · Ctrl+F: find"
+    }
+  },
+  {
+    "utc": "2026-10-26T10:38:08.907820+00:00",
+    "elapsed": 7674.487074253964,
+    "name": "large-edit-save-timing",
+    "data": {
+      "lines": 1000000,
+      "seconds": 0.2901363610289991,
+      "last": "ne 0999994\nline 0999995\nline 0999996\nline 0999997\nline 0999998\nedited last line\n",
+      "text": "999985\n999986\nline 0999985\n999987\nline 0999986\n999987\nline 0999986\n999988\nline 0999987\n999988\nline 0999987\n999989\nline 0999988\n999989\nline 0999988\n999990\nline 0999989\n999990\nline 0999989\n999991\nline 0999990\n999991\nline 0999990\n999992\nline 0999991\n999992\nline 0999991\n999993\nline 0999992\n999993\nline 0999992\n999994\nline 0999993\n999994\nline 0999993\n999995\nline 0999994\n999995\nline 0999994\n999996\nline 0999995\n999996\nline 0999995\n999997\nline 0999996\n999997\nline 0999996\n999998\nline 0999997\n999998\nline 0999997\n999999\nline 0999998\n999999\nline 0999998\n1000000\nline 0999999\n←\n→\n1000000\nedited last line\nLeft line 0999999\nRight edited last line\nShowing 1000000 of 1000000 rows\n1 of 1 difference sections\nRow 1000000 of 1000000\nPlain text\nSaving…\nClick to edit · Shift+click or the line number selects lines · Ctrl+C/X/V, Delete · Alt+←/→: copy difference · F7 / F8: previous / next difference · Ctrl+F: find"
+    }
+  }
+]

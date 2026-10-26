@@ -1,0 +1,13 @@
+
+> parallax-compare@0.0.12 check
+> svelte-check --tsconfig ./tsconfig.json
+
+Loading svelte-check in workspace: /workspace/ParallaxCompare-hour-review/app
+Getting Svelte diagnostics...
+
+svelte-check found 0 errors and 0 warnings
+npm notice
+npm notice New major version of npm available! 11.9.0 -> 12.2.1
+npm notice Changelog: https://github.com/npm/cli/releases/tag/v12.2.1
+npm notice To update run: npm install -g npm@12.2.1
+npm notice

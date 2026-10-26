@@ -1,0 +1,245 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>ParallaxCompare — 60-minute exploration, 26 October 2026</title><style>body{font:16px/1.6 system-ui,sans-serif;max-width:1100px;margin:32px auto;padding:0 22px;color:#182332;background:#f8fafc}a{color:#0755ab}h1,h2,h3{line-height:1.25}article{background:white;border:1px solid #d8e0eb;border-radius:8px;padding:24px;margin:22px 0}table{border-collapse:collapse;width:100%;background:white}td,th{padding:10px;text-align:left;border-bottom:1px solid #d8e0eb}code{background:#eef2f6;padding:2px 4px;overflow-wrap:anywhere}pre{white-space:pre-wrap;background:#eef2f6;padding:16px}img{width:100%;border:1px solid #ccd6e3;margin:12px 0}small,.muted{color:#526079}.P1{color:#aa2020}.P2{color:#9d5600}.P3{color:#245da0}nav{background:#eef2f6;padding:16px}summary{cursor:pointer;font-weight:600}</style><h1>ParallaxCompare: 60-minute exploration</h1>
+<p>Tested published <code>main</code> at <code>f246aa7</code> in the optimized native Linux GUI and CLI. The later v0.0.13 release commit e4b6ee6 changes version/packaging/docs only; application source and dependency versions are identical. Application source was left unchanged by this exploration.</p>
+<p><strong>14 reproduced findings: 5 P1, 6 P2, 3 P3.</strong> The most serious affect editing, stale saves, archive content preservation, and unreadable directory comparisons.</p>
+<h2>Run and verification</h2><pre>{
+  &quot;testedCommit&quot;: &quot;f246aa7c6d9c488f84ab5fa66e4f570f3faa972f&quot;,
+  &quot;releaseSourceEquivalentCommit&quot;: &quot;e4b6ee6fc486e7438628a386a2fb866d5ab2de22&quot;,
+  &quot;releaseVersion&quot;: &quot;0.0.13&quot;,
+  &quot;continuousStart&quot;: &quot;2026-10-26T09:58:31.909509+00:00&quot;,
+  &quot;continuousEnd&quot;: &quot;2026-10-26T10:58:33.803472+00:00&quot;,
+  &quot;continuousSeconds&quot;: 3601.8939708279213,
+  &quot;postRunChecks&quot;: {
+    &quot;utc&quot;: &quot;2026-10-26T10:59:35.567946+00:00&quot;,
+    &quot;monotonic&quot;: 650720.042112018,
+    &quot;activePeriodSeconds&quot;: 3663.65845850599,
+    &quot;finalExtraCycles&quot;: 43,
+    &quot;finalJavascriptErrors&quot;: [],
+    &quot;nativeProcessAlive&quot;: true
+  },
+  &quot;successfulRepeatedCycles&quot;: 1075,
+  &quot;correctedHarnessAttempts&quot;: 21,
+  &quot;findingCount&quot;: 14,
+  &quot;severityCounts&quot;: {
+    &quot;P1&quot;: 5,
+    &quot;P3&quot;: 3,
+    &quot;P2&quot;: 6
+  },
+  &quot;rustTestsPassed&quot;: 370,
+  &quot;rustTestsIgnored&quot;: 3,
+  &quot;frontendTestsPassed&quot;: 12,
+  &quot;svelteErrors&quot;: 0,
+  &quot;svelteWarnings&quot;: 0,
+  &quot;javascriptErrors&quot;: 0,
+  &quot;nativeCrashes&quot;: 0,
+  &quot;note&quot;: &quot;Earlier idle runtime is excluded. Repeated-use loop pauses are used for focused native GUI scenarios. Harness mistakes are excluded from product findings.&quot;
+}</pre>
+<p>Coverage: folder hierarchy/flat/status filters; text editing, Unicode, paste, save/undo and line endings; empty, invalid and binary files; ZIP and nested archives; Git refs/tags/history and PR head/merge base; symlink/executable conflict resolution; 100k/1M-line navigation/search; 4,000 separated merge conflicts; YAML, CSV, SQLite, Sphinx-Needs, DCM/PDX, AUTOSAR, S-CORE/FlatBuffers, images and Office views.</p>
+<p>Known passes include the earlier typed YAML key, explicit scalar tag, CSV boundary, Git mode, empty merge and many-conflict initialization fixes. A 4,000-conflict GUI open took about 0.65 s. No live enterprise GitHub instance or network/SharePoint mount was available; no claim is made about those systems. Memory samples alone are not treated as evidence of a leak.</p>
+<table><thead><tr><th>ID</th><th>Priority</th><th>Finding</th></tr></thead><tbody>
+<tr><td><a href="#H01">H01</a></td><td class="P1">P1</td><td>Enter in the merge editor drops focus and subsequent typing</td></tr>
+<tr><td><a href="#H02">H02</a></td><td class="P1">P1</td><td>Two-way Save overwrites a detected external edit without confirmation</td></tr>
+<tr><td><a href="#H04">H04</a></td><td class="P1">P1</td><td>Saving an old archive entry reverts unrelated content after a whole-ZIP replacement</td></tr>
+<tr><td><a href="#H05">H05</a></td><td class="P1">P1</td><td>Unreadable Git subdirectories are silently reported Same with zero errors</td></tr>
+<tr><td><a href="#H14">H14</a></td><td class="P1">P1</td><td>A single multiline clipboard paste is inserted twice</td></tr>
+<tr><td><a href="#H06">H06</a></td><td class="P2">P2</td><td>Needs normalization treats unknown scalar fields as unordered lists</td></tr>
+<tr><td><a href="#H07">H07</a></td><td class="P2">P2</td><td>A quoted literal YAML &lt;&lt; key is expanded as a merge key</td></tr>
+<tr><td><a href="#H08">H08</a></td><td class="P2">P2</td><td>Conflict list spends seconds spawning Git per stage instead of batching</td></tr>
+<tr><td><a href="#H09">H09</a></td><td class="P2">P2</td><td>Syntax checks keep running after the conflict tab closes</td></tr>
+<tr><td><a href="#H11">H11</a></td><td class="P2">P2</td><td>Merge horizontal scroll can move the entire line out of view</td></tr>
+<tr><td><a href="#H12">H12</a></td><td class="P2">P2</td><td>Merge input text beyond the display window cannot be inspected</td></tr>
+<tr><td><a href="#H03">H03</a></td><td class="P3">P3</td><td>Two empty text files offer no way to start editing</td></tr>
+<tr><td><a href="#H10">H10</a></td><td class="P3">P3</td><td>Long Git ref names squeeze the repository path out of the header</td></tr>
+<tr><td><a href="#H13">H13</a></td><td class="P3">P3</td><td>Displayed file size does not update after saving edits</td></tr>
+</tbody></table>
+<article id="H01"><h2>H01 · P1 · Enter in the merge editor drops focus and subsequent typing</h2><h3>Reproduce</h3><ol>
+<li>Open merge-editor/base.txt, local.txt and remote.txt; choose result.txt as the output.</li>
+<li>Click the first result line, replace it with before, press Enter, then type ABC.</li>
+<li>Save the result. This also reproduces with 250 ms between keys, not just a fast burst.</li>
+</ol>
+<h3>Observed</h3><p>One Enter followed by ABC saves before\n\nbeta\n; ABC is missing. The active element becomes BODY while a replacement editor exists but is not focused.</p>
+<h3>Expected</h3><p>Typing should continue in the new line and save before\nABC\nbeta\n.</p>
+<h3>Cause</h3><p>The Enter handler queues a merge edit, then focuses an input before the returned info resets the result row cache. Resetting renders loading/replacement rows and removes the focused input; focus/caret are not restored and following keys are not queued.</p>
+<h3>Fix direction</h3><p>Keep an explicit pending caret and input queue across merge edits, and restore focus only after the requested result row is loaded. The two-way editor already has a corresponding mechanism.</p>
+<h3>Regression coverage</h3><ul><li>Native key actions: Enter + ABC at 0/30/100/250 ms; assert focus, content, save and undo. Also test Enter near virtual chunk boundaries.</li></ul>
+<p class="muted">New merge-editor finding. Related to #9/R01, which concerned the separate two-way editor.</p>
+<p>Source: <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/app/src/lib/MergeView.svelte#L99">app/src/lib/MergeView.svelte:99</a>, <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/app/src/lib/MergeView.svelte#L340">app/src/lib/MergeView.svelte:340</a>, <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/app/src/lib/rowPane.svelte.ts#L52">app/src/lib/rowPane.svelte.ts:52</a></p>
+<details><summary>92-portable-merge-enter.png</summary><a href="screenshots/92-portable-merge-enter.png"><img loading="lazy" src="screenshots/92-portable-merge-enter.png" alt="Enter in the merge editor drops focus and subsequent typing"></a></details>
+</article>
+<article id="H02"><h2>H02 · P1 · Two-way Save overwrites a detected external edit without confirmation</h2><h3>Reproduce</h3><ol>
+<li>Compare editor/left.txt and right.txt; edit the right first line and leave the line editor.</li>
+<li>Replace right.txt from another editor/process with External edit must survive\n.</li>
+<li>Wait for The file changed on disk, then press Ctrl+S.</li>
+</ol>
+<h3>Observed</h3><p>The external bytes are replaced with the older in-app draft; the changed-on-disk warning can remain visible after the destructive save.</p>
+<h3>Expected</h3><p>A stale save should write nothing until the user explicitly chooses overwrite or another destination.</p>
+<h3>Cause</h3><p>The watcher sets changedOnDisk but save_side unconditionally applies Change::Put. Unlike merge_save, it has no content/version precondition.</p>
+<h3>Fix direction</h3><p>Track each opened/saved side version and check before writes, including other tabs, deleted/replaced files and archive entries. Offer explicit overwrite/reload/save-as. Merely displaying a banner is insufficient.</p>
+<h3>Regression coverage</h3><ul><li>Externally change the same side after a draft; save must preserve external bytes until explicit overwrite. Test duplicate independent tabs and opposite-side changes.</li></ul>
+<p class="muted">Distinct from #8/F17: the watcher DOES detect this change. The recent #10/M01 guard protects merge results, not normal file comparisons.</p>
+<p>Source: <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/app/src-tauri/src/commands.rs#L1521">app/src-tauri/src/commands.rs:1521</a>, <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/app/src/lib/TextView.svelte#L1486">app/src/lib/TextView.svelte:1486</a></p>
+<details><summary>12-text-external-change.png</summary><a href="screenshots/12-text-external-change.png"><img loading="lazy" src="screenshots/12-text-external-change.png" alt="Two-way Save overwrites a detected external edit without confirmation"></a></details>
+<details><summary>13-text-external-after-save.png</summary><a href="screenshots/13-text-external-after-save.png"><img loading="lazy" src="screenshots/13-text-external-after-save.png" alt="Two-way Save overwrites a detected external edit without confirmation"></a></details>
+</article>
+<article id="H04"><h2>H04 · P1 · Saving an old archive entry reverts unrelated content after a whole-ZIP replacement</h2><h3>Reproduce</h3><ol>
+<li>Compare archive/reference.txt with archive/dest/target.zip!/a.txt. Edit the ZIP entry to MY A and leave it unsaved.</li>
+<li>In another tab compare archive/source against archive/dest. Select target.zip, Copy right and confirm. The ZIPs deliberately have equal size (206 bytes) and the same preserved mtime.</li>
+<li>Verify the copied destination contains NEW A and NEW B, then return to the old entry tab and save.</li>
+</ol>
+<h3>Observed</h3><p>After the raw ZIP copy, entries are NEW A / NEW B. Saving a.txt yields MY A / OLD B: b.txt is silently reverted even though it was not edited.</p>
+<h3>Expected</h3><p>Saving a single entry must retain the latest unrelated entries or reject the stale save.</p>
+<h3>Cause</h3><p>ArchiveMount.revalidate relies on size + second-resolution mtime and a process generation. Generations are incremented for nested archive rewrites only; a whole archive copied/replaced through the local file path does not advance that version. Equal-size/equal-mtime replacements leave the cached old archive valid. A dirty file tab does not reload the cache when its watcher warns.</p>
+<h3>Fix direction</h3><p>Invalidate or version all whole-archive writes as well as inner rewrites. Use a robust identity/version/content check for externally replaced containers; preserve latest unrelated entries under the coordinated write lock. Add stale-save protection to normal file edits too.</p>
+<h3>Regression coverage</h3><ul><li>The exact GUI sequence above; aliases and atomic replacements; same size and mtime; nested archives. Keep the independent inner-entry save regression, which passed five repetitions.</li></ul>
+<p class="muted">Follow-up to closed #11/C01. Its original two-inner-write scenario passes; this replaces the whole container. Also reproduced directly against the production core; see archive-probe.rs and archive-direct-result.txt.</p>
+<p>Source: <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/crates/parallax-core/src/vfs/mount.rs#L22">crates/parallax-core/src/vfs/mount.rs:22</a>, <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/crates/parallax-core/src/vfs/mount.rs#L72">crates/parallax-core/src/vfs/mount.rs:72</a>, <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/crates/parallax-core/src/vfs/mount.rs#L188">crates/parallax-core/src/vfs/mount.rs:188</a>, <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/crates/parallax-core/src/ops.rs#L74">crates/parallax-core/src/ops.rs:74</a></p>
+<details><summary>61-archive-before-copy.png</summary><a href="screenshots/61-archive-before-copy.png"><img loading="lazy" src="screenshots/61-archive-before-copy.png" alt="Saving an old archive entry reverts unrelated content after a whole-ZIP replacement"></a></details>
+<details><summary>63-archive-stale-draft.png</summary><a href="screenshots/63-archive-stale-draft.png"><img loading="lazy" src="screenshots/63-archive-stale-draft.png" alt="Saving an old archive entry reverts unrelated content after a whole-ZIP replacement"></a></details>
+<details><summary>94-archive-unrelated-entry-reverted.png</summary><a href="screenshots/94-archive-unrelated-entry-reverted.png"><img loading="lazy" src="screenshots/94-archive-unrelated-entry-reverted.png" alt="Saving an old archive entry reverts unrelated content after a whole-ZIP replacement"></a></details>
+</article>
+<article id="H05"><h2>H05 · P1 · Unreadable Git subdirectories are silently reported Same with zero errors</h2><h3>Reproduce</h3><ol>
+<li>Use the two generated permissions repositories, with tracked visible.txt and differing restricted/secret.txt.</li>
+<li>As a non-root user, chmod 000 both restricted directories; compare the repository folders with Gitignore respected.</li>
+<li>Expand restricted and inspect Errors. Restore permissions with chmod 755 afterwards.</li>
+</ol>
+<h3>Observed</h3><p>At uid 1000, the UI lists restricted as Same and empty, counts only visible.txt and reports Errors 0. The CLI also returns root.status=same, files=1, errors=0 and exit 0. Control: --no-gitignore reports the unreadable directory as an error and exits 2, isolating the snapshot path.</p>
+<h3>Expected</h3><p>Represent an unreadable subtree as an error/incomplete comparison; never assert it is empty or identical.</p>
+<h3>Cause</h3><p>LocalFs.walk discards ignore::WalkError; entry_from_path/add_tracked also skip failed metadata lookups. The snapshot retains an empty directory without the traversal error.</p>
+<h3>Fix direction</h3><p>Preserve traversal errors in the snapshot/VFS and propagate an error node/completeness state through comparison, refresh and CLI exit handling.</p>
+<h3>Regression coverage</h3><ul><li>Non-root tests for unreadable root, tracked/untracked child directories and permission recovery. CLI exit 2 and GUI Errors must agree; readable different files remain Different.</li></ul>
+<p class="muted">Related to #8/F09, but this is a suppressed traversal error and false equality/exit 0, not an error already shown with the wrong exit code.</p>
+<p>Source: <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/crates/parallax-core/src/vfs/local.rs#L84">crates/parallax-core/src/vfs/local.rs:84</a>, <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/crates/parallax-core/src/vfs/local.rs#L100">crates/parallax-core/src/vfs/local.rs:100</a>, <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/crates/parallax-core/src/vfs/local.rs#L133">crates/parallax-core/src/vfs/local.rs:133</a></p>
+<details><summary>65-unreadable-git-directories.png</summary><a href="screenshots/65-unreadable-git-directories.png"><img loading="lazy" src="screenshots/65-unreadable-git-directories.png" alt="Unreadable Git subdirectories are silently reported Same with zero errors"></a></details>
+<details><summary>66-unreadable-expanded.png</summary><a href="screenshots/66-unreadable-expanded.png"><img loading="lazy" src="screenshots/66-unreadable-expanded.png" alt="Unreadable Git subdirectories are silently reported Same with zero errors"></a></details>
+</article>
+<article id="H14"><h2>H14 · P1 · A single multiline clipboard paste is inserted twice</h2><h3>Reproduce</h3><ol>
+<li>Compare editor/left.txt and right.txt (alpha\nbeta\n). Click the right first line and select alpha in the line editor.</li>
+<li>Put three lines in the native clipboard (😀 line one, line two, line three) and press Ctrl+V once, then save.</li>
+</ol>
+<h3>Observed</h3><p>One trusted paste event produces the three-line payload twice: 😀 line one\nline two\nline three😀 line one\nline two\nline three\nbeta\n. Native Ctrl+V and a synthetic bubbling paste both reproduce.</p>
+<h3>Expected</h3><p>A single paste should replace the selection once, producing three inserted lines followed by beta.</p>
+<h3>Cause</h3><p>onPaste prevents the default but does not stop propagation. Its commit sets awaiting; the same event bubbles to the viewport onViewPaste, whose holdPaste now queues it. replay applies that payload a second time.</p>
+<h3>Fix direction</h3><p>Handle each paste once: stop propagation when consumed and/or reject already handled/defaultPrevented events before holdPaste in the ancestor. Keep legitimate paste-ahead queuing.</p>
+<h3>Regression coverage</h3><ul><li>Native multiline Ctrl+V in an active input and a bubbling ClipboardEvent; assert one insertion, caret, undo and save. Also test a genuine second paste while awaiting.</li></ul>
+<p class="muted">native-paste.log records exactly one paste event with isTrusted=true and the complete saved/expected text.</p>
+<p>Source: <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/app/src/lib/TextView.svelte#L797">app/src/lib/TextView.svelte:797</a>, <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/app/src/lib/TextView.svelte#L838">app/src/lib/TextView.svelte:838</a>, <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/app/src/lib/TextView.svelte#L1035">app/src/lib/TextView.svelte:1035</a></p>
+<details><summary>87-native-multiline-paste.png</summary><a href="screenshots/87-native-multiline-paste.png"><img loading="lazy" src="screenshots/87-native-multiline-paste.png" alt="A single multiline clipboard paste is inserted twice"></a></details>
+</article>
+<article id="H06"><h2>H06 · P2 · Needs normalization treats unknown scalar fields as unordered lists</h2><h3>Reproduce</h3><ol>
+<li>Compare needs/left/req.rst and needs/right/req.rst, or their parent folders.</li>
+<li>Both projects declare needs_extra_options=[&quot;product_code&quot;]. The only changed requirement value is alpha,beta versus beta,alpha.</li>
+</ol>
+<h3>Observed</h3><p>The folder labels req.rst Similar. The default Needs view normalizes both product_code values to alpha, beta and shows zero differences. The CLI exits 0.</p>
+<h3>Expected</h3><p>An arbitrary extra option is a string unless the project declares list semantics. These values must remain different.</p>
+<h3>Cause</h3><p>needs::normalize_value splits on comma/semicolon/pipe and sorts any no-space multi-part value via the id_like heuristic, regardless of field name.</p>
+<h3>Fix direction</h3><p>Limit list normalization to known/configured list fields, preserving arbitrary custom scalar values and order.</p>
+<h3>Regression coverage</h3><ul><li>Custom comma/semicolon/pipe strings remain different, while known tags/links reorder as intended. Cover both reST and needs.json.</li></ul>
+<p>Source: <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/crates/parallax-core/src/convert/needs.rs#L88">crates/parallax-core/src/convert/needs.rs:88</a>, <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/crates/parallax-core/src/convert/needs.rs#L384">crates/parallax-core/src/convert/needs.rs:384</a></p>
+<details><summary>67-needs-custom-folder.png</summary><a href="screenshots/67-needs-custom-folder.png"><img loading="lazy" src="screenshots/67-needs-custom-folder.png" alt="Needs normalization treats unknown scalar fields as unordered lists"></a></details>
+<details><summary>69-needs-custom-normalized.png</summary><a href="screenshots/69-needs-custom-normalized.png"><img loading="lazy" src="screenshots/69-needs-custom-normalized.png" alt="Needs normalization treats unknown scalar fields as unordered lists"></a></details>
+</article>
+<article id="H07"><h2>H07 · P2 · A quoted literal YAML &lt;&lt; key is expanded as a merge key</h2><h3>Reproduce</h3><ol>
+<li>Compare yaml/left/data.yaml: &quot;&lt;&lt;&quot;: {x: 1} with yaml/right/data.yaml: x: 1.</li>
+<li>Inspect the folder result and the default Normalized YAML view.</li>
+</ol>
+<h3>Observed</h3><p>Both render x: 1. The folder/CLI classify the files Similar with same data and exit 0. PyYAML instead reads {&quot;&lt;&lt;&quot;:{&quot;x&quot;:1}} and {&quot;x&quot;:1}.</p>
+<h3>Expected</h3><p>Quoted/explicitly string-tagged &lt;&lt; is an ordinary mapping key, not a merge directive.</p>
+<h3>Cause</h3><p>Scalar parsing discards the distinction between a quoted string and the special merge key; finish_map interprets every Scalar::Str(&quot;&lt;&lt;&quot;) as a merge.</p>
+<h3>Fix direction</h3><p>Preserve scalar style/tag information needed to recognize merge keys and honor explicit string keys. Do not expand a quoted or !!str &lt;&lt; key.</p>
+<h3>Regression coverage</h3><ul><li>Quoted &lt;&lt;, !!str &lt;&lt; and legitimate unquoted merge/alias fixtures; assert structure, rendered view, folder status and CLI exit.</li></ul>
+<p class="muted">A separate semantic case from the typed-key and explicit-value-tag fixes in #11, which passed their original checks.</p>
+<p>Source: <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/crates/parallax-core/src/convert/data.rs#L171">crates/parallax-core/src/convert/data.rs:171</a>, <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/crates/parallax-core/src/convert/data.rs#L237">crates/parallax-core/src/convert/data.rs:237</a></p>
+<details><summary>70-quoted-merge-folder.png</summary><a href="screenshots/70-quoted-merge-folder.png"><img loading="lazy" src="screenshots/70-quoted-merge-folder.png" alt="A quoted literal YAML &lt;&lt; key is expanded as a merge key"></a></details>
+<details><summary>72-quoted-merge-normalized.png</summary><a href="screenshots/72-quoted-merge-normalized.png"><img loading="lazy" src="screenshots/72-quoted-merge-normalized.png" alt="A quoted literal YAML &lt;&lt; key is expanded as a merge key"></a></details>
+</article>
+<article id="H08"><h2>H08 · P2 · Conflict list spends seconds spawning Git per stage instead of batching</h2><h3>Reproduce</h3><ol>
+<li>Open Resolve conflicts for conflict-many (120 tiny .txt conflicts; only three distinct stage blobs).</li>
+<li>Measure until the 120 file rows become available.</li>
+</ol>
+<h3>Observed</h3><p>7.609 seconds untraced before rows; a traced repeat took 8.557 seconds. Classification reads all 360 stages with individual git cat-file processes even though they repeat three OIDs.</p>
+<h3>Expected</h3><p>Show the conflict list promptly and classify small files using a batched/cached operation or lazily.</p>
+<h3>Cause</h3><p>repo_conflicts synchronously iterates every file and stage, calling stage_content for each. Each command starts a process and is polled on a 20 ms interval. Syntax analysis then reads those stages again.</p>
+<h3>Fix direction</h3><p>Batch git cat-file reads, deduplicate OIDs per operation and share the stage snapshot with syntax checks. Avoid blocking initial list display on every classification.</p>
+<h3>Regression coverage</h3><ul><li>120/1000 tiny conflicts with repeated and unique OIDs; record time to first rows and subprocess count. Preserve binary/link/gitlink classification.</li></ul>
+<p class="muted">Measured timings are from the optimized Linux build. Do not extrapolate them as measurements of a 1000-file repository.</p>
+<p>Source: <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/app/src-tauri/src/merge.rs#L754">app/src-tauri/src/merge.rs:754</a>, <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/crates/parallax-core/src/conflicts.rs#L229">crates/parallax-core/src/conflicts.rs:229</a>, <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/crates/parallax-core/src/process.rs#L130">crates/parallax-core/src/process.rs:130</a></p>
+<details><summary>77-120-repository-conflicts.png</summary><a href="screenshots/77-120-repository-conflicts.png"><img loading="lazy" src="screenshots/77-120-repository-conflicts.png" alt="Conflict list spends seconds spawning Git per stage instead of batching"></a></details>
+</article>
+<article id="H09"><h2>H09 · P2 · Syntax checks keep running after the conflict tab closes</h2><h3>Reproduce</h3><ol>
+<li>Open the same 120-conflict repository with built-in syntax checking enabled.</li>
+<li>Close its tab shortly after the rows appear, while Merging by syntax is shown.</li>
+</ol>
+<h3>Observed</h3><p>Timestamped trace: after the tab closed at 10:26:59.308 UTC, 793 further Git executions ran, including 341 cat-file and 113 ls-files, for another 19.268 seconds. No conflict tab remained mounted.</p>
+<h3>Expected</h3><p>Closing the view should cancel/invalidate further per-file checks and release resources after any unavoidable in-flight request.</p>
+<h3>Cause</h3><p>ConflictsView.onDestroy only unlistens from merge-saved. checkSyntax keeps its run number valid and continues the for loop after component destruction.</p>
+<h3>Fix direction</h3><p>Invalidate checkRun on destruction and check cancellation before scheduling each request; add backend cancellation for in-flight expensive work where practical.</p>
+<h3>Regression coverage</h3><ul><li>Close during a multi-file syntax scan; at most the current request may finish and no later files should start. Also test refresh, engine change and close/reopen.</li></ul>
+<p class="muted">conflict-after-close-timed.json and the timestamped exec trace provide the counts. The native IPC invoke function was immutable, so an attempted JS timing wrapper was not used as evidence.</p>
+<p>Source: <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/app/src/lib/ConflictsView.svelte#L69">app/src/lib/ConflictsView.svelte:69</a>, <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/app/src/lib/ConflictsView.svelte#L100">app/src/lib/ConflictsView.svelte:100</a></p>
+<details><summary>77-120-repository-conflicts.png</summary><a href="screenshots/77-120-repository-conflicts.png"><img loading="lazy" src="screenshots/77-120-repository-conflicts.png" alt="Syntax checks keep running after the conflict tab closes"></a></details>
+</article>
+<article id="H11"><h2>H11 · P2 · Merge horizontal scroll can move the entire line out of view</h2><h3>Reproduce</h3><ol>
+<li>Open merge-medium (400 x characters followed by LOCAL / BASE / REMOTE).</li>
+<li>Move each input column scrollbar fully right.</li>
+</ol>
+<h3>Observed</h3><p>All three input lines become blank. For local: rendered DOM text width 2846.16 px, code viewport 420.66 px, allowed scroll 3249 px. Its text ends at x=-356.84 while the code pane starts at x=46.</p>
+<h3>Expected</h3><p>At maximum scroll the end of each line must remain visible, with no unusable blank tail.</p>
+<h3>Cause</h3><p>The scrollbar width is estimated from character count in ch units rather than the rendered content. In this Linux font fallback environment the estimate does not match actual glyph metrics; tabs are also estimated as fixed extra characters rather than tab stops.</p>
+<h3>Fix direction</h3><p>Derive/clamp the horizontal range from actual rendered code widths (or verified matching monospace metrics), including gutters, tabs and font fallback. Preserve independent column scrolling.</p>
+<h3>Regression coverage</h3><ul><li>400-character input with native font fallbacks, tabs, mixed glyph widths and zoom/window resize; assert final glyphs are visible at maximum scroll.</li></ul>
+<p class="muted">Follow-up to #10/M05. This occurs below the 10k truncation limit, so H12 is independent. DOM range measurements are in scroll-measure.log.</p>
+<p>Source: <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/app/src/lib/MergeView.svelte#L142">app/src/lib/MergeView.svelte:142</a>, <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/app/src/lib/MergeView.svelte#L777">app/src/lib/MergeView.svelte:777</a>, <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/app/src/lib/MergeView.svelte#L1087">app/src/lib/MergeView.svelte:1087</a></p>
+<details><summary>82-medium-line-max-scroll.png</summary><a href="screenshots/82-medium-line-max-scroll.png"><img loading="lazy" src="screenshots/82-medium-line-max-scroll.png" alt="Merge horizontal scroll can move the entire line out of view"></a></details>
+</article>
+<article id="H12"><h2>H12 · P2 · Merge input text beyond the display window cannot be inspected</h2><h3>Reproduce</h3><ol>
+<li>Open merge-long (20,000 x characters followed by BASE / LOCAL / REMOTE).</li>
+<li>Inspect/scroll the input columns, including the end of the displayed base text.</li>
+</ol>
+<h3>Observed</h3><p>Local/remote show their changed suffixes, but base contains only the first 10,000 characters plus ellipsis; BASE is absent from the DOM. No read-only full-line action or horizontal window request is available.</p>
+<h3>Expected</h3><p>The user must be able to inspect all three versions before choosing, even when display rendering is bounded.</p>
+<h3>Cause</h3><p>LineView clips to MAX_SHOWN_LINE=10,000, taking base from the start and changed sides around their first mark. Horizontal scrolling only translates the already shortened string. Only result lines offer full text when edited.</p>
+<h3>Fix direction</h3><p>Provide lazy horizontal text windows or a read-only full-line inspector/copy action for each input, and show how much was omitted. Retain bounded initial rendering.</p>
+<h3>Regression coverage</h3><ul><li>Changes and relevant base content beyond column10k; multiple widely separated intraline changes; full read-only input access without first taking a side.</li></ul>
+<p class="muted">Remaining limitation after #10/M05, not a claim that the recent ordinary-width scrolling fix was absent. Screenshot positions are limited to actual rendered text width to isolate this from H11.</p>
+<p>Source: <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/app/src-tauri/src/commands.rs#L1113">app/src-tauri/src/commands.rs:1113</a>, <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/app/src-tauri/src/commands.rs#L1136">app/src-tauri/src/commands.rs:1136</a>, <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/app/src/lib/MergeView.svelte#L763">app/src/lib/MergeView.svelte:763</a></p>
+<details><summary>89-truncation-isolated-from-scroll-range.png</summary><a href="screenshots/89-truncation-isolated-from-scroll-range.png"><img loading="lazy" src="screenshots/89-truncation-isolated-from-scroll-range.png" alt="Merge input text beyond the display window cannot be inspected"></a></details>
+</article>
+<article id="H03"><h2>H03 · P3 · Two empty text files offer no way to start editing</h2><h3>Reproduce</h3><ol>
+<li>Compare empty/left.txt and empty/right.txt.</li>
+<li>Try clicking, Enter/F2 and typing in the empty comparison.</li>
+</ol>
+<h3>Observed</h3><p>There are zero rows and no line input, while the footer says Click to edit.</p>
+<h3>Expected</h3><p>Offer an empty editable row or an explicit start-typing action for each writable side.</p>
+<h3>Cause</h3><p>The two-way grid only renders existing diff rows; both empty documents produce no row on which openEditor can operate.</p>
+<h3>Fix direction</h3><p>Add an empty-document editing affordance and create the first line safely; preserve empty undo/save behavior.</p>
+<h3>Regression coverage</h3><ul><li>Compare two empty files, type into either side, save and undo back to empty.</li></ul>
+<p class="muted">The analogous merge-result case from #10/M04 is fixed and passed here.</p>
+<p>Source: <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/app/src/lib/TextView.svelte#L1688">app/src/lib/TextView.svelte:1688</a></p>
+<details><summary>14-empty-text.png</summary><a href="screenshots/14-empty-text.png"><img loading="lazy" src="screenshots/14-empty-text.png" alt="Two empty text files offer no way to start editing"></a></details>
+</article>
+<article id="H10"><h2>H10 · P3 · Long Git ref names squeeze the repository path out of the header</h2><h3>Reproduce</h3><ol>
+<li>Compare a short ref against feature/a-very-long-branch-name-for-testing-side-specific-dropdown-and-the-path-layout.</li>
+<li>At the normal 1400-pixel window width inspect the right path bar.</li>
+</ol>
+<h3>Observed</h3><p>The right repository path collapses to 14 pixels and the ref/status content overflows the available half-width.</p>
+<h3>Expected</h3><p>Both the repository/path and the selected ref must remain identifiable.</p>
+<h3>Cause</h3><p>PathBar places the flexible path beside a non-shrinking ref on one row, without a bounded ref region.</p>
+<h3>Fix direction</h3><p>Use the proposed two-row layout (path then ref/commit/actions), with min-width:0, truncation/tooltips and side-specific ref selection. Test the minimum 800-pixel window too.</p>
+<h3>Regression coverage</h3><ul><li>Very long slash branches/tags, long repo/subpaths and asymmetric names at 800/1400 widths.</li></ul>
+<p class="muted">Previously discussed UX, reproduced on published main f246aa7. Existing unpublished local implementation work was excluded from this review.</p>
+<p>Source: <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/app/src/lib/PathBar.svelte#L302">app/src/lib/PathBar.svelte:302</a>, <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/app/src/lib/PathBar.svelte#L308">app/src/lib/PathBar.svelte:308</a>, <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/app/src/lib/PathBar.svelte#L425">app/src/lib/PathBar.svelte:425</a></p>
+<details><summary>93-long-branch-clean-tabs.png</summary><a href="screenshots/93-long-branch-clean-tabs.png"><img loading="lazy" src="screenshots/93-long-branch-clean-tabs.png" alt="Long Git ref names squeeze the repository path out of the header"></a></details>
+</article>
+<article id="H13"><h2>H13 · P3 · Displayed file size does not update after saving edits</h2><h3>Reproduce</h3><ol>
+<li>Compare metadata/left.txt (4 bytes, LF) and metadata/right.txt (6 bytes, CRLF).</li>
+<li>Use LF on the right; replace its first line with 100 x characters and save.</li>
+</ol>
+<h3>Observed</h3><p>The right file is 103 bytes on disk; the UI still says UTF-8 · LF · 6 · 2 lines. The size only becomes correct after reopening/reloading.</p>
+<h3>Expected</h3><p>Metadata after a successful save should describe the saved file, with any unsaved buffer size clearly distinguished if shown.</p>
+<h3>Cause</h3><p>EditInfo carries current lines and line endings but no sizes; applyEdit keeps the initial SideInfo.size.</p>
+<h3>Fix direction</h3><p>Return/update saved byte lengths in edit/save responses and refresh the relevant metadata after save without losing undo history.</p>
+<h3>Regression coverage</h3><ul><li>Change byte length, encoding-sensitive Unicode text and line endings; verify saved byte count and preserved undo.</li></ul>
+<p>Source: <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/app/src-tauri/src/commands.rs#L1298">app/src-tauri/src/commands.rs:1298</a>, <a href="https://github.com/erpel-dev/ParallaxCompare/blob/f246aa7c6d9c488f84ab5fa66e4f570f3faa972f/app/src/lib/TextView.svelte#L1470">app/src/lib/TextView.svelte:1470</a></p>
+<details><summary>85-stale-file-size.png</summary><a href="screenshots/85-stale-file-size.png"><img loading="lazy" src="screenshots/85-stale-file-size.png" alt="Displayed file size does not update after saving edits"></a></details>
+</article>
+<details><summary>Final native GUI check</summary><img loading="lazy" src="screenshots/99-exploration-complete.png" alt="Application at the end of exploration"></details>
+<h2>Reproduction package</h2><p><code>create-fixtures.py --directory /tmp/parallax-review-fixtures</code> creates fresh disposable cases without commits or identity changes. See README.md for exact steps and permission restoration. Logs retain corrected harness attempts; those are not application findings.</p></html>

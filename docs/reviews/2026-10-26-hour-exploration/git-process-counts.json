@@ -1,0 +1,10 @@
+{
+  "utc": "2026-10-26T10:15:07.239224+00:00",
+  "gitExecs": 1204,
+  "catFile": 720,
+  "lsFiles": 121,
+  "last": [
+    "589861 execve(\"/usr/local/bin/git\", [\"git\", \"-C\", \"/tmp/parallax-hour-20261026/conf\"..., \"cat-file\", \"blob\", \"4c77fc7ce5a46c69aa0f001dc3390aec\"...], 0x7fc9580b0630 /* 93 vars */ <unfinished ...>",
+    "589864 execve(\"/usr/local/bin/git\", [\"git\", \"-C\", \"/tmp/parallax-hour-20261026/conf\"..., \"cat-file\", \"blob\", \"e4fc3515053252f220ab7ed14caad543\"...], 0x7fc9580b0630 /* 93 vars */ <unfinished ...>"
+  ]
+}

@@ -1,0 +1,5 @@
+{
+  "exitCode": 2,
+  "stdout": "{\"root\":{\"name\":\"\",\"left\":{\"kind\":\"dir\",\"size\":0,\"mtime\":null},\"right\":{\"kind\":\"dir\",\"size\":0,\"mtime\":null},\"status\":\"different\",\"children\":[{\"name\":\"restricted\",\"left\":{\"kind\":\"dir\",\"size\":0,\"mtime\":1793009185},\"right\":{\"kind\":\"dir\",\"size\":0,\"mtime\":1793009185},\"status\":\"error\",\"message\":\"/tmp/parallax-hour-20261026/permissions/left/restricted: Permission denied (os error 13)\"},{\"name\":\"visible.txt\",\"left\":{\"kind\":\"file\",\"size\":5,\"mtime\":1793009185},\"right\":{\"kind\":\"file\",\"size\":5,\"mtime\":1793009185},\"status\":\"same\"}]},\"summary\":{\"files\":1,\"same\":1,\"similar\":0,\"different\":0,\"leftOnly\":0,\"rightOnly\":0,\"errors\":1,\"identicalSubtrees\":0,\"elapsedMs\":0}}\n",
+  "stderr": "parallax: 1 entry could not be compared\n"
+}

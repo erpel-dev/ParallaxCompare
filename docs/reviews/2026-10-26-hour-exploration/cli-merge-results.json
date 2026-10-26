@@ -1,0 +1,23 @@
+[
+  {
+    "case": "clean",
+    "exitCode": 0,
+    "stdout": "",
+    "stderr": "",
+    "result": "ONE\ntwo\nthree\nfour\nFIVE\n"
+  },
+  {
+    "case": "conflict",
+    "exitCode": 1,
+    "stdout": "",
+    "stderr": "parallax merge: 1 conflict left\n",
+    "result": "header\n<<<<<<< /tmp/parallax-hour-20261026/merge/conflict/local.txt\nlocal\n=======\nremote\n>>>>>>> /tmp/parallax-hour-20261026/merge/conflict/remote.txt\nfooter\n"
+  },
+  {
+    "case": "empty",
+    "exitCode": 0,
+    "stdout": "",
+    "stderr": "",
+    "result": ""
+  }
+]

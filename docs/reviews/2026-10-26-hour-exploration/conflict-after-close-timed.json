@@ -1,0 +1,9 @@
+{
+  "closedAtUtc": "2026-10-26T10:26:59.308648+00:00",
+  "totalGitExecs": 1204,
+  "afterCloseGitExecs": 793,
+  "afterCloseCatFile": 341,
+  "afterCloseLsFiles": 113,
+  "lastAfterCloseSeconds": 19.268,
+  "lastExec": "595453 1793010438.576652 execve(\"/usr/local/bin/git\", [\"git\", \"-C\", \"/tmp/parallax-hour-20261026/conflict-many\", \"cat-file\", \"blob\", \"e4fc3515053252f220ab7ed14caad5434222528f\"], 0x7fc930080300 /* 93 vars */) = 0"
+}

@@ -1,0 +1,32 @@
+{
+  "testedCommit": "f246aa7c6d9c488f84ab5fa66e4f570f3faa972f",
+  "releaseSourceEquivalentCommit": "e4b6ee6fc486e7438628a386a2fb866d5ab2de22",
+  "releaseVersion": "0.0.13",
+  "continuousStart": "2026-10-26T09:58:31.909509+00:00",
+  "continuousEnd": "2026-10-26T10:58:33.803472+00:00",
+  "continuousSeconds": 3601.8939708279213,
+  "postRunChecks": {
+    "utc": "2026-10-26T10:59:35.567946+00:00",
+    "monotonic": 650720.042112018,
+    "activePeriodSeconds": 3663.65845850599,
+    "finalExtraCycles": 43,
+    "finalJavascriptErrors": [],
+    "nativeProcessAlive": true
+  },
+  "successfulRepeatedCycles": 1075,
+  "correctedHarnessAttempts": 21,
+  "findingCount": 14,
+  "severityCounts": {
+    "P1": 5,
+    "P3": 3,
+    "P2": 6
+  },
+  "rustTestsPassed": 370,
+  "rustTestsIgnored": 3,
+  "frontendTestsPassed": 12,
+  "svelteErrors": 0,
+  "svelteWarnings": 0,
+  "javascriptErrors": 0,
+  "nativeCrashes": 0,
+  "note": "Earlier idle runtime is excluded. Repeated-use loop pauses are used for focused native GUI scenarios. Harness mistakes are excluded from product findings."
+}

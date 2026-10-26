@@ -1,0 +1,20 @@
+[
+  {
+    "case": "quoted-yaml",
+    "exitCode": 0,
+    "stdout": "{\"root\":{\"name\":\"\",\"left\":{\"kind\":\"dir\",\"size\":0,\"mtime\":null},\"right\":{\"kind\":\"dir\",\"size\":0,\"mtime\":null},\"status\":\"similar\",\"children\":[{\"name\":\"data.yaml\",\"left\":{\"kind\":\"file\",\"size\":13,\"mtime\":1793009309},\"right\":{\"kind\":\"file\",\"size\":5,\"mtime\":1793009309},\"status\":\"similar\",\"message\":\"same data, only formatting, order or comments differ\"}]},\"summary\":{\"files\":1,\"same\":0,\"similar\":1,\"different\":0,\"leftOnly\":0,\"rightOnly\":0,\"errors\":0,\"identicalSubtrees\":0,\"elapsedMs\":0}}\n",
+    "stderr": ""
+  },
+  {
+    "case": "needs-custom",
+    "exitCode": 0,
+    "stdout": "{\"root\":{\"name\":\"\",\"left\":{\"kind\":\"dir\",\"size\":0,\"mtime\":null},\"right\":{\"kind\":\"dir\",\"size\":0,\"mtime\":null},\"status\":\"similar\",\"children\":[{\"name\":\"conf.py\",\"left\":{\"kind\":\"file\",\"size\":129,\"mtime\":1793010207},\"right\":{\"kind\":\"file\",\"size\":129,\"mtime\":1793010207},\"status\":\"same\"},{\"name\":\"req.rst\",\"left\":{\"kind\":\"file\",\"size\":93,\"mtime\":1793009284},\"right\":{\"kind\":\"file\",\"size\":93,\"mtime\":1793009284},\"status\":\"similar\",\"message\":\"same needs, only their order or the text around them differ\"}]},\"summary\":{\"files\":2,\"same\":1,\"similar\":1,\"different\":0,\"leftOnly\":0,\"rightOnly\":0,\"errors\":0,\"identicalSubtrees\":0,\"elapsedMs\":0}}\n",
+    "stderr": ""
+  },
+  {
+    "case": "permissions",
+    "exitCode": 0,
+    "stdout": "{\"root\":{\"name\":\"\",\"left\":{\"kind\":\"dir\",\"size\":0,\"mtime\":null},\"right\":{\"kind\":\"dir\",\"size\":0,\"mtime\":null},\"status\":\"same\",\"children\":[{\"name\":\"restricted\",\"left\":{\"kind\":\"dir\",\"size\":0,\"mtime\":1793009185},\"right\":{\"kind\":\"dir\",\"size\":0,\"mtime\":1793009185},\"status\":\"same\"},{\"name\":\"visible.txt\",\"left\":{\"kind\":\"file\",\"size\":5,\"mtime\":1793009185},\"right\":{\"kind\":\"file\",\"size\":5,\"mtime\":1793009185},\"status\":\"same\"}]},\"summary\":{\"files\":1,\"same\":1,\"similar\":0,\"different\":0,\"leftOnly\":0,\"rightOnly\":0,\"errors\":0,\"identicalSubtrees\":0,\"elapsedMs\":0}}\n",
+    "stderr": ""
+  }
+]

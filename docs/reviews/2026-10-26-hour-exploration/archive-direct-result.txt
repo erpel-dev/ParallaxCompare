@@ -1,0 +1,4 @@
+Cached b="OLD OLD"
+Fresh before inner save="NEW NEW"
+After save a.txt="MY EDIT"
+After save b.txt="OLD OLD"
