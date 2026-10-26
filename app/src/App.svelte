@@ -17,6 +17,7 @@
   import { clearErrors, notify } from "./lib/toast.svelte";
   import Toasts from "./lib/Toasts.svelte";
   import type { RowSide } from "./lib/tree";
+  import type { ViewState } from "./lib/viewState";
   import { baseName } from "./lib/format";
 
   interface Request {
@@ -36,6 +37,8 @@
     up?: Request | null;
     /** A row for the folder view to select and scroll to; `n` makes each request new. */
     reveal?: { path: string; n: number };
+    /** How the comparison this one replaced was shown, after a side was switched. */
+    restore?: ViewState;
   }
 
   type FolderTab = { key: number; kind: "folder"; title: string; session: SessionInfo; request: Request } & Shared;
@@ -122,7 +125,7 @@
   let revealCount = 0;
   let paletteOpen = $state(false);
   /** The views of the comparison tabs, for their commands. */
-  let views: Record<number, { commands(): Command[] }> = $state({});
+  let views: Record<number, { commands(): Command[]; viewState?(): ViewState["state"] }> = $state({});
   /** The new-comparison forms, by tab, to fill in dropped paths. */
   let pickers: Record<number, NewCompare> = $state({});
   /** Files being dragged over the window, and the side they would replace. */
@@ -236,6 +239,7 @@
     request: Request,
     how: "new" | "back" | "forward" = "new",
     reveal?: string,
+    restore?: ViewState,
   ): Promise<boolean> {
     const current = await requestOf(tab).catch(() => null);
     if (!(await confirmDiscard(unsaved(tab)))) return false;
@@ -262,6 +266,8 @@
     const next = sessionTab(session, request, {
       ...history,
       reveal: reveal ? { path: reveal, n: ++revealCount } : undefined,
+      // Only a view of the same kind can take it over.
+      restore: restore && restore.kind === (session.isFile ? "text" : "folder") ? restore : undefined,
     });
     tabs[tabs.findIndex((t) => t.key === tab.key)] = next;
     active = next.key;
@@ -278,7 +284,10 @@
       notify(String(e));
       return false;
     }
-    return replace(tab, request);
+    // The view stays as it was: open folders, selection, scroll position.
+    const state = views[tab.key]?.viewState?.();
+    const restore = state && ((tab.kind === "folder" ? { kind: "folder", state } : { kind: "text", state }) as ViewState);
+    return replace(tab, request, "new", undefined, restore);
   }
 
   function sideSpec(tab: SessionTab, side: SideName): Promise<SourceSpec> {
@@ -309,6 +318,9 @@
       },
       openPullRequest,
       file: tab.kind === "text",
+      side,
+      other: () => sideSpec(tab, side === "left" ? "right" : "left"),
+      applyBoth: (left, right) => changeSides(tab, { left, right }),
     });
     return [make("left"), make("right")];
   }
@@ -626,6 +638,8 @@
             onSetBase={(changes) => changeSides(tab, changes)}
             nav={navFor(tab)}
             reveal={tab.reveal}
+            restore={tab.restore?.kind === "folder" ? tab.restore.state : undefined}
+            onOpenComparison={(left, right) => start({ left, right, options: tab.request.options, mergeBase: false })}
           />
         {:else}
           <TextView
@@ -636,6 +650,7 @@
             onSwap={() => swap(tab)}
             edit={sideEdits(tab)}
             nav={navFor(tab)}
+            restore={tab.restore?.kind === "text" ? tab.restore.state : undefined}
           />
         {/if}
       </section>

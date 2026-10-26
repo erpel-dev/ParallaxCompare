@@ -261,6 +261,9 @@ impl SourceSpec {
             SourceSpec::Local { path } => open_local(self, path, opts),
             SourceSpec::GitRev { repo, rev, subpath } => {
                 // A remote repository: the commit is fetched into the cache and read from there.
+                if rev == crate::versions::STAGED && !crate::remote::is_remote(repo) {
+                    return open_staged(self, repo, subpath, opts);
+                }
                 let (git, resolved, repo) = if crate::remote::is_remote(repo) {
                     let (dir, commit) = crate::remote::fetch(repo, rev)?;
                     let git = GitRepo::discover(dir.display().to_string())?;
@@ -298,7 +301,7 @@ impl SourceSpec {
                 let workdir =
                     git.workdir().ok_or_else(|| Error::InvalidSource(format!("{repo} is a bare repository")))?;
                 let hide = opts.ignored == IgnoredFiles::Hide;
-                let local: Arc<dyn Vfs> = Arc::new(LocalFs::with_gitignore(&workdir, &git.tracked_paths()?, hide)?);
+                let local: Arc<dyn Vfs> = Arc::new(LocalFs::with_gitignore(&workdir, git.index_info()?, hide)?);
                 Ok(Source {
                     spec: self.clone(),
                     vfs: Arc::new(ArchiveMount::new(local, opts.expand_archives)),
@@ -342,7 +345,7 @@ fn open_local(spec: &SourceSpec, path: &str, opts: SourceOptions) -> Result<Sour
     let tracked = (opts.ignored != IgnoredFiles::Off && meta.is_dir()).then(|| tracked_below(&dir)).flatten();
     let gitignore = tracked.is_some();
     let local: Arc<dyn Vfs> = match tracked {
-        Some(tracked) => Arc::new(LocalFs::with_gitignore(&dir, &tracked, opts.ignored == IgnoredFiles::Hide)?),
+        Some(tracked) => Arc::new(LocalFs::with_gitignore(&dir, tracked, opts.ignored == IgnoredFiles::Hide)?),
         None => Arc::new(LocalFs::new(&dir)),
     };
     let vfs: Arc<dyn Vfs> = Arc::new(ArchiveMount::new(local, opts.expand_archives));
@@ -403,10 +406,40 @@ pub struct GitLocation {
     pub path: String,
 }
 
+/// What a completion is, for its icon and for what Tab does with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CompletionKind {
+    Dir,
+    /// An archive: Tab enters it (`name.zip!/`).
+    Archive,
+    File,
+    /// A branch, tag or remote branch after `repo@`.
+    Ref,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Completion {
+    /// The whole path as it would be typed.
+    pub text: String,
+    pub kind: CompletionKind,
+    /// A short note: an archive's format and size, a file's size.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+impl Completion {
+    fn new(text: String, kind: CompletionKind, detail: Option<String>) -> Self {
+        Completion { text, kind, detail }
+    }
+}
+
 /// Completions for a path being typed: entries of the folder named so far that
-/// start with the last part, folders ending in `/`. After `repo@`, the
-/// repository's branches and tags. At most `limit`.
-pub fn complete(text: &str, limit: usize) -> Vec<String> {
+/// start with the last part, folders ending in `/`, archives marked as such. After
+/// `name.zip!/`, the entries inside the archive. After `repo@`, the repository's
+/// branches and tags. At most `limit`.
+pub fn complete(text: &str, limit: usize) -> Vec<Completion> {
     if let Some(at) = text.rfind('@') {
         let (repo, rev) = (&text[..at], &text[at + 1..]);
         if !repo.is_empty() && !Path::new(text).exists() && Path::new(repo).is_dir() && !rev.contains(':') {
@@ -418,34 +451,146 @@ pub fn complete(text: &str, limit: usize) -> Vec<String> {
                 .chain(&refs.remotes)
                 .filter(|r| r.name.starts_with(rev))
                 .take(limit)
-                .map(|r| format!("{repo}@{}", r.name))
+                .map(|r| Completion::new(format!("{repo}@{}", r.name), CompletionKind::Ref, Some(r.short_id.clone())))
                 .collect();
         }
     }
+    if let (outer, Some(inner)) = split_archive_path(text)
+        && Path::new(outer).is_file()
+    {
+        return complete_in_archive(outer, inner, limit);
+    }
     let cut = text.rfind(['/', '\\']).map(|i| i + 1).unwrap_or(0);
     let (dir, prefix) = text.split_at(cut);
-    // Inside an archive: no completions (a folder named with a `!` has them).
-    if dir.is_empty() || (dir.contains('!') && !Path::new(dir).is_dir()) {
+    if dir.is_empty() {
         return Vec::new();
     }
     let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
     let sep = if dir.ends_with('\\') { '\\' } else { '/' };
     let lower = prefix.to_lowercase();
-    let mut found: Vec<(bool, String)> = entries
+    let mut found: Vec<(u8, String, Option<u64>)> = entries
         .filter_map(|e| e.ok())
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
             let hidden = name.starts_with('.') && !prefix.starts_with('.');
             let matches = name.starts_with(prefix) || name.to_lowercase().starts_with(&lower);
-            (matches && !hidden).then(|| (e.path().is_dir(), name))
+            if !matches || hidden {
+                return None;
+            }
+            let meta = std::fs::metadata(e.path()).ok();
+            let is_dir = meta.as_ref().is_some_and(|m| m.is_dir());
+            // Folders, then archives, then files.
+            let rank = if is_dir {
+                0
+            } else if crate::vfs::archive::detect_format(&name).is_some() {
+                1
+            } else {
+                2
+            };
+            Some((rank, name, meta.filter(|m| !m.is_dir()).map(|m| m.len())))
         })
         .collect();
-    // Folders first, then by name.
-    found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase())));
+    found.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase())));
     found
         .into_iter()
         .take(limit)
-        .map(|(is_dir, name)| if is_dir { format!("{dir}{name}{sep}") } else { format!("{dir}{name}") })
+        .map(|(rank, name, size)| match rank {
+            0 => Completion::new(format!("{dir}{name}{sep}"), CompletionKind::Dir, None),
+            1 => Completion::new(format!("{dir}{name}"), CompletionKind::Archive, Some(archive_note(&name, size))),
+            _ => Completion::new(format!("{dir}{name}"), CompletionKind::File, size.map(human_size)),
+        })
+        .collect()
+}
+
+/// "zip · 18 MB".
+fn archive_note(name: &str, size: Option<u64>) -> String {
+    let lower = name.to_ascii_lowercase();
+    let format = ["tar.gz", "tar.xz", "tar.zst", "tar.bz2", "tgz", "zip", "7z", "tar", "jar"]
+        .into_iter()
+        .find(|ext| lower.ends_with(&format!(".{ext}")))
+        .unwrap_or_else(|| lower.rsplit('.').next().unwrap_or("archive"));
+    match size {
+        Some(size) => format!("{format} · {}", human_size(size)),
+        None => format.to_string(),
+    }
+}
+
+fn human_size(size: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = size as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{size} B")
+    } else if value < 10.0 {
+        format!("{value:.1} {}", UNITS[unit])
+    } else {
+        format!("{value:.0} {}", UNITS[unit])
+    }
+}
+
+/// Archives opened for completion, newest last: typing on inside one reads it once.
+/// Keyed by path, size and modification time, so a rewritten archive is read again.
+static COMPLETION_ARCHIVES: std::sync::Mutex<Vec<(String, Arc<Source>)>> = std::sync::Mutex::new(Vec::new());
+
+/// Completions inside the archive at `outer`, for `inner` (`/dir/na` after the `!`).
+fn complete_in_archive(outer: &str, inner: &str, limit: usize) -> Vec<Completion> {
+    let Ok(meta) = std::fs::metadata(outer) else { return Vec::new() };
+    let key = format!("{outer}\0{}\0{:?}", meta.len(), meta.modified().ok());
+    let cached =
+        COMPLETION_ARCHIVES.lock().ok().and_then(|c| c.iter().find(|(k, _)| *k == key).map(|(_, s)| s.clone()));
+    let source = match cached {
+        Some(source) => source,
+        None => {
+            let Ok(source) = SourceSpec::Local { path: outer.to_string() }.open(SourceOptions::default()) else {
+                return Vec::new();
+            };
+            let source = Arc::new(source);
+            if let Ok(mut cache) = COMPLETION_ARCHIVES.lock() {
+                cache.retain(|(k, _)| !k.starts_with(&format!("{outer}\0")));
+                cache.push((key, source.clone()));
+                if cache.len() > 4 {
+                    cache.remove(0);
+                }
+            }
+            source
+        }
+    };
+    let rel = inner.trim_start_matches(['/', '\\']);
+    let cut = rel.rfind('/').map(|i| i + 1).unwrap_or(0);
+    let (dir, prefix) = rel.split_at(cut);
+    let Ok(entries) = source.vfs.list(&source.path(dir.trim_end_matches('/'))) else { return Vec::new() };
+    let lower = prefix.to_lowercase();
+    let mut found: Vec<(u8, String, u64)> = entries
+        .into_iter()
+        .filter(|e| e.name.starts_with(prefix) || e.name.to_lowercase().starts_with(&lower))
+        .map(|e| {
+            let rank = match e.kind {
+                EntryKind::Dir => 0,
+                EntryKind::Archive => 1,
+                _ => 2,
+            };
+            (rank, e.name, e.size)
+        })
+        .collect();
+    found.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase())));
+    found
+        .into_iter()
+        .take(limit)
+        .map(|(rank, name, size)| {
+            let text = format!("{outer}!/{dir}{name}");
+            match rank {
+                0 => Completion::new(format!("{text}/"), CompletionKind::Dir, None),
+                // An archive inside an archive is entered as a folder.
+                1 => {
+                    Completion::new(format!("{text}/"), CompletionKind::Archive, Some(archive_note(&name, Some(size))))
+                }
+                _ => Completion::new(text, CompletionKind::File, Some(human_size(size))),
+            }
+        })
         .collect()
 }
 
@@ -484,9 +629,31 @@ pub fn split_archive_path(path: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// For a folder inside a Git worktree: the tracked files below it, relative to it.
-/// `None` when the folder is not in a worktree.
-fn tracked_below(dir: &Path) -> Option<Vec<String>> {
+/// The staged files of the repository at `repo` (see [`crate::versions::STAGED`]).
+fn open_staged(spec: &SourceSpec, repo: &str, subpath: &str, opts: SourceOptions) -> Result<Source> {
+    let git = GitRepo::discover(repo)?;
+    let index: Arc<dyn Vfs> = Arc::new(crate::vfs::git::GitIndexFs::new(git, format!("{repo} (staged)"))?);
+    let root = normalize(subpath).ok_or_else(|| Error::InvalidSource(subpath.to_string()))?;
+    let display = if root.is_empty() { repo.to_string() } else { format!("{repo} › {root}") };
+    Ok(Source {
+        spec: spec.clone(),
+        vfs: Arc::new(ArchiveMount::new(index, opts.expand_archives)),
+        root,
+        watch: None,
+        info: SourceInfo {
+            kind: SourceKind::GitRev,
+            display,
+            rev: Some("staged".into()),
+            commit: None,
+            commit_summary: Some("Staged changes: what the next commit holds".into()),
+            writable: false,
+        },
+    })
+}
+
+/// What the index says about the files below `dir`, relative to it: `None` when the
+/// folder is not in a Git work tree.
+fn tracked_below(dir: &Path) -> Option<crate::vfs::git::IndexInfo> {
     if !dir.ancestors().any(|d| d.join(".git").exists()) {
         return None;
     }
@@ -494,12 +661,7 @@ fn tracked_below(dir: &Path) -> Option<Vec<String>> {
     let workdir = std::fs::canonicalize(git.workdir()?).ok()?;
     let rel = std::fs::canonicalize(dir).ok()?.strip_prefix(&workdir).ok()?.to_path_buf();
     let prefix = rel.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
-    let tracked = git.tracked_paths().ok()?;
-    if prefix.is_empty() {
-        return Some(tracked);
-    }
-    let prefix = format!("{prefix}/");
-    Some(tracked.into_iter().filter_map(|p| p.strip_prefix(&prefix).map(str::to_string)).collect())
+    Some(git.index_info().ok()?.below(&prefix))
 }
 
 /// Opens both sides of a comparison. With `merge_base`, a Git revision on the left
@@ -628,10 +790,52 @@ mod tests {
         std::fs::write(dir.path().join(".secret"), "").unwrap();
         std::fs::write(dir.path().join("other"), "").unwrap();
         let root = format!("{}/", dir.path().display());
-        assert_eq!(complete(&format!("{root}s"), 10), vec![format!("{root}Src/"), format!("{root}setup.py")]);
-        assert_eq!(complete(&root, 10), vec![format!("{root}Src/"), format!("{root}other"), format!("{root}setup.py")]);
-        assert_eq!(complete(&format!("{root}."), 10), vec![format!("{root}.secret")]);
-        assert_eq!(complete(&format!("{root}s"), 1).len(), 1);
+        let texts = |text: &str, limit| complete(text, limit).into_iter().map(|c| c.text).collect::<Vec<_>>();
+        assert_eq!(texts(&format!("{root}s"), 10), vec![format!("{root}Src/"), format!("{root}setup.py")]);
+        assert_eq!(texts(&root, 10), vec![format!("{root}Src/"), format!("{root}other"), format!("{root}setup.py")]);
+        assert_eq!(texts(&format!("{root}."), 10), vec![format!("{root}.secret")]);
+        assert_eq!(texts(&format!("{root}s"), 1).len(), 1);
         assert!(complete("no-folder-part", 10).is_empty());
+    }
+
+    /// Archives are marked; after `!/` the entries inside them complete, nested
+    /// archives included.
+    #[test]
+    fn completes_inside_archives() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let zip_of = |files: &[(&str, &[u8])]| {
+            let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            for (name, data) in files {
+                out.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+                out.write_all(data).unwrap();
+            }
+            out.finish().unwrap().into_inner()
+        };
+        let inner = zip_of(&[("deep.txt", b"d")]);
+        std::fs::write(
+            dir.path().join("app.zip"),
+            zip_of(&[("lib/a.txt", b"a"), ("lib/b.txt", b"bb"), ("manifest.json", b"{}"), ("vendor.jar", &inner)]),
+        )
+        .unwrap();
+        std::fs::create_dir(dir.path().join("app")).unwrap();
+        let root = format!("{}/", dir.path().display());
+        let found = complete(&format!("{root}app"), 10);
+        let kinds: Vec<_> = found.iter().map(|c| (c.text.trim_start_matches(&root), c.kind)).collect();
+        assert_eq!(kinds, [("app/", CompletionKind::Dir), ("app.zip", CompletionKind::Archive)]);
+        assert!(found[1].detail.as_deref().unwrap().starts_with("zip · "));
+
+        let texts = |text: String| complete(&text, 10).into_iter().map(|c| c.text).collect::<Vec<_>>();
+        let zip = format!("{root}app.zip");
+        assert_eq!(
+            texts(format!("{zip}!/")),
+            [format!("{zip}!/lib/"), format!("{zip}!/vendor.jar/"), format!("{zip}!/manifest.json")]
+        );
+        assert_eq!(texts(format!("{zip}!/lib/b")), [format!("{zip}!/lib/b.txt")]);
+        assert_eq!(texts(format!("{zip}!/vendor.jar/")), [format!("{zip}!/vendor.jar/deep.txt")]);
+        // What it completes to opens as a source.
+        let spec = SourceSpec::parse(&format!("{zip}!/vendor.jar/deep.txt"));
+        let source = spec.open(SourceOptions::default()).unwrap();
+        assert_eq!(&*source.vfs.read(&source.root).unwrap(), b"d");
     }
 }

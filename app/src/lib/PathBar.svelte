@@ -11,6 +11,12 @@
     openPullRequest: (url: string) => Promise<boolean>;
     /** The comparison is of two files, so the side must stay a file. */
     file: boolean;
+    /** Which side this is. */
+    side?: "left" | "right";
+    /** The other side as compared now. */
+    other?: () => Promise<SourceSpec>;
+    /** Replaces both sides at once. */
+    applyBoth?: (left: SourceSpec, right: SourceSpec) => Promise<boolean>;
   }
 </script>
 
@@ -22,6 +28,7 @@
   import { formatTime } from "./format";
   import PathInput from "./PathInput.svelte";
   import SidePicker from "./SidePicker.svelte";
+  import VersionChip from "./VersionChip.svelte";
   import { pickerFor, toSpec, type PickerValue, type PickerPreview, usable } from "./sourcePicker";
   import { notify } from "./toast.svelte";
 
@@ -32,6 +39,7 @@
     onSave,
     edit,
     title = "",
+    active = false,
   }: {
     info: SourceInfo;
     suffix?: string;
@@ -40,7 +48,12 @@
     onSave?: () => void;
     edit?: SideEdit;
     title?: string;
+    /** This side has the focus (Alt+V opens its versions). */
+    active?: boolean;
   } = $props();
+
+  let chip = $state<VersionChip>();
+  let chipShown = $state(false);
 
   const badge = $derived(
     ({
@@ -240,6 +253,7 @@
       { group, title: info.kind === "gitRev" ? "Choose another revision…" : "Choose with the file dialog…", run: browse },
       { group, title: "Change source…", run: () => openPicker() },
     ];
+    if (chipShown) list.push({ group, title: "Switch version…", keys: active ? "Alt+V" : undefined, run: () => chip?.openList() });
     if (edit.file) {
       list.push({
         group,
@@ -305,7 +319,10 @@
   {:else}
     <span class="path mono"><span dir="ltr">{info.display}{suffix ? ` › ${suffix}` : ""}</span></span>
   {/if}
-  {#if info.rev}
+  {#if edit}
+    <VersionChip bind:this={chip} bind:shown={chipShown} {edit} refreshKey="{info.display}\n{info.rev ?? ''}\n{suffix}" commit={info.commit} {active} />
+  {/if}
+  {#if info.rev && !chipShown}
     {@const commit = info.commit && info.commit !== info.rev ? info.commit : ""}
     <span class="ref mono" title="{info.rev}{commit ? ` · ${commit}` : ''}"><span class="refname">⎇ {info.rev}</span>{#if commit}<span class="refcommit"> · {commit}</span>{/if}</span>
   {/if}

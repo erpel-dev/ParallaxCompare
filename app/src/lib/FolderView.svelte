@@ -2,13 +2,15 @@
   import { onMount, tick } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { ask } from "@tauri-apps/plugin-dialog";
-  import { api, defaultCompareOptions, sourceText, type CompareResult, type Node, type OpResult, type PathsChanged, type SessionInfo, type Side, type SourceSpec } from "./api";
+  import { api, defaultCompareOptions, sourceText, type CompareResult, type Node, type OpResult, type PathsChanged, type SessionInfo, type Side, type SourceSpec, type Version, type Versions } from "./api";
   import type { Command } from "./commands";
   import Dropdown from "./Dropdown.svelte";
   import FilterBar, { type CountFilter } from "./FilterBar.svelte";
   import Menu, { type MenuItem, type MenuContext } from "./Menu.svelte";
   import Nav, { type NavActions } from "./Nav.svelte";
   import { notify } from "./toast.svelte";
+  import type { FolderViewState } from "./viewState";
+  import { loadVersions } from "./versions";
   import PathBar, { type SideEdit } from "./PathBar.svelte";
   import { scaledWheel, scrollScale, spacerHeight, windowOffset } from "./vscroll";
   import { formatSize, formatTime } from "./format";
@@ -46,6 +48,8 @@
     onSetBase,
     nav,
     reveal,
+    restore,
+    onOpenComparison,
   }: {
     session: SessionInfo;
     onOpenFile: (path: string) => void;
@@ -57,12 +61,42 @@
     nav?: NavActions;
     /** A row to select and scroll to, e.g. the file just left with "up"; `n` repeats a request. */
     reveal?: { path: string; n: number };
+    /** How the comparison this one replaced was shown: open folders, selection, filters. */
+    restore?: FolderViewState;
+    /** Opens a comparison of two sources in a new tab. */
+    onOpenComparison?: (left: SourceSpec, right: SourceSpec) => void;
   } = $props();
+
+  /** Per side: its versions when it lies in a Git repository, for "Compare with HEAD". */
+  let sideVersions = $state<[Versions | null, Versions | null]>([null, null]);
+  $effect(() => {
+    const id = session.id;
+    void session.left.display;
+    void session.right.display;
+    let stale = false;
+    Promise.all([true, false].map((left) => api.sideSource(id, left, "").then((s) => loadVersions(s)).catch(() => null))).then(
+      ([l, r]) => !stale && (sideVersions = [l, r]),
+    );
+    return () => (stale = true);
+  });
+
+  /** A file of one side next to a version of it from its repository, in a new tab. */
+  async function compareWithVersion(path: string, left: boolean, version: Version) {
+    try {
+      const spec = await api.sideSource(session.id, left, sidePath(path, left));
+      onOpenComparison?.(await api.versionSpec(spec, version), spec);
+    } catch (e) {
+      notify(String(e));
+    }
+  }
 
   const ROW = 22;
 
-  let options = $state(defaultCompareOptions());
-  let excludesText = $state(options.excludes.join(", "));
+  // Options taken over from the comparison this one replaced, if any.
+  // svelte-ignore state_referenced_locally
+  const initialOptions = restore?.options ?? defaultCompareOptions();
+  let options = $state(initialOptions);
+  let excludesText = $state(initialOptions.excludes.join(", "));
   let result = $state.raw<CompareResult | null>(null);
   // The result tree is large and mutated in place; this counter drives re-rendering.
   let version = $state(0);
@@ -282,13 +316,54 @@
    * Compares again. A refresh (`invalidate`) keeps showing the old result until the
    * new one is there; otherwise the entries show as the compare finds them.
    */
+  /** What the view shows, to show the same after one side was switched. */
+  export function viewState(): FolderViewState {
+    return {
+      expanded: [...expanded],
+      selected,
+      filter,
+      flat,
+      scrollTop: viewport?.scrollTop ?? 0,
+      options: $state.snapshot(options),
+    };
+  }
+
+  /** The state to take over once the first comparison is done. */
+  // svelte-ignore state_referenced_locally
+  let restoring: FolderViewState | null = restore ?? null;
+  if (restoring) {
+    filter = restoring.filter;
+    flat = restoring.flat;
+  }
+
+  /** Opens again what was open, where it still exists, and selects and scrolls as before. */
+  async function finishRestore(state: FolderViewState) {
+    if (!result) return;
+    for (const path of [...state.expanded].sort((a, b) => a.split("/").length - b.split("/").length)) {
+      const node = findNode(result.root, path);
+      if (!node) {
+        expanded.delete(path);
+      } else if (node.unexpanded) {
+        expanded.delete(path);
+        await toggle(path);
+      }
+    }
+    version++;
+    await tick();
+    if (viewport) viewport.scrollTop = state.scrollTop;
+    // The selected row, or the nearest folder above it that still exists.
+    let path = state.selected;
+    while (path && !rows.some((r) => r.path === path)) path = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : null;
+    if (path) selectOnly(path);
+  }
+
   async function run(invalidate = false) {
     running = true;
     error = "";
     progress = 0;
     if (!invalidate) {
-      // Folders the user opens meanwhile stay open.
-      expanded = new Set();
+      // Folders the user opens meanwhile stay open, and those open before a side was switched.
+      expanded = new Set(restoring?.expanded ?? []);
       provisionalIndex = new Map();
       provisional = true;
       result = {
@@ -306,6 +381,11 @@
       provisional = false;
       result = r;
       version++;
+      if (restoring) {
+        const state = restoring;
+        restoring = null;
+        await finishRestore(state);
+      }
     } catch (e) {
       if (String(e) !== "cancelled") error = String(e);
       if (provisional) {
@@ -752,6 +832,18 @@
         );
       }
       items.push({ label: multiple ? `Copy ${n} path${n === 1 ? "" : "s"}` : "Copy path", run: () => copyPaths(paths.map((p) => sidePath(p, left)), left) });
+      const repo = sideVersions[left ? 0 : 1];
+      if (repo && !multiple && entry?.kind === "file" && onOpenComparison) {
+        items.push("separator", {
+          label: "Compare with HEAD",
+          detail: `This ${side} file next to its last commit${repo.head ? ` on ${repo.head}` : ""}`,
+          run: () => compareWithVersion(path, left, { type: "rev", rev: "HEAD" }),
+        });
+        if (repo.upstream) {
+          const upstream = repo.upstream.name;
+          items.push({ label: `Compare with ${upstream}`, detail: "The upstream branch, as last fetched", run: () => compareWithVersion(path, left, { type: "rev", rev: upstream }) });
+        }
+      }
       items.push("separator", {
         label: multiple ? `Delete ${what(n)} on ${side}…` : `Delete ${side} ${kind}…`,
         detail: source.writable ? undefined : "This source is read-only",
@@ -958,8 +1050,8 @@
   {/if}
 
   <div class="pathbars">
-    <PathBar bind:this={pathbars[0]} info={session.left} edit={edit?.[0]} title="Left" />
-    <PathBar bind:this={pathbars[1]} info={session.right} edit={edit?.[1]} title="Right" />
+    <PathBar bind:this={pathbars[0]} info={session.left} edit={edit?.[0]} title="Left" active={activeSide === "left"} />
+    <PathBar bind:this={pathbars[1]} info={session.right} edit={edit?.[1]} title="Right" active={activeSide === "right"} />
   </div>
 
   <div class="head">

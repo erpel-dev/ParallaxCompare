@@ -267,7 +267,7 @@ pub fn ref_list(url: &str) -> Result<crate::vfs::git::RefList> {
             continue;
         }
         let Some((id, name)) = line.split_once('\t') else { continue };
-        let info = |name: &str| RefInfo { name: name.to_string(), short_id: id.chars().take(7).collect() };
+        let info = |name: &str| RefInfo { name: name.to_string(), short_id: id.chars().take(7).collect(), time: 0 };
         if let Some(branch) = name.strip_prefix("refs/heads/") {
             list.branches.push(info(branch));
         } else if let Some(tag) = name.strip_prefix("refs/tags/") {

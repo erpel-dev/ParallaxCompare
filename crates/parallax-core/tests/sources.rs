@@ -1204,7 +1204,9 @@ fn file_history_and_git_location() {
 
     // Branch names complete after `repo@`.
     let done = parallax_core::source::complete(&format!("{}@fe", repo.display()), 10);
-    assert_eq!(done, [format!("{}@feature", repo.display())]);
+    let texts: Vec<_> = done.iter().map(|c| c.text.clone()).collect();
+    assert_eq!(texts, [format!("{}@feature", repo.display())]);
+    assert_eq!(done[0].kind, parallax_core::source::CompletionKind::Ref);
 }
 
 fn pair(left: &Path, right: &Path) -> (Source, Source) {
@@ -1642,4 +1644,45 @@ fn entries_saved_into_a_replaced_archive_keep_the_new_contents() {
     set_mtime();
     put(&entry, "a.txt", b"MY A");
     assert_eq!((read("a.txt").as_str(), read("b.txt").as_str()), ("MY A", "NEW B"));
+}
+
+/// Files of the working tree that the index records as unchanged carry their blob
+/// id, so a comparison with a revision settles them without reading; a changed
+/// file never does, even with its old size and modification time restored.
+#[test]
+fn unchanged_tracked_files_carry_their_index_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q", "-b", "main"]);
+    write(repo, &[("a.txt", "one\n"), ("b.txt", "two\n"), ("sub/c.txt", "three\n")]);
+    // Older than the index, so not racily clean.
+    let past = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+    for f in ["a.txt", "b.txt", "sub/c.txt"] {
+        fs::File::options().write(true).open(repo.join(f)).unwrap().set_modified(past).unwrap();
+    }
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-q", "-m", "init"]);
+    // Same size, same modification time, other content.
+    fs::write(repo.join("b.txt"), "TWO\n").unwrap();
+    fs::File::options().write(true).open(repo.join("b.txt")).unwrap().set_modified(past).unwrap();
+
+    let path = repo.display().to_string();
+    for spec in [SourceSpec::GitWorktree { repo: path.clone() }, SourceSpec::parse(&path)] {
+        let source = spec.open(SourceOptions::default()).unwrap();
+        let id = |p: &str| source.vfs.stat(&source.path(p)).unwrap().quick_id;
+        assert!(id("a.txt").is_some() && id("sub/c.txt").is_some(), "{spec:?}");
+        assert!(id("b.txt").is_none(), "a changed file has no index id: {spec:?}");
+    }
+    let (l, r) = open_pair(
+        &SourceSpec::parse(&format!("{path}@HEAD")),
+        &SourceSpec::parse(&path),
+        SourceOptions::default(),
+        false,
+    )
+    .unwrap();
+    let list =
+        compare::flatten(&compare::compare(&l, &r, &CompareOptions::default(), &Control::default()).unwrap().root);
+    assert_eq!(status_of(&list, "a.txt"), Status::Same);
+    assert_eq!(status_of(&list, "sub/c.txt"), Status::Same);
+    assert_eq!(status_of(&list, "b.txt"), Status::Different);
 }

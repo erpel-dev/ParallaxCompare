@@ -257,8 +257,38 @@ pub async fn side_source(state: State<'_, AppState>, id: u64, left: bool, rel: S
 
 /// Completions for a path being typed in a path field.
 #[tauri::command]
-pub async fn complete_path(text: String) -> CmdResult<Vec<String>> {
+pub async fn complete_path(text: String) -> CmdResult<Vec<parallax_core::source::Completion>> {
     blocking(move || Ok(parallax_core::source::complete(&text, 40))).await
+}
+
+/// The versions a side in a Git repository can be switched to.
+#[tauri::command]
+pub async fn side_versions(spec: SourceSpec) -> CmdResult<parallax_core::versions::Versions> {
+    blocking(move || parallax_core::versions::versions(&spec).map_err(err)).await
+}
+
+/// The side `spec` as of another version, at the same path in its repository.
+#[tauri::command]
+pub async fn version_spec(spec: SourceSpec, version: parallax_core::versions::Version) -> CmdResult<SourceSpec> {
+    blocking(move || parallax_core::versions::with_version(&spec, &version).map_err(err)).await
+}
+
+/// How many tracked files of a working tree have changes, if Git says so in time.
+#[tauri::command]
+pub async fn changed_files(repo: String, path: Option<String>) -> CmdResult<Option<u32>> {
+    blocking(move || Ok(parallax_core::versions::changed_files(&repo, path.as_deref()))).await
+}
+
+/// Fetches the remotes of a repository, on request.
+#[tauri::command]
+pub async fn git_fetch(repo: String) -> CmdResult<()> {
+    blocking(move || parallax_core::versions::fetch(&repo).map_err(err)).await
+}
+
+/// The short id of the commit both revisions descend from.
+#[tauri::command]
+pub async fn git_merge_base(repo: String, a: String, b: String) -> CmdResult<String> {
+    blocking(move || parallax_core::versions::merge_base(&repo, &a, &b).map_err(err)).await
 }
 
 /// The folder containing a source, for comparing one level up.

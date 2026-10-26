@@ -41,6 +41,8 @@ pub struct GitRepo {
 pub struct RefInfo {
     pub name: String,
     pub short_id: String,
+    /// Time of the commit it points to, seconds since the Unix epoch (0 if none).
+    pub time: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -61,6 +63,71 @@ pub struct RefList {
     pub remotes: Vec<RefInfo>,
     pub tags: Vec<RefInfo>,
     pub recent_commits: Vec<CommitInfo>,
+}
+
+/// What the index says about the working tree: see [`GitRepo::index_info`].
+#[derive(Debug, Clone, Default)]
+pub struct IndexInfo {
+    /// Tracked paths, relative to the work tree.
+    pub paths: Vec<String>,
+    /// Regular files with their stat data as of `git add`, and their blob id.
+    pub clean: HashMap<String, (IndexStat, ObjectId)>,
+}
+
+impl IndexInfo {
+    /// The same, for the folder `prefix` (relative to the work tree) as the root.
+    pub fn below(self, prefix: &str) -> IndexInfo {
+        if prefix.is_empty() {
+            return self;
+        }
+        let prefix = format!("{prefix}/");
+        IndexInfo {
+            paths: self.paths.into_iter().filter_map(|p| p.strip_prefix(&prefix).map(str::to_string)).collect(),
+            clean: self
+                .clean
+                .into_iter()
+                .filter_map(|(p, v)| p.strip_prefix(&prefix).map(|p| (p.to_string(), v)))
+                .collect(),
+        }
+    }
+
+    /// The blob id of the file at `rel` when its metadata still matches the index.
+    pub fn clean_id(&self, rel: &str, meta: &std::fs::Metadata) -> Option<ObjectId> {
+        let (stat, id) = self.clean.get(rel)?;
+        stat.matches(meta).then_some(*id)
+    }
+}
+
+/// The stat data Git keeps per index entry, as far as it tells a changed file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexStat {
+    mtime: (u32, u32),
+    ctime: (u32, u32),
+    ino: u32,
+    size: u32,
+}
+
+impl IndexStat {
+    /// Whether a file with this metadata is the file Git recorded (32-bit fields
+    /// are compared truncated, as Git stores them).
+    fn matches(&self, meta: &std::fs::Metadata) -> bool {
+        if !meta.is_file() || meta.len() as u32 != self.size {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            (meta.mtime() as u32, meta.mtime_nsec() as u32) == self.mtime
+                && (meta.ctime() as u32, meta.ctime_nsec() as u32) == self.ctime
+                && meta.ino() as u32 == self.ino
+        }
+        #[cfg(not(unix))]
+        {
+            let Ok(mtime) = meta.modified() else { return false };
+            let mtime = mtime.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+            (mtime.as_secs() as u32, mtime.subsec_nanos()) == self.mtime
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +173,48 @@ impl GitRepo {
         })
     }
 
+    /// The tracked files and, for each regular file the index records as it is on
+    /// disk now (its stat data can say so), its blob id: like `git status`, a file
+    /// whose stat data still matches its index entry has not changed since `git add`.
+    pub fn index_info(&self) -> Result<IndexInfo> {
+        let index_time = std::fs::metadata(self.git_dir().join("index")).and_then(|m| m.modified()).ok();
+        self.with(|repo| {
+            let index = match repo.open_index() {
+                Ok(index) => index,
+                Err(_) if !repo.git_dir().join("index").exists() => return Ok(IndexInfo::default()),
+                Err(e) => return Err(Error::git(e)),
+            };
+            let mut info = IndexInfo { paths: Vec::with_capacity(index.entries().len()), ..Default::default() };
+            let skip = gix::index::entry::Flags::ASSUME_VALID
+                | gix::index::entry::Flags::SKIP_WORKTREE
+                | gix::index::entry::Flags::INTENT_TO_ADD;
+            for entry in index.entries() {
+                let path = entry.path(&index).to_str_lossy().into_owned();
+                let usable = entry.stage() == gix::index::entry::Stage::Unconflicted
+                    && !entry.flags.intersects(skip)
+                    && matches!(entry.mode, gix::index::entry::Mode::FILE | gix::index::entry::Mode::FILE_EXECUTABLE)
+                    // Racily clean: written in the same moment as the index, it may have
+                    // changed again without its stat data showing it.
+                    && index_time.is_some_and(|t| {
+                        let t = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+                        (u64::from(entry.stat.mtime.secs), entry.stat.mtime.nsecs) < (t.as_secs(), t.subsec_nanos())
+                    });
+                if usable {
+                    let s = &entry.stat;
+                    let stat = IndexStat {
+                        mtime: (s.mtime.secs, s.mtime.nsecs),
+                        ctime: (s.ctime.secs, s.ctime.nsecs),
+                        ino: s.ino,
+                        size: s.size,
+                    };
+                    info.clean.insert(path.clone(), (stat, entry.id));
+                }
+                info.paths.push(path);
+            }
+            Ok(info)
+        })
+    }
+
     pub fn git_dir(&self) -> PathBuf {
         self.shared.git_dir().to_path_buf()
     }
@@ -147,7 +256,13 @@ impl GitRepo {
                     .filter_map(|mut r| {
                         let name = r.name().shorten().to_string();
                         let id = r.peel_to_id().ok()?;
-                        Some(RefInfo { name, short_id: id.shorten_or_id().to_string() })
+                        let time = id
+                            .object()
+                            .ok()
+                            .and_then(|o| o.peel_to_commit().ok())
+                            .and_then(|c| c.time().ok())
+                            .map_or(0, |t| t.seconds);
+                        Some(RefInfo { name, short_id: id.shorten_or_id().to_string(), time })
                     })
                     .filter(|r| !r.name.ends_with("/HEAD"))
                     .collect();
@@ -310,6 +425,123 @@ impl Vfs for GitTreeFs {
                 return Err(Error::NotFound(format!("{path} is not a file")));
             }
             let mut blob = repo.find_blob(entry.object_id()).map_err(Error::git)?;
+            Ok(Data::from_vec(blob.take_data()))
+        })
+    }
+}
+
+/// The files staged in the index, as a read-only VFS: what `git commit` would
+/// commit. Conflicted paths show their local version (stage 2).
+pub struct GitIndexFs {
+    repo: GitRepo,
+    /// Per folder: name, kind and object id of each entry.
+    dirs: HashMap<String, Vec<(String, GitEntryKind, ObjectId)>>,
+    label: String,
+}
+
+impl GitIndexFs {
+    pub fn new(repo: GitRepo, label: impl Into<String>) -> Result<Self> {
+        let entries: Vec<(String, GitEntryKind, ObjectId)> = repo.with(|r| {
+            let index = match r.open_index() {
+                Ok(index) => index,
+                Err(_) if !r.git_dir().join("index").exists() => return Ok(Vec::new()),
+                Err(e) => return Err(Error::git(e)),
+            };
+            use gix::index::entry::{Mode, Stage};
+            Ok(index
+                .entries()
+                .iter()
+                .filter(|e| matches!(e.stage(), Stage::Unconflicted | Stage::Ours))
+                .filter_map(|e| {
+                    let kind = match e.mode {
+                        Mode::FILE => GitEntryKind::Blob,
+                        Mode::FILE_EXECUTABLE => GitEntryKind::BlobExecutable,
+                        Mode::SYMLINK => GitEntryKind::Link,
+                        Mode::COMMIT => GitEntryKind::Commit,
+                        _ => return None,
+                    };
+                    Some((e.path(&index).to_str_lossy().into_owned(), kind, e.id))
+                })
+                .collect())
+        })?;
+        let mut dirs: HashMap<String, Vec<(String, GitEntryKind, ObjectId)>> = HashMap::new();
+        dirs.insert(String::new(), Vec::new());
+        for (path, kind, id) in entries {
+            if crate::vfs::check_rel(&path).is_err() {
+                continue;
+            }
+            // Folders on the way, each listed once in its parent.
+            let mut parent = String::new();
+            let parts: Vec<&str> = path.split('/').collect();
+            for part in &parts[..parts.len() - 1] {
+                let dir = crate::vfs::join(&parent, part);
+                if !dirs.contains_key(&dir) {
+                    dirs.insert(dir.clone(), Vec::new());
+                    dirs.entry(parent.clone()).or_default().push((
+                        part.to_string(),
+                        GitEntryKind::Tree,
+                        ObjectId::null(gix::hash::Kind::Sha1),
+                    ));
+                }
+                parent = dir;
+            }
+            let name = parts[parts.len() - 1].to_string();
+            dirs.entry(parent).or_default().push((name, kind, id));
+        }
+        Ok(GitIndexFs { repo, dirs, label: label.into() })
+    }
+
+    fn find(&self, path: &str) -> Result<(GitEntryKind, ObjectId)> {
+        crate::vfs::check_rel(path)?;
+        let (parent, name) = split_parent(path);
+        self.dirs
+            .get(parent)
+            .and_then(|list| list.iter().find(|(n, ..)| n == name))
+            .map(|(_, kind, id)| (*kind, *id))
+            .ok_or_else(|| Error::NotFound(path.to_string()))
+    }
+
+    fn entry(&self, repo: &gix::Repository, name: &str, kind: GitEntryKind, id: ObjectId) -> Result<Entry> {
+        if kind == GitEntryKind::Tree {
+            return Ok(Entry {
+                name: name.to_string(),
+                kind: EntryKind::Dir,
+                size: 0,
+                mtime: None,
+                quick_id: None,
+                ignored: false,
+            });
+        }
+        to_entry(repo, name.to_string(), kind, id)
+    }
+}
+
+impl Vfs for GitIndexFs {
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+
+    fn list(&self, dir: &str) -> Result<Vec<Entry>> {
+        crate::vfs::check_rel(dir)?;
+        let list = self.dirs.get(dir).ok_or_else(|| Error::NotFound(dir.to_string()))?;
+        self.repo.with(|repo| list.iter().map(|(name, kind, id)| self.entry(repo, name, *kind, *id)).collect())
+    }
+
+    fn stat(&self, path: &str) -> Result<Entry> {
+        if path.is_empty() {
+            return Ok(root_entry());
+        }
+        let (kind, id) = self.find(path)?;
+        self.repo.with(|repo| self.entry(repo, split_parent(path).1, kind, id))
+    }
+
+    fn read(&self, path: &str) -> Result<Data> {
+        let (kind, id) = self.find(path)?;
+        if matches!(kind, GitEntryKind::Tree | GitEntryKind::Commit) {
+            return Err(Error::NotFound(format!("{path} is not a file")));
+        }
+        self.repo.with(|repo| {
+            let mut blob = repo.find_blob(id).map_err(Error::git)?;
             Ok(Data::from_vec(blob.take_data()))
         })
     }

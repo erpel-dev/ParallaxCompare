@@ -29,6 +29,9 @@
   import PathBar, { type SideEdit } from "./PathBar.svelte";
   import { scaledWheel, scrollScale, spacerHeight, windowOffset } from "./vscroll";
   import { formatSize } from "./format";
+  import type { TextViewState } from "./viewState";
+  import VersionStrip from "./VersionStrip.svelte";
+  import { loadVersions } from "./versions";
 
   let {
     session,
@@ -37,6 +40,7 @@
     onSwap,
     edit,
     nav,
+    restore,
   }: {
     session: SessionInfo;
     path: string;
@@ -44,6 +48,8 @@
     onSwap?: () => void;
     edit?: [SideEdit, SideEdit];
     nav?: NavActions;
+    /** How the comparison this one replaced was shown: scroll position, selected row, view. */
+    restore?: TextViewState;
   } = $props();
 
   const ROW = 19;
@@ -308,8 +314,59 @@
     }
   }
 
+  /** What the view shows, to show the same after one side was switched. */
+  export function viewState(): TextViewState {
+    return { scrollTop: viewport?.scrollTop ?? 0, selected, view };
+  }
+
+  // svelte-ignore state_referenced_locally
+  let restoring: TextViewState | null = restore ?? null;
+
+  // ---- A file with uncommitted changes, compared with something else ----
+
+  /** The side whose file on disk has uncommitted changes, while the other side is not a version of it. */
+  let uncommitted = $state<{ side: 0 | 1; name: string } | null>(null);
+  let uncommittedDismissed = false;
+
+  $effect(() => {
+    void session.left.display;
+    void session.right.display;
+    const sides = edit;
+    if (!sides || uncommittedDismissed) return;
+    let stale = false;
+    (async () => {
+      const [l, r] = await Promise.all(sides.map((e) => e.spec().then((s) => loadVersions(s)).catch(() => null)));
+      for (const [i, mine, theirs] of [[0, l, r], [1, r, l]] as const) {
+        if (!mine || mine.current.type !== "worktree") continue;
+        // Already a version of the same repository on the other side.
+        if (theirs && theirs.repo === mine.repo) continue;
+        const changed = await api.changedFiles(mine.repo, mine.path || null).catch(() => null);
+        if (stale) return;
+        if (changed) {
+          uncommitted = { side: i, name: mine.path.split("/").pop() || "The file" };
+          return;
+        }
+      }
+      if (!stale) uncommitted = null;
+    })();
+    return () => (stale = true);
+  });
+
+  /** The other side becomes the last commit of the file with changes. */
+  async function compareWithHead() {
+    const u = uncommitted;
+    if (!u || !edit) return;
+    try {
+      const head = await api.versionSpec(await edit[u.side].spec(), { type: "rev", rev: "HEAD" });
+      await edit[u.side === 0 ? 1 : 0].apply(head);
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
   async function load(keepPosition = false) {
     menu = null;
+    if (restoring?.view && !view) view = restoring.view as View;
     const run = ++loads;
     loading = true;
     error = "";
@@ -335,7 +392,12 @@
       section = -1;
       if (previous !== undefined) api.closeFileDiff(previous);
       await tick();
-      if (keepPosition && viewport) viewport.scrollTop = top;
+      if (restoring && viewport) {
+        viewport.scrollTop = restoring.scrollTop;
+        selected = restoring.selected !== null && restoring.selected < info.rows ? restoring.selected : null;
+        restoring = null;
+        ensureLoaded();
+      } else if (keepPosition && viewport) viewport.scrollTop = top;
       else if (info.sections.length) goTo(0);
       else ensureLoaded();
       if (findOpen && findQuery) runSearch(keepPosition);
@@ -1371,6 +1433,11 @@
   }
 
   function onKey(e: KeyboardEvent) {
+    if (e.altKey && !e.ctrlKey && e.key.toLowerCase() === "h" && uncommitted) {
+      e.preventDefault();
+      compareWithHead();
+      return;
+    }
     // Keys typed into the line editor.
     if (e.target instanceof HTMLInputElement || holdKey(e)) return;
     const mod = e.ctrlKey || e.metaKey;
@@ -1652,13 +1719,17 @@
   {/if}
 
   <div class="pathbars">
-    <PathBar bind:this={pathbars[0]} info={session.left} suffix={path} modified={dirty[0]} onSave={() => save([0])} edit={edit?.[0]} title="Left" />
-    <PathBar bind:this={pathbars[1]} info={session.right} suffix={path} modified={dirty[1]} onSave={() => save([1])} edit={edit?.[1]} title="Right" />
+    <PathBar bind:this={pathbars[0]} info={session.left} suffix={path} modified={dirty[0]} onSave={() => save([0])} edit={edit?.[0]} title="Left" active={activeSide === 0} />
+    <PathBar bind:this={pathbars[1]} info={session.right} suffix={path} modified={dirty[1]} onSave={() => save([1])} edit={edit?.[1]} title="Right" active={activeSide === 1} />
   </div>
   {#if info}
     <div class="meta">
-      <span>{eolLabel(info.left)}</span>
-      <span>{eolLabel(info.right)}</span>
+      {#each [info.left, info.right] as side, i (i)}
+        <span class="metacell">
+          <span class="metatext">{eolLabel(side)}</span>
+          {#if edit?.[i]}<VersionStrip edit={edit[i]} refreshKey="{(i ? session.right : session.left).display}\n{(i ? session.right : session.left).rev ?? ''}\n{path}" />{/if}
+        </span>
+      {/each}
     </div>
   {/if}
 
@@ -1816,6 +1887,9 @@
       {#if selected !== null}<span>Row {selected + 1} of {total}</span>{/if}
       <span>{info.view === "text" ? (info.syntax ?? "Plain text") : info.views.find((v) => v.id === info?.view)?.label}</span>
       {#if busy}<span>{busy}</span>{/if}
+      {#if uncommitted}
+        <span class="nudge">{uncommitted.name} has uncommitted changes. <button class="link" onclick={compareWithHead} title="Compare it with its last commit (Alt+H)">Compare with HEAD</button> <button class="link dim" onclick={() => { uncommitted = null; uncommittedDismissed = true; }} aria-label="Dismiss">×</button></span>
+      {/if}
       <span class="hint">{editable[0] || editable[1] ? "Click to edit · Shift+click or the line number selects lines · Ctrl+C/X/V, Delete · Alt+←/→: copy difference · " : ""}F7 / F8: previous / next difference · Ctrl+F: find</span>
     {/if}
   </div>
@@ -1828,6 +1902,9 @@
     height: 100%;
     min-height: 0;
   }
+  .nudge { color: var(--fg); }
+  .nudge .link { border: none; background: none; padding: 0; color: var(--accent); font-size: inherit; cursor: pointer; }
+  .nudge .link.dim { color: var(--dim); margin-left: 4px; }
   .filter-scope { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 4px 10px; background: var(--panel-2); color: var(--dim); font-size: 11px; border-bottom: 1px solid var(--line); }
   .filter-scope strong { color: var(--accent); font-weight: 600; }
   .filter-scope button, .filter-empty button { font-size: 11px; padding: 0 6px; }
@@ -1871,11 +1948,22 @@
   .meta {
     border-bottom: 1px solid var(--line);
   }
-  .meta span {
+  .metacell {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
     background: var(--panel-2);
     padding: 1px 10px 3px;
     color: var(--dim);
     font-size: 11.5px;
+  }
+  .metatext {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .banner {
     padding: 6px 12px;

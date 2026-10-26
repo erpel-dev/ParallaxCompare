@@ -340,6 +340,33 @@ export interface PathsChanged {
 export interface RefInfo {
   name: string;
   shortId: string;
+  /** Commit time, seconds since the Unix epoch (0 if unknown). */
+  time: number;
+}
+
+/** A version of a side in a Git repository. */
+export type Version = { type: "worktree" } | { type: "staged" } | { type: "rev"; rev: string };
+
+/** What a side in a Git repository can be switched to. */
+export interface Versions {
+  repo: string;
+  /** The side's path inside the repository; empty for its root. */
+  path: string;
+  current: Version;
+  head: string | null;
+  headShort: string | null;
+  upstream: { name: string; shortId: string; fetched: number | null } | null;
+  branches: RefInfo[];
+  tags: RefInfo[];
+  remotes: RefInfo[];
+  hasWorktree: boolean;
+}
+
+/** A path completion; Tab enters an archive. */
+export interface Completion {
+  text: string;
+  kind: "dir" | "archive" | "file" | "ref";
+  detail?: string;
 }
 
 export interface CommitInfo {
@@ -521,7 +548,12 @@ export const api = {
   previewSource: (text: string, spec: SourceSpec | null = null) => invoke<SourcePreview>("preview_source", { text, spec }),
   resolvePullRequest: (url: string) => invoke<PullRequestComparison>("resolve_pull_request", { url }),
   sideSource: (id: number, left: boolean, rel: string) => invoke<SourceSpec>("side_source", { id, left, rel }),
-  completePath: (text: string) => invoke<string[]>("complete_path", { text }),
+  completePath: (text: string) => invoke<Completion[]>("complete_path", { text }),
+  sideVersions: (spec: SourceSpec) => invoke<Versions>("side_versions", { spec }),
+  versionSpec: (spec: SourceSpec, version: Version) => invoke<SourceSpec>("version_spec", { spec, version }),
+  changedFiles: (repo: string, path: string | null = null) => invoke<number | null>("changed_files", { repo, path }),
+  gitMergeBase: (repo: string, a: string, b: string) => invoke<string>("git_merge_base", { repo, a, b }),
+  gitFetch: (repo: string) => invoke<void>("git_fetch", { repo }),
   sourceParent: (spec: SourceSpec) => invoke<SourceSpec | null>("source_parent", { spec }),
   openSource: (spec: SourceSpec, reveal: boolean) => invoke<void>("open_source", { spec, reveal }),
   fileHistory: (spec: SourceSpec) => invoke<FileHistory>("file_history", { spec }),

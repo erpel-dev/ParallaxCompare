@@ -1,8 +1,9 @@
 <script lang="ts">
   // A path field with suggestions: recently compared paths, and the entries of the
   // folder typed so far (Tab completes, ↑/↓ choose, Enter takes the highlighted one).
+  // Archives are marked; Tab on one enters it (`name.zip!/`) and lists its entries.
   import { tick } from "svelte";
-  import { api } from "./api";
+  import { api, type Completion } from "./api";
   import { recentPaths } from "./recent";
 
   let {
@@ -26,7 +27,9 @@
   } = $props();
 
   let open = $state(false);
-  let completions = $state<string[]>([]);
+  let completions = $state<Completion[]>([]);
+  /** An archive is being read to list its entries (large compressed tars take a while). */
+  let reading = $state("");
   let recent = $state<string[]>([]);
   let highlight = $state(-1);
   let list = $state<HTMLDivElement>();
@@ -38,16 +41,50 @@
   const items = $derived.by(() => {
     const typed = value.trim().toLowerCase();
     const recents = recent.filter((p) => p.toLowerCase().includes(typed) && p !== value).slice(0, 8);
-    const rest = completions.filter((c) => !recents.includes(c) && c !== value);
-    return [...recents.map((p) => ({ path: p, recent: true })), ...rest.map((p) => ({ path: p, recent: false }))];
+    const rest = completions.filter((c) => !recents.includes(c.text) && c.text !== value);
+    return [
+      ...recents.map((p) => ({ path: p, recent: true, kind: undefined, detail: undefined })),
+      ...rest.map((c) => ({ path: c.text, recent: false, kind: c.kind, detail: c.detail })),
+    ];
   });
+
+  /** The archive whose entries `text` asks for, when it names a place inside one. */
+  const inArchive = (text: string) => /^(.*?\.[^/\\!]+)!/.exec(text)?.[1] ?? "";
 
   async function refresh() {
     const id = ++request;
     const text = value;
+    // Reading a large archive takes a moment: say so, but only when it does.
+    const archive = inArchive(text);
+    const slow = archive ? setTimeout(() => id === request && (reading = archive.split(/[\\/]/).pop() ?? archive), 250) : undefined;
     const found = text.trim() ? await api.completePath(text).catch(() => []) : [];
-    if (id === request) completions = found;
+    clearTimeout(slow);
+    if (id === request) {
+      completions = found;
+      reading = "";
+    }
   }
+
+  /** Tab on an archive enters it: its entries are listed next. */
+  async function enter(archive: string) {
+    value = `${archive}!/`;
+    highlight = -1;
+    open = true;
+    await toEnd();
+    await refresh();
+  }
+
+  /** The caret at the end, scrolled into view: completing changes the end of the text. */
+  async function toEnd() {
+    await tick();
+    if (!input) return;
+    input.setSelectionRange(value.length, value.length);
+    input.scrollLeft = input.scrollWidth;
+  }
+
+  /** The folder typed so far: suggestions inside it show only their own part. */
+  const typedDir = $derived(value.slice(0, Math.max(value.lastIndexOf("/"), value.lastIndexOf("\\")) + 1));
+  const shown = (path: string) => (typedDir.length > 1 && path.startsWith(typedDir) && path.length > typedDir.length ? path.slice(typedDir.length) : path);
 
   let timer: ReturnType<typeof setTimeout> | undefined;
   function typed() {
@@ -90,15 +127,25 @@
     } else {
       await refresh();
       input?.focus();
+      await toEnd();
     }
   }
 
   async function complete() {
+    const picked = highlight >= 0 ? items[highlight] : undefined;
+    // An archive on disk is entered with `!/`; one inside an archive is already a folder path.
+    if (picked?.kind === "archive") return picked.path.endsWith("/") ? choose(picked.path, false) : enter(picked.path);
     await refresh();
-    if (completions.length === 1) return choose(completions[0], false);
-    const prefix = commonPrefix(completions);
+    const exact = completions.find((c) => c.kind === "archive" && c.text === value);
+    if (exact) return enter(exact.text);
+    if (completions.length === 1) {
+      const [only] = completions;
+      return only.kind === "archive" && !only.text.endsWith("/") ? enter(only.text) : choose(only.text, false);
+    }
+    const prefix = commonPrefix(completions.map((c) => c.text));
     if (prefix.length > value.length) {
       value = prefix;
+      await toEnd();
       await refresh();
     } else if (completions.length) {
       move(1);
@@ -184,11 +231,16 @@
             choose(item.path, true);
           }}
         >
-          <span class="icon">{item.recent ? "🕘" : isFolder(item.path) ? "📁" : item.path.includes("@") ? "⎇" : "📄"}</span>
-          <span class="text">{item.path}</span>
+          <span class="icon">{item.recent ? "🕘" : item.kind === "archive" ? "🗜" : isFolder(item.path) ? "📁" : item.kind === "ref" || item.path.includes("@") ? "⎇" : "📄"}</span>
+          <span class="text" title={item.path}>{#if !item.recent && shown(item.path) !== item.path}<span class="dirpart">…/</span>{shown(item.path)}{:else}{item.path}{/if}</span>
+          {#if item.kind === "archive"}<span class="tag">ARC</span>{/if}
+          {#if item.detail}<span class="detail">{item.detail}{#if item.kind === "archive" && i === highlight} · Tab opens{/if}</span>{/if}
         </div>
       {/each}
+      {#if reading}<div class="item reading">Reading {reading}…</div>{/if}
     </div>
+  {:else if open && reading}
+    <div class="suggest"><div class="item reading">Reading {reading}…</div></div>
   {/if}
 </div>
 
@@ -226,6 +278,36 @@
   .item.on,
   .item:hover {
     background: var(--sel);
+  }
+  .text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .dirpart {
+    color: var(--dim);
+  }
+  .tag {
+    flex: none;
+    align-self: center;
+    font-family: system-ui, sans-serif;
+    font-size: 9.5px;
+    font-weight: 600;
+    padding: 0 4px;
+    border-radius: 3px;
+    color: #fff;
+    background: #6b5ab8;
+  }
+  .detail {
+    flex: none;
+    margin-left: auto;
+    padding-left: 12px;
+    color: var(--dim);
+    font-family: system-ui, sans-serif;
+    font-size: 11px;
+  }
+  .reading {
+    color: var(--dim);
+    font-style: italic;
   }
   .icon {
     flex: none;

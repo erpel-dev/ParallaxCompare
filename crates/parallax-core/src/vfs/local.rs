@@ -7,7 +7,8 @@ use std::time::SystemTime;
 
 use parking_lot::{Mutex, RwLock};
 
-use super::{Change, Data, Entry, EntryKind, Vfs, find_entry, root_entry, split_parent};
+use super::git::IndexInfo;
+use super::{Change, Data, Entry, EntryKind, QuickId, Vfs, find_entry, root_entry, split_parent};
 use crate::{Error, Result};
 
 /// Files below this size are read into memory; larger ones are memory-mapped.
@@ -18,30 +19,33 @@ pub struct LocalFs {
     /// When set, the tree was walked once up front with `.gitignore` rules applied.
     /// Copies and deletes update it through [`Vfs::changed`].
     snapshot: Option<RwLock<Snapshot>>,
-    /// Files Git tracks, shown even where ignore rules match, for walking again.
-    tracked: Vec<String>,
+    /// Files Git tracks, shown even where ignore rules match, and the blob ids of
+    /// those unchanged since `git add`, for walking again.
+    index: IndexInfo,
     /// Ignored files are listed, marked as ignored, instead of left out.
     mark_ignored: bool,
 }
 
 impl LocalFs {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        LocalFs { root: root.into(), snapshot: None, tracked: Vec::new(), mark_ignored: false }
+        LocalFs { root: root.into(), snapshot: None, index: IndexInfo::default(), mark_ignored: false }
     }
 
     /// Walks the whole tree in parallel, honouring `.gitignore`, `.git/info/exclude`
     /// and `.ignore` files. `.git` directories are always skipped.
     ///
-    /// `tracked` lists files (relative to `root`) that Git tracks: like `git status`,
-    /// they are shown even when an ignore rule matches them.
+    /// `index` lists files (relative to `root`) that Git tracks: like `git status`,
+    /// they are shown even when an ignore rule matches them. Files whose stat data
+    /// still matches the index get its blob id as their quick id, so comparing them
+    /// with a Git revision needs no reading.
     ///
     /// With `hide` false, what the rules ignore is listed too, marked as
     /// [`Entry::ignored`]. Ignored folders are not walked up front: they are listed
     /// from disk when asked for, so a large build folder costs nothing until then.
-    pub fn with_gitignore(root: impl Into<PathBuf>, tracked: &[String], hide: bool) -> Result<Self> {
+    pub fn with_gitignore(root: impl Into<PathBuf>, index: IndexInfo, hide: bool) -> Result<Self> {
         let root = root.into();
-        let snapshot = snapshot_of(&root, tracked, !hide);
-        Ok(LocalFs { root, snapshot: Some(RwLock::new(snapshot)), tracked: tracked.to_vec(), mark_ignored: !hide })
+        let snapshot = snapshot_of(&root, &index, !hide);
+        Ok(LocalFs { root, snapshot: Some(RwLock::new(snapshot)), index, mark_ignored: !hide })
     }
 
     pub fn root(&self) -> &Path {
@@ -85,11 +89,11 @@ impl Snapshot {
     }
 }
 
-fn snapshot_of(root: &Path, tracked: &[String], mark_ignored: bool) -> Snapshot {
+fn snapshot_of(root: &Path, index: &IndexInfo, mark_ignored: bool) -> Snapshot {
     let mut snapshot = Snapshot::default();
     snapshot.dirs.insert(String::new(), Vec::new());
-    snapshot.insert(walk(root, root, None));
-    add_tracked(root, &mut snapshot.dirs, tracked);
+    snapshot.insert(walk(root, root, None, index));
+    add_tracked(root, &mut snapshot.dirs, &index.paths);
     if mark_ignored {
         let dirs: Vec<String> = snapshot.dirs.keys().cloned().collect();
         add_ignored(root, &mut snapshot, dirs);
@@ -153,7 +157,7 @@ fn error_path(err: &ignore::Error) -> Option<&Path> {
 
 /// Walks the tree below `start` (a folder inside `root`) in parallel with ignore
 /// rules applied, returning each entry with its path relative to `root`.
-fn walk(root: &Path, start: &Path, max_depth: Option<usize>) -> Walked {
+fn walk(root: &Path, start: &Path, max_depth: Option<usize>, index: &IndexInfo) -> Walked {
     let found = Mutex::new(Walked::default());
     let walker = ignore::WalkBuilder::new(start)
         .hidden(false)
@@ -183,8 +187,11 @@ fn walk(root: &Path, start: &Path, max_depth: Option<usize>) -> Walked {
             let Ok(rel) = dent.path().strip_prefix(root) else {
                 return ignore::WalkState::Continue;
             };
-            if let Some(entry) = entry_from_path(dent.path(), dent.file_name().to_string_lossy().into_owned()) {
-                found.lock().entries.push((path_to_rel(rel), entry));
+            let name = dent.file_name().to_string_lossy().into_owned();
+            if let Some((mut entry, meta)) = entry_and_meta(dent.path(), name) {
+                let rel = path_to_rel(rel);
+                entry.quick_id = index.clean_id(&rel, &meta).map(QuickId::GitOid);
+                found.lock().entries.push((rel, entry));
             }
             ignore::WalkState::Continue
         })
@@ -245,6 +252,10 @@ fn to_unix(time: std::io::Result<SystemTime>) -> Option<i64> {
 }
 
 fn entry_from_path(path: &Path, name: String) -> Option<Entry> {
+    entry_and_meta(path, name).map(|(entry, _)| entry)
+}
+
+fn entry_and_meta(path: &Path, name: String) -> Option<(Entry, fs::Metadata)> {
     let meta = fs::symlink_metadata(path).ok()?;
     // Symlinks are not followed: like Git and tar, a link is compared by its target
     // path. Following them would also loop forever on links to a parent folder.
@@ -255,7 +266,8 @@ fn entry_from_path(path: &Path, name: String) -> Option<Entry> {
     } else {
         (EntryKind::File, meta.len())
     };
-    Some(Entry { name, kind, size, mtime: to_unix(meta.modified()), quick_id: None, ignored: false })
+    let mtime = to_unix(meta.modified());
+    Some((Entry { name, kind, size, mtime, quick_id: None, ignored: false }, meta))
 }
 
 fn special_kind(kind: fs::FileType) -> &'static str {
@@ -425,7 +437,7 @@ impl LocalFs {
             return;
         };
         if path.is_empty() {
-            *snapshot.write() = snapshot_of(&self.root, &self.tracked, self.mark_ignored);
+            *snapshot.write() = snapshot_of(&self.root, &self.index, self.mark_ignored);
             return;
         }
         let (parent, name) = split_parent(path);
@@ -445,7 +457,7 @@ impl LocalFs {
         // Listing the parent tells whether ignore rules hide `path`. An entry that was
         // already shown stays (Git-tracked files are shown even when ignored); others
         // are shown as ignored, or left out.
-        let entry = walk(&self.root, &parent_abs, Some(1))
+        let entry = walk(&self.root, &parent_abs, Some(1), &self.index)
             .entries
             .into_iter()
             .find(|(rel, _)| rel == path)
@@ -460,7 +472,7 @@ impl LocalFs {
             });
         // Ignored folders are listed from disk when asked for, not walked.
         let walked_dir = entry.as_ref().is_some_and(|e| e.kind == EntryKind::Dir && !e.ignored);
-        let below = if walked_dir { walk(&self.root, &path_abs, None) } else { Walked::default() };
+        let below = if walked_dir { walk(&self.root, &path_abs, None, &self.index) } else { Walked::default() };
         let mut new_dirs: Vec<String> = if walked_dir { vec![path.to_string()] } else { Vec::new() };
         new_dirs.extend(below.entries.iter().filter(|(_, e)| e.kind == EntryKind::Dir).map(|(rel, _)| rel.clone()));
 
@@ -650,8 +662,8 @@ mod tests {
         fs::write(root.join("visible.txt"), b"visible").unwrap();
         fs::set_permissions(root.join("restricted"), fs::Permissions::from_mode(0o000)).unwrap();
         let readable = fs::read_dir(root.join("restricted")).is_ok();
-        let tracked = ["restricted/secret.txt".to_string(), "visible.txt".to_string()];
-        let vfs = LocalFs::with_gitignore(root, &tracked, true).unwrap();
+        let paths = vec!["restricted/secret.txt".to_string(), "visible.txt".to_string()];
+        let vfs = LocalFs::with_gitignore(root, IndexInfo { paths, ..Default::default() }, true).unwrap();
         let listed = vfs.list("restricted");
         fs::set_permissions(root.join("restricted"), fs::Permissions::from_mode(0o755)).unwrap();
         // Root reads every folder: there is nothing to test then.
