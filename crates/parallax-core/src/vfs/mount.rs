@@ -131,6 +131,18 @@ impl Vfs for ArchiveMount {
         vfs.open(&join(&inner, name))
     }
 
+    fn slow_to_read(&self, path: &str) -> bool {
+        let (parent, name) = split_parent(path);
+        self.resolve(parent).is_ok_and(|(vfs, inner, _)| vfs.slow_to_read(&join(&inner, name)))
+    }
+
+    fn warm(&self, path: &str) {
+        let (parent, name) = split_parent(path);
+        if let Ok((vfs, inner, _)) = self.resolve(parent) {
+            vfs.warm(&join(&inner, name));
+        }
+    }
+
     fn local_path(&self, path: &str) -> Option<PathBuf> {
         let (parent, _) = split_parent(path);
         match self.resolve(parent) {

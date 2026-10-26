@@ -165,6 +165,13 @@ pub trait Vfs: Send + Sync {
     fn list(&self, dir: &str) -> Result<Vec<Entry>>;
     fn stat(&self, path: &str) -> Result<Entry>;
     fn read(&self, path: &str) -> Result<Data>;
+    /// Whether reading `path` first decodes much else (a solid 7z block not decoded
+    /// yet), so that a comparison should [`Vfs::warm`] both sides at once.
+    fn slow_to_read(&self, _path: &str) -> bool {
+        false
+    }
+    /// Does the slow part of reading `path` now, so that the read itself is quick.
+    fn warm(&self, _path: &str) {}
     /// The contents as a stream, for reading only as far as needed (a comparison
     /// that stops at the first difference). Providers that decompress entries
     /// decompress as the stream is read; others hand out what [`read`](Self::read) gives.

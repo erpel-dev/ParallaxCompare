@@ -755,7 +755,17 @@ impl<'a> Engine<'a> {
                 }
                 (Some(data), None)
             }
-            _ => (None, None),
+            _ => {
+                // Both sides decode much before they are read (solid 7z blocks): at once.
+                let (left, right) = (self.left.path(lrel), self.right.path(rrel));
+                if self.left.vfs.slow_to_read(&left) && self.right.vfs.slow_to_read(&right) {
+                    std::thread::scope(|s| {
+                        s.spawn(|| self.left.vfs.warm(&left));
+                        self.right.vfs.warm(&right);
+                    });
+                }
+                (None, None)
+            }
         };
         // Entries that are decompressed to be read (archives) are compared as streams
         // that stop at the first difference; files on disk are mapped, which already
