@@ -1775,3 +1775,37 @@ fn filtered_parent_copy_includes_matching_archives_as_whole_files() {
     assert_eq!(&*target.vfs.read(&target.path("wrapper/bundle.zip")).unwrap(), matching.as_slice());
     assert!(target.stat("wrapper/no-match.zip").is_err());
 }
+
+/// 7z archives complete like zip files: marked as archives, entered with `!/`,
+/// listed from their header, nested archives included.
+#[test]
+fn completion_enters_7z_archives() {
+    use parallax_core::source::{CompletionKind, complete};
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    write(&src, &[("lib/a.txt", "a"), ("readme.md", "r")]);
+    fs::write(src.join("inner.zip"), zip_bytes(&[("deep.txt", "d")])).unwrap();
+    sevenz_rust2::compress_to_path(&src, dir.path().join("pack.7z")).unwrap();
+
+    let root = format!("{}/", dir.path().display());
+    let found = complete(&format!("{root}pa"), 10);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].kind, CompletionKind::Archive);
+    assert!(found[0].detail.as_deref().unwrap().starts_with("7z · "), "{:?}", found[0].detail);
+
+    let texts = |text: String| complete(&text, 10).into_iter().map(|c| (c.text, c.kind)).collect::<Vec<_>>();
+    let pack = format!("{root}pack.7z");
+    assert_eq!(
+        texts(format!("{pack}!/")),
+        [
+            (format!("{pack}!/lib/"), CompletionKind::Dir),
+            (format!("{pack}!/inner.zip/"), CompletionKind::Archive),
+            (format!("{pack}!/readme.md"), CompletionKind::File),
+        ]
+    );
+    assert_eq!(texts(format!("{pack}!/lib/")), [(format!("{pack}!/lib/a.txt"), CompletionKind::File)]);
+    assert_eq!(texts(format!("{pack}!/inner.zip/")), [(format!("{pack}!/inner.zip/deep.txt"), CompletionKind::File)]);
+    // What it completes to opens as a source.
+    let source = SourceSpec::parse(&format!("{pack}!/inner.zip/deep.txt")).open(SourceOptions::default()).unwrap();
+    assert_eq!(&*source.vfs.read(&source.root).unwrap(), b"d");
+}
