@@ -1,0 +1,14 @@
+count=100 delay_ms=2 mode=default round=0 seconds=0.179352 left_calls=[204, 0, 1, 1] right_calls=[104, 0, 1, 1] files=100 same=0 different=100
+count=100 delay_ms=2 mode=default round=1 seconds=0.172858 left_calls=[203, 0, 0, 0] right_calls=[103, 0, 0, 0] files=100 same=0 different=100
+count=1000 delay_ms=0 mode=default round=0 seconds=0.020496 left_calls=[2004, 0, 1, 1] right_calls=[1004, 0, 1, 1] files=1000 same=0 different=1000
+count=1000 delay_ms=0 mode=default round=1 seconds=0.005118 left_calls=[2003, 0, 0, 0] right_calls=[1003, 0, 0, 0] files=1000 same=0 different=1000
+count=1000 delay_ms=2 mode=default round=0 seconds=1.617292 left_calls=[2004, 0, 1, 1] right_calls=[1004, 0, 1, 1] files=1000 same=0 different=1000
+count=1000 delay_ms=2 mode=default round=1 seconds=1.610427 left_calls=[2003, 0, 0, 0] right_calls=[1003, 0, 0, 0] files=1000 same=0 different=1000
+count=1000 delay_ms=10 mode=default round=0 seconds=7.714601 left_calls=[2004, 0, 1, 1] right_calls=[1004, 0, 1, 1] files=1000 same=0 different=1000
+count=1000 delay_ms=10 mode=default round=1 seconds=7.654449 left_calls=[2003, 0, 0, 0] right_calls=[1003, 0, 0, 0] files=1000 same=0 different=1000
+count=1000 delay_ms=2 mode=equal round=0 seconds=0.021307 left_calls=[4, 0, 1, 1] right_calls=[4, 0, 1, 1] files=1000 same=1000 different=0
+count=1000 delay_ms=2 mode=equal round=1 seconds=0.014087 left_calls=[3, 0, 0, 0] right_calls=[3, 0, 0, 0] files=1000 same=1000 different=0
+count=1000 delay_ms=2 mode=bytes round=0 seconds=0.029659 left_calls=[4, 0, 1, 1] right_calls=[4, 0, 1, 1] files=1000 same=0 different=1000
+count=1000 delay_ms=2 mode=bytes round=1 seconds=0.013819 left_calls=[3, 0, 0, 0] right_calls=[3, 0, 0, 0] files=1000 same=0 different=1000
+count=1000 delay_ms=2 mode=verify round=0 seconds=1.603983 left_calls=[2004, 0, 1, 1] right_calls=[1004, 0, 1, 1] files=1000 same=1000 different=0
+count=1000 delay_ms=2 mode=verify round=1 seconds=1.595592 left_calls=[2003, 0, 0, 0] right_calls=[1003, 0, 0, 0] files=1000 same=1000 different=0
