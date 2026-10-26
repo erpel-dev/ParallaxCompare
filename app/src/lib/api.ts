@@ -61,9 +61,12 @@ export function sourceName(spec: SourceSpec, depth = 1): string {
   return parts.slice(-depth).join("/");
 }
 
+/** Files ignored by `.gitignore` rules: compared and marked, left out, or the rules not read. */
+export type IgnoredFiles = "mark" | "hide" | "off";
+
 export interface SourceOptions {
   expandArchives: boolean;
-  respectGitignore: boolean;
+  ignored: IgnoredFiles;
 }
 
 export interface SourceInfo {
@@ -90,6 +93,8 @@ export interface Side {
   kind: EntryKind;
   size: number;
   mtime: number | null;
+  /** Ignored by Git: matched by ignore rules and not tracked. */
+  ignored?: boolean;
 }
 
 export interface Node {

@@ -15,6 +15,8 @@ export interface FlatRow {
   rightPath?: string;
   /** Flat view: a matched pair whose files are still being compared. */
   pending?: boolean;
+  /** Per side: inside a folder ignored by Git, which carries the mark. */
+  inIgnored?: [boolean, boolean];
 }
 
 const holds = (side: Side | null) => !!side && (side.kind === "dir" || side.kind === "archive");
@@ -82,17 +84,17 @@ export function joinPath(dir: string, name: string): string {
 export function flatten(root: Node, expanded: Set<string>, filter: Filter): FlatRow[] {
   const out: FlatRow[] = [];
   const memo = new Map<Node, boolean>();
-  const walk = (node: Node, dir: string, depth: number) => {
+  const walk = (node: Node, dir: string, depth: number, inIgnored: [boolean, boolean]) => {
     for (const child of node.children ?? []) {
       if (!visible(child, filter, memo)) continue;
       const path = joinPath(dir, child.name);
       const container = isContainer(child);
       const open = container && expanded.has(path);
-      out.push({ node: child, path, depth, container, expanded: open });
-      if (open) walk(child, path, depth + 1);
+      out.push({ node: child, path, depth, container, expanded: open, inIgnored });
+      if (open) walk(child, path, depth + 1, [inIgnored[0] || !!child.left?.ignored, inIgnored[1] || !!child.right?.ignored]);
     }
   };
-  walk(root, "", 0);
+  walk(root, "", 0, [false, false]);
   return out;
 }
 

@@ -222,7 +222,7 @@
     if (tab.request) return { ...tab.request, ...changes, pullRequest: Object.keys(changes).length ? undefined : tab.request.pullRequest };
     const side = (s: SideName) => (changes[s] ? Promise.resolve(changes[s]) : sideSpec(tab, s));
     const [left, right] = await Promise.all([side("left"), side("right")]);
-    const options = parentOf(tab)?.request.options ?? { expandArchives: true, respectGitignore: true };
+    const options = parentOf(tab)?.request.options ?? { expandArchives: true, ignored: "mark" };
     return { left, right, options, mergeBase: false };
   }
 
@@ -293,7 +293,7 @@
         const { title, number } = pr;
         return replace(tab, {
           left: pr.left, right: pr.right,
-          options: tab.request?.options ?? parentOf(tab)?.request.options ?? { expandArchives: true, respectGitignore: true },
+          options: tab.request?.options ?? parentOf(tab)?.request.options ?? { expandArchives: true, ignored: "mark" },
           mergeBase: false, pullRequest: { url: pr.url, title, number },
         });
       } catch (e) {
@@ -547,7 +547,7 @@
         left: startup.left,
         right: startup.right,
         mergeBase: startup.mergeBase,
-        options: { expandArchives: true, respectGitignore: true },
+        options: { expandArchives: true, ignored: "mark" },
       });
     } else if (startup?.kind === "merge") {
       openMerge({ kind: "startup" }, "Merge");

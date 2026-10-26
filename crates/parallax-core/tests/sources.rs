@@ -389,7 +389,9 @@ fn git_worktree_against_revision() {
     // With core.autocrlf (the Windows default) checked-out files may have CRLF.
     assert!(matches!(status_of(&list, "src/cart.ts"), Status::Same | Status::Similar));
     assert!(matches!(status_of(&list, "build/keep.txt"), Status::Same | Status::Similar));
-    assert!(!list.iter().any(|(p, _)| p == "build/out.bin" || p.starts_with(".git/")));
+    // Ignored files are compared too (marked as ignored); `.git` never is.
+    assert_eq!(status_of(&list, "build/out.bin"), Status::RightOnly);
+    assert!(!list.iter().any(|(p, _)| p.starts_with(".git/")));
 
     // A folder opened directly is shown completely, even when it is ignored itself.
     let (l, r) = open_pair(
@@ -569,12 +571,80 @@ fn copy_into_folder_with_gitignore_updates_the_tree() {
     assert_eq!(refresh("new"), Status::Same);
     copy(&l, &r, "keep.txt").unwrap();
     assert_eq!(refresh("keep.txt"), Status::Same);
-    // Ignore rules still hide what they match.
+    // What ignore rules match is compared too, marked as ignored.
     copy(&l, &r, "x.log").unwrap();
     assert!(repo.join("x.log").exists());
-    assert_eq!(refresh("x.log"), Status::LeftOnly);
+    let node = compare::compare_path(&l, &r, "x.log", &CompareOptions::default(), &Control::default()).unwrap().root;
+    assert_eq!(node.status, Status::Same);
+    assert!(node.right.unwrap().ignored);
     delete(&r, "new").unwrap();
     assert_eq!(refresh("new"), Status::LeftOnly);
+    // Asked to, ignore rules hide what they match.
+    let hide = SourceOptions { ignored: parallax_core::source::IgnoredFiles::Hide, ..SourceOptions::default() };
+    let (l, r) = open_pair(
+        &SourceSpec::parse(&zip.display().to_string()),
+        &SourceSpec::parse(&repo.display().to_string()),
+        hide,
+        false,
+    )
+    .unwrap();
+    let status = compare::compare_path(&l, &r, "x.log", &CompareOptions::default(), &Control::default()).unwrap();
+    assert_eq!(status.root.status, Status::LeftOnly);
+}
+
+/// Ignored files and folders are listed, marked; ignored folders are read from
+/// disk when listed, and follow changes like the rest.
+#[test]
+fn ignored_files_are_listed_and_marked() {
+    use parallax_core::source::IgnoredFiles;
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q", "-b", "main"]);
+    write(repo, &[(".gitignore", "build/\n*.log\n"), ("src/a.rs", "a"), ("kept.log", "tracked")]);
+    git(repo, &["add", "-A"]);
+    git(repo, &["add", "-f", "kept.log"]);
+    git(repo, &["commit", "-q", "-m", "init"]);
+    write(repo, &[("build/out/a.o", "obj"), ("x.log", "log"), ("src/debug.log", "dbg")]);
+    let path = repo.display().to_string();
+    let open = |ignored| SourceSpec::parse(&path).open(SourceOptions { ignored, ..SourceOptions::default() }).unwrap();
+
+    let source = open(IgnoredFiles::Mark);
+    let vfs = &source.vfs;
+    let marks = |dir: &str| {
+        let mut list: Vec<(String, bool)> = vfs.list(dir).unwrap().into_iter().map(|e| (e.name, e.ignored)).collect();
+        list.sort();
+        list
+    };
+    let root = marks("");
+    for (name, ignored) in
+        [("build", true), ("x.log", true), ("kept.log", false), ("src", false), (".gitignore", false)]
+    {
+        assert!(root.contains(&(name.to_string(), ignored)), "{name}: {root:?}");
+    }
+    assert!(!root.iter().any(|(n, _)| n == ".git"));
+    assert_eq!(marks("src"), [("a.rs".to_string(), false), ("debug.log".to_string(), true)]);
+    assert_eq!(marks("build"), [("out".to_string(), true)]);
+    assert_eq!(marks("build/out"), [("a.o".to_string(), true)]);
+    assert!(vfs.stat("build/out/a.o").unwrap().ignored);
+    assert_eq!(&*vfs.read("build/out/a.o").unwrap(), b"obj");
+
+    // Changes inside and next to ignored folders.
+    write(repo, &[("build/out/b.o", "b"), ("new.log", "n"), ("src/new.rs", "n")]);
+    for p in ["build/out/b.o", "new.log", "src/new.rs"] {
+        vfs.changed(p);
+    }
+    assert_eq!(marks("build/out").len(), 2);
+    assert!(marks("").contains(&("new.log".to_string(), true)));
+    assert!(marks("src").contains(&("new.rs".to_string(), false)));
+    fs::remove_dir_all(repo.join("build")).unwrap();
+    vfs.changed("build");
+    assert!(!marks("").iter().any(|(n, _)| n == "build"));
+
+    // Hidden, or the rules not read at all.
+    let hidden = open(IgnoredFiles::Hide).vfs.list("").unwrap();
+    assert!(!hidden.iter().any(|e| e.name == "x.log") && hidden.iter().any(|e| e.name == "kept.log"));
+    let off = open(IgnoredFiles::Off).vfs.list("").unwrap();
+    assert!(off.iter().any(|e| e.name == "x.log" && !e.ignored));
 }
 
 #[cfg(unix)]

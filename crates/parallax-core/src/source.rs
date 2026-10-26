@@ -44,14 +44,30 @@ pub enum SourceSpec {
 pub struct SourceOptions {
     /// Offer archives found inside folders as expandable folders.
     pub expand_archives: bool,
-    /// Hide files ignored by `.gitignore` in local folders that are inside a Git repository.
-    pub respect_gitignore: bool,
+    /// What becomes of files that `.gitignore` rules ignore, in local folders inside
+    /// a Git repository.
+    pub ignored: IgnoredFiles,
 }
 
 impl Default for SourceOptions {
     fn default() -> Self {
-        SourceOptions { expand_archives: true, respect_gitignore: true }
+        SourceOptions { expand_archives: true, ignored: IgnoredFiles::Mark }
     }
+}
+
+/// Files that `.gitignore`, `.git/info/exclude` or `.ignore` rules ignore and Git
+/// does not track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum IgnoredFiles {
+    /// Listed and compared like any file, marked as ignored. Ignored folders are
+    /// read when compared, and not watched for changes.
+    #[default]
+    Mark,
+    /// Left out.
+    Hide,
+    /// The rules are not read: nothing is marked.
+    Off,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -281,7 +297,8 @@ impl SourceSpec {
                 let git = GitRepo::discover(repo)?;
                 let workdir =
                     git.workdir().ok_or_else(|| Error::InvalidSource(format!("{repo} is a bare repository")))?;
-                let local: Arc<dyn Vfs> = Arc::new(LocalFs::with_gitignore(&workdir, &git.tracked_paths()?)?);
+                let hide = opts.ignored == IgnoredFiles::Hide;
+                let local: Arc<dyn Vfs> = Arc::new(LocalFs::with_gitignore(&workdir, &git.tracked_paths()?, hide)?);
                 Ok(Source {
                     spec: self.clone(),
                     vfs: Arc::new(ArchiveMount::new(local, opts.expand_archives)),
@@ -322,10 +339,10 @@ fn open_local(spec: &SourceSpec, path: &str, opts: SourceOptions) -> Result<Sour
     }
     // A gitignore snapshot only pays off for folders; for a single file it would
     // walk the whole parent folder.
-    let tracked = (opts.respect_gitignore && meta.is_dir()).then(|| tracked_below(&dir)).flatten();
+    let tracked = (opts.ignored != IgnoredFiles::Off && meta.is_dir()).then(|| tracked_below(&dir)).flatten();
     let gitignore = tracked.is_some();
     let local: Arc<dyn Vfs> = match tracked {
-        Some(tracked) => Arc::new(LocalFs::with_gitignore(&dir, &tracked)?),
+        Some(tracked) => Arc::new(LocalFs::with_gitignore(&dir, &tracked, opts.ignored == IgnoredFiles::Hide)?),
         None => Arc::new(LocalFs::new(&dir)),
     };
     let vfs: Arc<dyn Vfs> = Arc::new(ArchiveMount::new(local, opts.expand_archives));

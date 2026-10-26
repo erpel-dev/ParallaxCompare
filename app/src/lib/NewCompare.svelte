@@ -46,7 +46,7 @@
     const defaults = {
       left: { path: "" } as PickerValue,
       right: { path: "" } as PickerValue,
-      options: { expandArchives: true, respectGitignore: true },
+      options: { expandArchives: true, ignored: "mark" } as SourceOptions,
       mergeBase: false,
       prUrl: "",
     };
@@ -64,7 +64,8 @@
         right: isPullRequestUrl(r.path) ? { path: "" } : r,
         options: {
           expandArchives: saved.options?.expandArchives !== false,
-          respectGitignore: saved.options?.respectGitignore !== false,
+          // Before ignored files were shown by default, the setting was `respectGitignore`; it starts over.
+          ignored: saved.options?.ignored === "hide" ? ("hide" as const) : ("mark" as const),
         },
         mergeBase: saved.mergeBase === true,
         prUrl,
@@ -189,7 +190,7 @@
       right = pickerFor(c.right);
       leftPreview = rightPreview = null;
     }
-    options = { ...c.options };
+    options = { ...c.options, ignored: c.options.ignored ?? "mark" };
     mergeBase = c.mergeBase;
   }
   function pin(c: SavedComparison) {
@@ -390,7 +391,7 @@
             title="Left"
             bind:value={left}
             bind:preview={leftPreview}
-            respectGitignore={options.respectGitignore}
+            hideIgnored={options.ignored === "hide"}
             onEnter={submit}
             onPullRequest={enterPR}
           />
@@ -401,7 +402,7 @@
             title="Right"
             bind:value={right}
             bind:preview={rightPreview}
-            respectGitignore={options.respectGitignore}
+            hideIgnored={options.ignored === "hide"}
             onEnter={submit}
             onPullRequest={enterPR}
           />
@@ -427,16 +428,20 @@
       {#if !extra}<details class="options" bind:open={optionsOpen}>
         <summary
           >Comparison options <span
-            >· {options.expandArchives ? "Archives expanded" : "Archives kept as files"} · {options.respectGitignore
-              ? "Gitignore respected"
-              : "Ignored files included"}</span
+            >· {options.expandArchives ? "Archives expanded" : "Archives kept as files"} · {options.ignored === "hide"
+              ? "Ignored files hidden"
+              : "Ignored files marked"}</span
           ></summary
         >
         <div class="opts">
           <label><input type="checkbox" bind:checked={options.expandArchives} /> Expand archives inside folders</label
           ><label
-            ><input type="checkbox" bind:checked={options.respectGitignore} /> Respect .gitignore
-            <small>for files on disk</small></label
+            ><input
+              type="checkbox"
+              checked={options.ignored === "hide"}
+              onchange={(e) => (options.ignored = e.currentTarget.checked ? "hide" : "mark")}
+            /> Hide files ignored by Git
+            <small>otherwise they are compared and marked “ignored”</small></label
           >
         </div>
       </details>{/if}

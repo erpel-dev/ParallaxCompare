@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use parallax_core::compare::{self, CompareMode, CompareOptions, Control, Node, Status};
 use parallax_core::convert::{self, View};
-use parallax_core::source::{Source, SourceOptions, SourceSpec, open_pair};
+use parallax_core::source::{IgnoredFiles, Source, SourceOptions, SourceSpec, open_pair};
 use parallax_core::text;
 use parallax_core::textdiff::{self, DiffOptions, RowKind, WhitespaceMode};
 
@@ -76,7 +76,11 @@ struct Cli {
     #[arg(long)]
     no_archives: bool,
 
-    /// Do not apply .gitignore rules to local folders
+    /// Leave out files that .gitignore rules ignore (by default they are compared, marked "ignored")
+    #[arg(long, conflicts_with = "no_gitignore")]
+    hide_ignored: bool,
+
+    /// Do not read .gitignore rules: nothing is marked or left out as ignored
     #[arg(long)]
     no_gitignore: bool,
 
@@ -161,7 +165,14 @@ fn exit(result: Result<bool>) -> ExitCode {
 }
 
 fn run(cli: &Cli) -> Result<bool> {
-    let source_opts = SourceOptions { expand_archives: !cli.no_archives, respect_gitignore: !cli.no_gitignore };
+    let ignored = if cli.no_gitignore {
+        IgnoredFiles::Off
+    } else if cli.hide_ignored {
+        IgnoredFiles::Hide
+    } else {
+        IgnoredFiles::Mark
+    };
+    let source_opts = SourceOptions { expand_archives: !cli.no_archives, ignored };
     let (left, right) =
         open_pair(&SourceSpec::parse(&cli.left), &SourceSpec::parse(&cli.right), source_opts, cli.merge_base)?;
     if (cli.schema.is_some() || cli.left_schema.is_some() || cli.right_schema.is_some())
@@ -242,7 +253,8 @@ fn print_tree(out: &mut impl Write, node: &Node, prefix: &str, all: bool, paint:
         }
         let path = if prefix.is_empty() { child.name.clone() } else { format!("{prefix}/{}", child.name) };
         let is_dir = child.left.as_ref().or(child.right.as_ref()).is_some_and(|s| s.kind.is_container());
-        let shown = if is_dir { format!("{path}/") } else { path.clone() };
+        let ignored = [&child.left, &child.right].into_iter().flatten().any(|s| s.ignored);
+        let shown = format!("{path}{}{}", if is_dir { "/" } else { "" }, if ignored { "  [ignored]" } else { "" });
         let line = match child.status {
             Status::Same => format!("  = {shown}"),
             Status::Similar => paint.wrap(

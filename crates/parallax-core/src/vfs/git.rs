@@ -254,7 +254,7 @@ fn to_entry(repo: &gix::Repository, name: String, kind: GitEntryKind, oid: Objec
             (EntryKind::File, repo.find_header(oid).map_err(Error::git)?.size())
         }
     };
-    Ok(Entry { name, kind, size, mtime: None, quick_id: Some(QuickId::GitOid(oid)) })
+    Ok(Entry { name, kind, size, mtime: None, quick_id: Some(QuickId::GitOid(oid)), ignored: false })
 }
 
 impl Vfs for GitTreeFs {

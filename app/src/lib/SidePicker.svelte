@@ -13,14 +13,14 @@
     title,
     value = $bindable(),
     preview = $bindable(null),
-    respectGitignore = true,
+    hideIgnored = false,
     onEnter,
     onPullRequest,
   }: {
     title: string;
     value: PickerValue;
     preview?: PickerPreview | null;
-    respectGitignore?: boolean;
+    hideIgnored?: boolean;
     onEnter?: () => void;
     onPullRequest?: (url: string) => void;
   } = $props();
@@ -148,9 +148,9 @@
   const secondary = $derived.by(() => {
     if (git) return `${git.subpath ? `Scope: ${git.subpath}` : "Whole repository"} · read-only`;
     if (detected?.kind === "folder" && detected.gitRoot)
-      return respectGitignore || worktree
+      return hideIgnored
         ? "Includes local changes; ignored files are hidden"
-        : "Includes local changes and ignored files";
+        : "Includes local changes; ignored files are marked";
     if (detected?.kind === "remote") return "Uses your existing Git authentication";
     if (detected?.kind === "error") return "Correct the input or check your access, then retry.";
     if (detected?.kind === "needsRepository") return "Choose a repository to resolve a branch, tag or commit.";

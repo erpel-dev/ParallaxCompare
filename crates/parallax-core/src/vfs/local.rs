@@ -20,11 +20,13 @@ pub struct LocalFs {
     snapshot: Option<RwLock<Snapshot>>,
     /// Files Git tracks, shown even where ignore rules match, for walking again.
     tracked: Vec<String>,
+    /// Ignored files are listed, marked as ignored, instead of left out.
+    mark_ignored: bool,
 }
 
 impl LocalFs {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        LocalFs { root: root.into(), snapshot: None, tracked: Vec::new() }
+        LocalFs { root: root.into(), snapshot: None, tracked: Vec::new(), mark_ignored: false }
     }
 
     /// Walks the whole tree in parallel, honouring `.gitignore`, `.git/info/exclude`
@@ -32,10 +34,14 @@ impl LocalFs {
     ///
     /// `tracked` lists files (relative to `root`) that Git tracks: like `git status`,
     /// they are shown even when an ignore rule matches them.
-    pub fn with_gitignore(root: impl Into<PathBuf>, tracked: &[String]) -> Result<Self> {
+    ///
+    /// With `hide` false, what the rules ignore is listed too, marked as
+    /// [`Entry::ignored`]. Ignored folders are not walked up front: they are listed
+    /// from disk when asked for, so a large build folder costs nothing until then.
+    pub fn with_gitignore(root: impl Into<PathBuf>, tracked: &[String], hide: bool) -> Result<Self> {
         let root = root.into();
-        let snapshot = snapshot_of(&root, tracked);
-        Ok(LocalFs { root, snapshot: Some(RwLock::new(snapshot)), tracked: tracked.to_vec() })
+        let snapshot = snapshot_of(&root, tracked, !hide);
+        Ok(LocalFs { root, snapshot: Some(RwLock::new(snapshot)), tracked: tracked.to_vec(), mark_ignored: !hide })
     }
 
     pub fn root(&self) -> &Path {
@@ -79,12 +85,53 @@ impl Snapshot {
     }
 }
 
-fn snapshot_of(root: &Path, tracked: &[String]) -> Snapshot {
+fn snapshot_of(root: &Path, tracked: &[String], mark_ignored: bool) -> Snapshot {
     let mut snapshot = Snapshot::default();
     snapshot.dirs.insert(String::new(), Vec::new());
     snapshot.insert(walk(root, root, None));
     add_tracked(root, &mut snapshot.dirs, tracked);
+    if mark_ignored {
+        let dirs: Vec<String> = snapshot.dirs.keys().cloned().collect();
+        add_ignored(root, &mut snapshot, dirs);
+    }
     snapshot
+}
+
+/// Adds what ignore rules left out of the walked folders `dirs`, marked as ignored.
+fn add_ignored(root: &Path, snapshot: &mut Snapshot, dirs: Vec<String>) {
+    for dir in dirs {
+        if snapshot.unreadable.contains_key(&dir) {
+            continue;
+        }
+        let mut abs = root.to_path_buf();
+        abs.extend(dir.split('/').filter(|p| !p.is_empty()));
+        let Ok(read) = fs::read_dir(&abs) else { continue };
+        let Some(listed) = snapshot.dirs.get_mut(&dir) else { continue };
+        let present: HashSet<String> = listed.iter().map(|e| e.name.clone()).collect();
+        for dent in read.flatten() {
+            let name = dent.file_name().to_string_lossy().into_owned();
+            if name == ".git" || present.contains(&name) {
+                continue;
+            }
+            if let Some(mut entry) = entry_from_path(&dent.path(), name) {
+                entry.ignored = true;
+                listed.push(entry);
+            }
+        }
+    }
+}
+
+/// Whether `dir` is an ignored folder or inside one: those are not in the snapshot.
+fn in_ignored(snapshot: &Snapshot, dir: &str) -> bool {
+    let mut path = dir;
+    while !path.is_empty() {
+        let (parent, name) = split_parent(path);
+        if let Some(listed) = snapshot.dirs.get(parent) {
+            return listed.iter().any(|e| e.name == name && e.ignored && e.kind == EntryKind::Dir);
+        }
+        path = parent;
+    }
+    false
 }
 
 /// What a walk found: entries with their paths relative to the root, and the
@@ -208,7 +255,7 @@ fn entry_from_path(path: &Path, name: String) -> Option<Entry> {
     } else {
         (EntryKind::File, meta.len())
     };
-    Some(Entry { name, kind, size, mtime: to_unix(meta.modified()), quick_id: None })
+    Some(Entry { name, kind, size, mtime: to_unix(meta.modified()), quick_id: None, ignored: false })
 }
 
 fn special_kind(kind: fs::FileType) -> &'static str {
@@ -247,8 +294,64 @@ impl Vfs for LocalFs {
                 let abs = self.abs_checked(dir)?;
                 return Err(Error::io(abs.display().to_string(), std::io::Error::new(*kind, message.clone())));
             }
-            return snapshot.dirs.get(dir).cloned().ok_or_else(|| Error::NotFound(dir.to_string()));
+            if let Some(listed) = snapshot.dirs.get(dir) {
+                return Ok(listed.clone());
+            }
+            if !(self.mark_ignored && in_ignored(&snapshot, dir)) {
+                return Err(Error::NotFound(dir.to_string()));
+            }
+            drop(snapshot);
+            // Inside an ignored folder: everything is ignored, and read from disk.
+            let listed = self.list_disk(dir)?;
+            return Ok(listed.into_iter().filter(|e| e.name != ".git").map(|e| Entry { ignored: true, ..e }).collect());
         }
+        self.list_disk(dir)
+    }
+
+    fn stat(&self, path: &str) -> Result<Entry> {
+        if path.is_empty() {
+            return Ok(root_entry());
+        }
+        if let Some(snapshot) = &self.snapshot {
+            let snapshot = snapshot.read();
+            let found = find_entry(&snapshot.dirs, path);
+            if found.is_ok() || !(self.mark_ignored && in_ignored(&snapshot, split_parent(path).0)) {
+                return found;
+            }
+        }
+        let (_, name) = split_parent(path);
+        let abs = self.abs_checked(path)?;
+        // Past the snapshot only for what is inside an ignored folder.
+        let ignored = self.snapshot.is_some();
+        entry_from_path(&abs, name.to_string())
+            .map(|e| Entry { ignored, ..e })
+            .ok_or_else(|| Error::NotFound(path.to_string()))
+    }
+
+    fn read(&self, path: &str) -> Result<Data> {
+        self.read_disk(path)
+    }
+
+    fn local_path(&self, path: &str) -> Option<PathBuf> {
+        self.abs(path)
+    }
+
+    fn writable(&self) -> bool {
+        true
+    }
+
+    fn apply(&self, changes: Vec<Change>, progress: &crate::progress::Progress) -> Result<()> {
+        self.apply_changes(changes, progress)
+    }
+
+    fn changed(&self, path: &str) {
+        self.update_snapshot(path)
+    }
+}
+
+impl LocalFs {
+    /// The entries of `dir` as they are on disk.
+    fn list_disk(&self, dir: &str) -> Result<Vec<Entry>> {
         let abs = self.abs_checked(dir)?;
         let rd = fs::read_dir(&abs).map_err(|e| Error::io(abs.display().to_string(), e))?;
         let mut out = Vec::new();
@@ -262,19 +365,7 @@ impl Vfs for LocalFs {
         Ok(out)
     }
 
-    fn stat(&self, path: &str) -> Result<Entry> {
-        if path.is_empty() {
-            return Ok(root_entry());
-        }
-        if let Some(snapshot) = &self.snapshot {
-            return find_entry(&snapshot.read().dirs, path);
-        }
-        let (_, name) = split_parent(path);
-        let abs = self.abs_checked(path)?;
-        entry_from_path(&abs, name.to_string()).ok_or_else(|| Error::NotFound(path.to_string()))
-    }
-
-    fn read(&self, path: &str) -> Result<Data> {
+    fn read_disk(&self, path: &str) -> Result<Data> {
         let abs = self.abs_checked(path)?;
         let err = |e| Error::io(abs.display().to_string(), e);
         let kind = fs::symlink_metadata(&abs).map_err(err)?.file_type();
@@ -299,15 +390,7 @@ impl Vfs for LocalFs {
         Ok(Data::from_mmap(map))
     }
 
-    fn local_path(&self, path: &str) -> Option<PathBuf> {
-        self.abs(path)
-    }
-
-    fn writable(&self) -> bool {
-        true
-    }
-
-    fn apply(&self, changes: Vec<Change>, progress: &crate::progress::Progress) -> Result<()> {
+    fn apply_changes(&self, changes: Vec<Change>, progress: &crate::progress::Progress) -> Result<()> {
         progress.expect(changes.len() as u64);
         for change in changes {
             progress.check()?;
@@ -337,39 +420,49 @@ impl Vfs for LocalFs {
     }
 
     /// Updates the snapshot at `path` from disk, with the same ignore rules as the first walk.
-    fn changed(&self, path: &str) {
+    fn update_snapshot(&self, path: &str) {
         let Some(snapshot) = &self.snapshot else {
             return;
         };
         if path.is_empty() {
-            *snapshot.write() = snapshot_of(&self.root, &self.tracked);
+            *snapshot.write() = snapshot_of(&self.root, &self.tracked, self.mark_ignored);
             return;
         }
         let (parent, name) = split_parent(path);
+        // Whether `path` was listed, and as ignored.
         let was_listed = {
             let snapshot = snapshot.read();
             if !snapshot.dirs.contains_key(parent) {
-                // The parent folder was created as well.
+                // The parent folder was created as well, or `path` is inside an ignored folder.
                 drop(snapshot);
-                return self.changed(parent);
+                return self.update_snapshot(parent);
             }
-            snapshot.dirs[parent].iter().any(|e| e.name == name)
+            snapshot.dirs[parent].iter().find(|e| e.name == name).map(|e| e.ignored)
         };
         let (Some(parent_abs), Some(path_abs)) = (self.abs(parent), self.abs(path)) else {
             return;
         };
         // Listing the parent tells whether ignore rules hide `path`. An entry that was
-        // already shown stays (Git-tracked files are shown even when ignored).
+        // already shown stays (Git-tracked files are shown even when ignored); others
+        // are shown as ignored, or left out.
         let entry = walk(&self.root, &parent_abs, Some(1))
             .entries
             .into_iter()
             .find(|(rel, _)| rel == path)
             .map(|(_, e)| e)
-            .or_else(|| was_listed.then(|| entry_from_path(&path_abs, name.to_string())).flatten());
-        let below = match &entry {
-            Some(e) if e.kind == EntryKind::Dir => walk(&self.root, &path_abs, None),
-            _ => Walked::default(),
-        };
+            .or_else(|| {
+                let on_disk = || entry_from_path(&path_abs, name.to_string());
+                match was_listed {
+                    Some(false) => on_disk(),
+                    _ if self.mark_ignored && name != ".git" => on_disk().map(|e| Entry { ignored: true, ..e }),
+                    _ => None,
+                }
+            });
+        // Ignored folders are listed from disk when asked for, not walked.
+        let walked_dir = entry.as_ref().is_some_and(|e| e.kind == EntryKind::Dir && !e.ignored);
+        let below = if walked_dir { walk(&self.root, &path_abs, None) } else { Walked::default() };
+        let mut new_dirs: Vec<String> = if walked_dir { vec![path.to_string()] } else { Vec::new() };
+        new_dirs.extend(below.entries.iter().filter(|(_, e)| e.kind == EntryKind::Dir).map(|(rel, _)| rel.clone()));
 
         let mut snapshot = snapshot.write();
         let prefix = format!("{path}/");
@@ -377,9 +470,16 @@ impl Vfs for LocalFs {
         snapshot.unreadable.retain(|dir, _| dir != path && !dir.starts_with(&prefix));
         let siblings = snapshot.dirs.entry(parent.to_string()).or_default();
         siblings.retain(|e| e.name != name);
-        if let Some(entry) = entry {
-            insert_walked(&mut snapshot.dirs, vec![(path.to_string(), entry)]);
-            snapshot.insert(below);
+        match entry {
+            Some(entry) if entry.ignored => siblings.push(entry),
+            Some(entry) => {
+                insert_walked(&mut snapshot.dirs, vec![(path.to_string(), entry)]);
+                snapshot.insert(below);
+                if self.mark_ignored {
+                    add_ignored(&self.root, &mut snapshot, new_dirs);
+                }
+            }
+            None => {}
         }
     }
 }
@@ -551,7 +651,7 @@ mod tests {
         fs::set_permissions(root.join("restricted"), fs::Permissions::from_mode(0o000)).unwrap();
         let readable = fs::read_dir(root.join("restricted")).is_ok();
         let tracked = ["restricted/secret.txt".to_string(), "visible.txt".to_string()];
-        let vfs = LocalFs::with_gitignore(root, &tracked).unwrap();
+        let vfs = LocalFs::with_gitignore(root, &tracked, true).unwrap();
         let listed = vfs.list("restricted");
         fs::set_permissions(root.join("restricted"), fs::Permissions::from_mode(0o755)).unwrap();
         // Root reads every folder: there is nothing to test then.

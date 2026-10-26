@@ -95,11 +95,14 @@ pub struct Side {
     pub kind: EntryKind,
     pub size: u64,
     pub mtime: Option<i64>,
+    /// Ignored by Git on this side (see [`Entry::ignored`]).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub ignored: bool,
 }
 
 impl From<&Entry> for Side {
     fn from(e: &Entry) -> Self {
-        Side { kind: e.kind, size: e.size, mtime: e.mtime }
+        Side { kind: e.kind, size: e.size, mtime: e.mtime, ignored: e.ignored }
     }
 }
 

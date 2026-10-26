@@ -1008,7 +1008,7 @@
               {/if}
               {#if side}
                 <!-- svelte-ignore a11y_no_static_element_interactions -->
-                <div class="side" data-side={i === 0 ? "left" : "right"} onmousedown={() => (activeSide = i === 0 ? "left" : "right")} oncontextmenu={(e) => { e.preventDefault(); rowMenu(row.path, i === 0 ? "left" : "right", e.clientX, e.clientY); }}>
+                <div class="side" class:ignored={side.ignored} data-side={i === 0 ? "left" : "right"} onmousedown={() => (activeSide = i === 0 ? "left" : "right")} oncontextmenu={(e) => { e.preventDefault(); rowMenu(row.path, i === 0 ? "left" : "right", e.clientX, e.clientY); }}>
                   <span class="name" style:padding-left="{row.depth * 16}px">
                     {#if row.container}
                       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -1016,7 +1016,7 @@
                     {:else}
                       <span class="chev"></span>
                     {/if}
-                    <span class="icon">{icon(side)}</span>{#if row.folders?.[i]}<span class="dir">{row.folders[i]}/</span>{/if}{i === 1 && row.rightPath ? row.rightPath.split("/").pop() : row.node.name}
+                    <span class="icon">{icon(side)}</span>{#if row.folders?.[i]}<span class="dir">{row.folders[i]}/</span>{/if}{i === 1 && row.rightPath ? row.rightPath.split("/").pop() : row.node.name}{#if side.ignored && !row.inIgnored?.[i]}<span class="ignored-tag" title="Ignored by Git: a .gitignore rule matches it, and it is not tracked">ignored</span>{/if}
                   </span>
                   <span class="num">{side.kind === "dir" ? "" : formatSize(side.size)}</span>
                   <span class="num">{formatTime(side.mtime)}</span>
@@ -1183,6 +1183,20 @@
     text-overflow: ellipsis;
   }
   .dir {
+    color: var(--dim);
+  }
+  /* Ignored by Git: shown and compared, but set back. */
+  .side.ignored .name {
+    font-style: italic;
+    opacity: 0.75;
+  }
+  .ignored-tag {
+    margin-left: 6px;
+    padding: 0 5px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    font-size: 10.5px;
+    font-style: normal;
     color: var(--dim);
   }
   .chev {

@@ -93,6 +93,7 @@ impl Index {
                     size: 0,
                     mtime: if dir == path { mtime } else { None },
                     quick_id: None,
+                    ignored: false,
                 };
                 self.dirs.get_mut(parent).expect("parent dir exists").push(entry);
             }
@@ -108,7 +109,7 @@ impl Index {
             return;
         }
         let list = self.dirs.get_mut(parent).expect("parent dir exists");
-        let entry = Entry { name: name.to_string(), kind, size, mtime, quick_id };
+        let entry = Entry { name: name.to_string(), kind, size, mtime, quick_id, ignored: false };
         // Later entries win, like extraction would behave.
         if let Some(&at) = self.file_at.get(path) {
             list[at] = entry;

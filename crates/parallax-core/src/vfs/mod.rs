@@ -79,6 +79,10 @@ pub struct Entry {
     pub mtime: Option<i64>,
     #[serde(skip)]
     pub quick_id: Option<QuickId>,
+    /// Matched by `.gitignore` (or `.git/info/exclude`, `.ignore`) rules and not
+    /// tracked by Git: shown, but marked.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub ignored: bool,
 }
 
 /// File contents: owned, memory-mapped or shared with a cache. Cheap to clone.
@@ -242,7 +246,7 @@ pub(crate) fn find_entry(dirs: &HashMap<String, Vec<Entry>>, path: &str) -> Resu
 
 /// A root entry used when `stat("")` is called on a tree.
 pub(crate) fn root_entry() -> Entry {
-    Entry { name: String::new(), kind: EntryKind::Dir, size: 0, mtime: None, quick_id: None }
+    Entry { name: String::new(), kind: EntryKind::Dir, size: 0, mtime: None, quick_id: None, ignored: false }
 }
 
 #[cfg(test)]
