@@ -1662,9 +1662,13 @@ fn unchanged_tracked_files_carry_their_index_id() {
     }
     git(repo, &["add", "-A"]);
     git(repo, &["commit", "-q", "-m", "init"]);
-    // Same size, same modification time, other content.
+    // Same size, other content. On Unix even with the old modification time restored,
+    // as the change time and inode still tell; Windows (and Git there) has only the
+    // modification time and size, which an ordinary edit changes.
     fs::write(repo.join("b.txt"), "TWO\n").unwrap();
-    fs::File::options().write(true).open(repo.join("b.txt")).unwrap().set_modified(past).unwrap();
+    if cfg!(unix) {
+        fs::File::options().write(true).open(repo.join("b.txt")).unwrap().set_modified(past).unwrap();
+    }
 
     let path = repo.display().to_string();
     for spec in [SourceSpec::GitWorktree { repo: path.clone() }, SourceSpec::parse(&path)] {
