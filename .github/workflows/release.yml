@@ -139,6 +139,10 @@ jobs:
         working-directory: dist
         run: sha256sum * | tee SHA256SUMS.txt
 
+      # The license, and the notices the licenses of included code ask to pass on.
+      - name: License files
+        run: cp LICENSE THIRD-PARTY-NOTICES.md dist/
+
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
