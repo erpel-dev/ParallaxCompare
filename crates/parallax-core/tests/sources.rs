@@ -1809,3 +1809,87 @@ fn completion_enters_7z_archives() {
     let source = SourceSpec::parse(&format!("{pack}!/inner.zip/deep.txt")).open(SourceOptions::default()).unwrap();
     assert_eq!(&*source.vfs.read(&source.root).unwrap(), b"d");
 }
+
+#[test]
+fn filtered_copy_prunes_empty_subtrees_and_keeps_destination_matching_archives() {
+    use parallax_core::compare::Filter;
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    write(a.path(), &[("wrapper/normal.txt", "new"), ("wrapper/hidden/deep/secret.bin", "hidden")]);
+    write(b.path(), &[("wrapper/normal.txt", "old")]);
+    fs::create_dir_all(a.path().join("wrapper/keep-empty")).unwrap();
+    let source_zip = zip_bytes(&[("hidden.bin", "source")]);
+    fs::write(a.path().join("wrapper/bundle.zip"), &source_zip).unwrap();
+    fs::write(b.path().join("wrapper/bundle.zip"), zip_bytes(&[("hidden.bin", "target"), ("keep.txt", "target only")]))
+        .unwrap();
+    let (left, right) = pair(a.path(), b.path());
+    let options = CompareOptions { includes: vec!["*.txt".into(), "keep-empty".into()], ..Default::default() };
+    let filter = Filter::new(&options).unwrap();
+    let compared = compare::compare(&left, &right, &options, &Control::default()).unwrap();
+    assert!(compare::flatten(&compared.root).iter().any(|f| f.0 == "wrapper/bundle.zip"));
+    assert_eq!(ops::copy(&left, &right, &["wrapper".into()], &filter, &Progress::default()).unwrap(), 2);
+    assert_eq!(fs::read(b.path().join("wrapper/bundle.zip")).unwrap(), source_zip);
+    assert!(!b.path().join("wrapper/hidden").exists());
+    assert!(b.path().join("wrapper/keep-empty").is_dir());
+
+    // A copy into an archive uses the same pruned plan, including empty folders.
+    let zip = b.path().join("target.zip");
+    fs::write(&zip, zip_raw(&[("wrapper/bundle.zip", &zip_bytes(&[("keep.txt", "target only")]))])).unwrap();
+    let target = SourceSpec::parse(zip.to_str().unwrap()).open(SourceOptions::default()).unwrap();
+    ops::copy(&left, &target, &["wrapper".into()], &filter, &Progress::default()).unwrap();
+    assert!(target.stat("wrapper/hidden").is_err());
+    assert!(target.stat("wrapper/keep-empty").is_ok());
+    // Explicit selection still copies an otherwise filtered empty directory.
+    ops::copy(&left, &right, &["wrapper/hidden/deep".into()], &filter, &Progress::default()).unwrap();
+    assert!(b.path().join("wrapper/hidden/deep").is_dir());
+    assert!(!b.path().join("wrapper/hidden/deep/secret.bin").exists());
+}
+
+#[test]
+fn include_patterns_preserve_literal_boundary_spaces_and_escaped_alternatives() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    write(a.path(), &[(" leading.txt", "a"), ("a,b.txt", "a"), ("a.txt", "a"), ("b.txt", "a"), ("c.txt", "a")]);
+    let (left, right) = pair(a.path(), b.path());
+    for (pattern, expected) in [(" leading.txt", vec![" leading.txt"]), (r"{a\,b,c}.txt", vec!["a,b.txt", "c.txt"])] {
+        let opts = CompareOptions { includes: vec![pattern.into()], ..Default::default() };
+        let result = compare::compare(&left, &right, &opts, &Control::default()).unwrap();
+        let paths: Vec<_> = compare::flatten(&result.root).into_iter().map(|f| f.0).collect();
+        assert_eq!(paths, expected);
+    }
+    #[cfg(unix)]
+    {
+        write(a.path(), &[("trailing.txt ", "a"), ("   ", "spaces")]);
+        for name in ["trailing.txt ", "   "] {
+            let opts = CompareOptions { includes: vec![name.into()], ..Default::default() };
+            let result = compare::compare(&left, &right, &opts, &Control::default()).unwrap();
+            assert_eq!(compare::flatten(&result.root).len(), 1);
+        }
+    }
+}
+
+#[test]
+fn member_invalidation_reopens_all_nested_indexes_of_an_externally_replaced_archive() {
+    let dir = tempfile::tempdir().unwrap();
+    let zip = dir.path().join("outer.zip");
+    let initial_inner = zip_bytes(&[("a.txt", "old A"), ("b.txt", "old B")]);
+    let replacement_inner = zip_bytes(&[("a.txt", "EXT A"), ("b.txt", "EXT B")]);
+    let initial = zip_raw(&[("one.zip", &initial_inner), ("two.zip", &initial_inner)]);
+    let replacement = zip_raw(&[("one.zip", &replacement_inner), ("two.zip", &replacement_inner)]);
+    fs::write(&zip, initial).unwrap();
+    let source =
+        SourceSpec::parse(&format!("{}!/one.zip/a.txt", zip.display())).open(SourceOptions::default()).unwrap();
+    assert_eq!(&*source.vfs.read(&source.path("")).unwrap(), b"old A");
+    let sibling = source.root.replace("one.zip/a.txt", "two.zip/b.txt");
+    assert_eq!(&*source.vfs.read(&sibling).unwrap(), b"old B");
+    let stamp = fs::metadata(&zip).unwrap().modified().unwrap();
+    let temp = dir.path().join("replacement.zip");
+    fs::write(&temp, replacement).unwrap();
+    fs::OpenOptions::new().write(true).open(&temp).unwrap().set_modified(stamp).unwrap();
+    // Remove first for platforms where rename does not replace existing files.
+    fs::remove_file(&zip).unwrap();
+    fs::rename(&temp, &zip).unwrap();
+    source.vfs.changed(&source.path(""));
+    assert_eq!(&*source.vfs.read(&source.path("")).unwrap(), b"EXT A");
+    assert_eq!(&*source.vfs.read(&sibling).unwrap(), b"EXT B");
+}

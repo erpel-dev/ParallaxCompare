@@ -25,3 +25,20 @@ test('saved pattern lists retain separators and glob escapes when displayed agai
   const patterns = ['*.{java,kt}', 'report final.txt', 'report,final.txt', 'report;final.txt', String.raw`literal\?.txt`, 'with"quote.txt'];
   for (const excludes of [true, false]) assert.deepEqual(splitPatterns(joinPatterns(patterns, excludes), excludes), patterns);
 });
+
+test('quoted and escaped boundary spaces remain literal through saved patterns', () => {
+  const patterns = [' leading.txt', 'trailing.txt ', ' both.txt ', '   ', '{a"b,c}.txt'];
+  for (const excludes of [false, true]) {
+    assert.deepEqual(splitPatterns(joinPatterns(patterns, excludes), excludes), patterns);
+  }
+  assert.deepEqual(splitPatterns(String.raw`\ leading.txt trailing.txt\ `), [' leading.txt', 'trailing.txt ']);
+  assert.deepEqual(splitPatterns('  ordinary.txt  ,  " trailing.txt "  ', true), ['ordinary.txt', ' trailing.txt ']);
+});
+
+test('glob alternative escapes survive the GUI and saved lists', () => {
+  const patterns = [String.raw`{a\,b,c}.txt`, String.raw`{a\;b,c}.txt`, String.raw`[\,;].txt`];
+  for (const excludes of [false, true]) {
+    assert.deepEqual(splitPatterns(joinPatterns(patterns, excludes), excludes), patterns);
+    assert.deepEqual(splitPatterns(patterns.join(excludes ? ', ' : ' '), excludes), patterns);
+  }
+});

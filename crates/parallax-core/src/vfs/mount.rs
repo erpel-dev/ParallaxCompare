@@ -152,14 +152,19 @@ impl Vfs for ArchiveMount {
     }
 
     fn changed(&self, path: &str) {
-        // An archive that was overwritten or deleted, or one inside a changed folder,
-        // is opened again on next use.
-        let prefix = format!("{path}/");
-        self.cache.lock().retain(|outer, _| !path.is_empty() && outer != path && !outer.starts_with(&prefix));
+        // A member change invalidates its enclosing container, including all the
+        // nested indexes derived from that container's old bytes.
+        let mut cache = self.cache.lock();
+        let enclosing =
+            cache.keys().filter(|outer| path.starts_with(&format!("{outer}/"))).min_by_key(|p| p.len()).cloned();
+        let changed = enclosing.as_deref().unwrap_or(path);
+        let prefix = format!("{changed}/");
+        cache.retain(|outer, _| !changed.is_empty() && outer != changed && !outer.starts_with(&prefix));
+        drop(cache);
         if let Some(types) = &self.types {
             types.lock().clear();
         }
-        self.base.changed(path);
+        self.base.changed(changed);
     }
 
     fn writable(&self) -> bool {

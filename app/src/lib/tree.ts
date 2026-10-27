@@ -338,7 +338,8 @@ const MAX_CANDIDATES = 20_000;
  * Matching for names that many files share (`index.ts` in hundreds of folders):
  * each left file looks only at right files whose folders end the same way (the
  * last three, two or one folder names), at most 64 of them, instead of scoring
- * every pair. Files with no such partner stay unmatched.
+ * every pair. The rest are paired in path order, as for a small group whose
+ * folders have no common suffix, without allocating every possible pair.
  */
 function matchByFolderSuffix(left: string[], right: string[]): [string, string][] {
   const folders = (p: string) => parent(p).split("/").filter(Boolean);
@@ -346,7 +347,7 @@ function matchByFolderSuffix(left: string[], right: string[]): [string, string][
   // Matched files leave their buckets, so later lookups do not step over them.
   const index = new Map<string, Set<string>>();
   const bucketsOf = new Map<string, string[]>();
-  for (const r of right) {
+  for (const r of [...right].sort()) {
     const parts = folders(r);
     const keys: string[] = [];
     for (let k = 1; k <= Math.min(3, parts.length); k++) {
@@ -376,6 +377,13 @@ function matchByFolderSuffix(left: string[], right: string[]): [string, string][
         break;
       }
     }
+  }
+  const usedLeft = new Set(pairs.map(([l]) => l));
+  const usedRight = new Set(pairs.map(([, r]) => r));
+  const remainingLeft = left.filter((l) => !usedLeft.has(l)).sort();
+  const remainingRight = right.filter((r) => !usedRight.has(r)).sort();
+  for (let i = 0; i < Math.min(remainingLeft.length, remainingRight.length); i++) {
+    pairs.push([remainingLeft[i], remainingRight[i]]);
   }
   return pairs;
 }
