@@ -1,0 +1,140 @@
+{
+  "testedCommit": "90c6ecfe5ccc30e50a76e536b56fb551f924c36a",
+  "binarySha256": "ec59e21f203daf7db09172a5d783c6ed215b2a84bbaa7d476457076e77182f6f",
+  "sessions": [
+    {
+      "name": "initial",
+      "startUtc": "2026-10-26T19:40:18.958672+00:00",
+      "timerElapsedSeconds": 3600.961423014989,
+      "lastObservedLiveUtc": "2026-10-26T20:31:27.772476+00:00",
+      "observedAppSeconds": 3068.8136868929723,
+      "completedCycleCount": 1304,
+      "completedCycleCases": {
+        "text": 522,
+        "formats": 262,
+        "folder": 194,
+        "git": 138,
+        "merge-clean": 112,
+        "solid7z": 76
+      },
+      "harnessFailures": [
+        {
+          "error": "{\"value\":{\"error\":\"javascript error\",\"message\":\"Missing Left path\",\"stacktrace\":\"\"}}",
+          "count": 64,
+          "firstCycle": 685,
+          "lastCycle": 753
+        },
+        {
+          "error": "{\"value\":{\"error\":\"javascript error\",\"message\":\"Missing Merge three files\u2026\",\"stacktrace\":\"\"}}",
+          "count": 5,
+          "firstCycle": 693,
+          "lastCycle": 737
+        },
+        {
+          "error": "<urlopen error [Errno 111] Connection refused>",
+          "count": 528,
+          "firstCycle": 1374,
+          "lastCycle": 1901
+        }
+      ],
+      "checksPassed": 112,
+      "checksFailed": [],
+      "processes": {
+        "parallax-compar": {
+          "firstRssKiB": 183740,
+          "maxRssKiB": 1154164,
+          "maxHwmKiB": 1246720,
+          "maxFds": 56,
+          "maxThreads": 53,
+          "lastRssKiB": 879092
+        },
+        "WebKitNetworkPr": {
+          "firstRssKiB": 54296,
+          "maxRssKiB": 55092,
+          "maxHwmKiB": 55092,
+          "maxFds": 23,
+          "maxThreads": 11,
+          "lastRssKiB": 55012
+        },
+        "WebKitWebProces": {
+          "firstRssKiB": 286940,
+          "maxRssKiB": 666576,
+          "maxHwmKiB": 669832,
+          "maxFds": 36,
+          "maxThreads": 40,
+          "lastRssKiB": 559800
+        },
+        "git": {
+          "firstRssKiB": 1960,
+          "maxRssKiB": 1960,
+          "maxHwmKiB": 1960,
+          "maxFds": 14,
+          "maxThreads": 1,
+          "lastRssKiB": 1960
+        }
+      },
+      "timerFinished": true
+    },
+    {
+      "name": "resume",
+      "startUtc": "2026-10-27T02:58:14.706944+00:00",
+      "timerElapsedSeconds": 900.6203809729777,
+      "lastObservedLiveUtc": "2026-10-27T03:13:15.968136+00:00",
+      "observedAppSeconds": 901.2610737000359,
+      "completedCycleCount": 320,
+      "completedCycleCases": {
+        "text": 128,
+        "formats": 64,
+        "folder": 47,
+        "git": 34,
+        "merge-clean": 28,
+        "solid7z": 19
+      },
+      "harnessFailures": [
+        {
+          "error": "return [...document.querySelectorAll(\".page:not([hidden]) button\")].some(e=>e.innerText.trim()===\"Compare \u2192\"&&!e.disabled)",
+          "count": 4,
+          "firstCycle": 23,
+          "lastCycle": 26
+        }
+      ],
+      "checksPassed": 28,
+      "checksFailed": [],
+      "processes": {
+        "parallax-compar": {
+          "firstRssKiB": 186108,
+          "maxRssKiB": 558580,
+          "maxHwmKiB": 660324,
+          "maxFds": 56,
+          "maxThreads": 70,
+          "lastRssKiB": 373688
+        },
+        "WebKitNetworkPr": {
+          "firstRssKiB": 54328,
+          "maxRssKiB": 55116,
+          "maxHwmKiB": 55116,
+          "maxFds": 23,
+          "maxThreads": 11,
+          "lastRssKiB": 55100
+        },
+        "WebKitWebProces": {
+          "firstRssKiB": 286100,
+          "maxRssKiB": 712756,
+          "maxHwmKiB": 717232,
+          "maxFds": 33,
+          "maxThreads": 40,
+          "lastRssKiB": 523988
+        }
+      },
+      "timerFinished": true
+    }
+  ],
+  "observedAppMinutes": 66.16791267655013,
+  "completedCycleCount": 1624,
+  "caveats": [
+    "Initial driver and application disappeared after approximately 51 minutes; cause unconfirmed. Connection-refused time is excluded from app time and successful cycles.",
+    "Initial PR form persistence caused 69 harness failures; resumed pending native conflict-marker dialogs caused four comparison timeouts. These are not product findings.",
+    "Sessions use Linux/WebKitGTK on local storage. No real SMB, SharePoint, Windows or macOS measurement. Timings include WebDriver waits and are illustrative single-machine observations.",
+    "Peak memory followed million-line comparisons and solid archives; no memory leak was established."
+  ]
+}

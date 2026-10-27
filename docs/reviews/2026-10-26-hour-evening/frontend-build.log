@@ -1,0 +1,19 @@
+
+> parallax-compare@0.0.13 build
+> vite build
+
+vite v8.3.4 building client environment for production...
+transforming...
+✓ 167 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                   0.39 kB │ gzip:  0.27 kB
+dist/assets/index-Bv6qFEVS.css   52.40 kB │ gzip:  9.87 kB
+dist/assets/index-DWHubGlf.js   278.52 kB │ gzip: 92.96 kB
+
+✓ built in 1.34s
+npm notice
+npm notice New major version of npm available! 11.9.0 -> 12.2.1
+npm notice Changelog: https://github.com/npm/cli/releases/tag/v12.2.1
+npm notice To update run: npm install -g npm@12.2.1
+npm notice

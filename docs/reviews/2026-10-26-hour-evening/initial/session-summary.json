@@ -1,0 +1,73 @@
+{
+  "name": "initial",
+  "startUtc": "2026-10-26T19:40:18.958672+00:00",
+  "timerElapsedSeconds": 3600.961423014989,
+  "lastObservedLiveUtc": "2026-10-26T20:31:27.772476+00:00",
+  "observedAppSeconds": 3068.8136868929723,
+  "completedCycleCount": 1304,
+  "completedCycleCases": {
+    "text": 522,
+    "formats": 262,
+    "folder": 194,
+    "git": 138,
+    "merge-clean": 112,
+    "solid7z": 76
+  },
+  "harnessFailures": [
+    {
+      "error": "{\"value\":{\"error\":\"javascript error\",\"message\":\"Missing Left path\",\"stacktrace\":\"\"}}",
+      "count": 64,
+      "firstCycle": 685,
+      "lastCycle": 753
+    },
+    {
+      "error": "{\"value\":{\"error\":\"javascript error\",\"message\":\"Missing Merge three files\u2026\",\"stacktrace\":\"\"}}",
+      "count": 5,
+      "firstCycle": 693,
+      "lastCycle": 737
+    },
+    {
+      "error": "<urlopen error [Errno 111] Connection refused>",
+      "count": 528,
+      "firstCycle": 1374,
+      "lastCycle": 1901
+    }
+  ],
+  "checksPassed": 112,
+  "checksFailed": [],
+  "processes": {
+    "parallax-compar": {
+      "firstRssKiB": 183740,
+      "maxRssKiB": 1154164,
+      "maxHwmKiB": 1246720,
+      "maxFds": 56,
+      "maxThreads": 53,
+      "lastRssKiB": 879092
+    },
+    "WebKitNetworkPr": {
+      "firstRssKiB": 54296,
+      "maxRssKiB": 55092,
+      "maxHwmKiB": 55092,
+      "maxFds": 23,
+      "maxThreads": 11,
+      "lastRssKiB": 55012
+    },
+    "WebKitWebProces": {
+      "firstRssKiB": 286940,
+      "maxRssKiB": 666576,
+      "maxHwmKiB": 669832,
+      "maxFds": 36,
+      "maxThreads": 40,
+      "lastRssKiB": 559800
+    },
+    "git": {
+      "firstRssKiB": 1960,
+      "maxRssKiB": 1960,
+      "maxHwmKiB": 1960,
+      "maxFds": 14,
+      "maxThreads": 1,
+      "lastRssKiB": 1960
+    }
+  },
+  "timerFinished": true
+}

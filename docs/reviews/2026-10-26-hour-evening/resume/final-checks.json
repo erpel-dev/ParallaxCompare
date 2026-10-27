@@ -1,0 +1,40 @@
+{
+  "utc": "2026-10-27T03:13:15.598324+00:00",
+  "elapsed": 900.891398029984,
+  "processAlive": true,
+  "javascriptErrors": [],
+  "tabs": [
+    "\uff0b\nNew comparison\n\u00d7"
+  ],
+  "soak": {
+    "cycles": 324,
+    "elapsed": 900.6203809729777,
+    "utc": "2026-10-27T03:13:15.327525+00:00",
+    "failures": [
+      {
+        "cycle": 23,
+        "case": "text",
+        "error": "return [...document.querySelectorAll(\".page:not([hidden]) button\")].some(e=>e.innerText.trim()===\"Compare \u2192\"&&!e.disabled)",
+        "traceback": "Traceback (most recent call last):\n  File \"/workspace/hour-exploration-20261027-resume/soak.py\", line 23, in <module>\n    case='text';compare(C/'left/changed.txt',C/'right/changed.txt');settled()\n                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/hour-exploration-20261027-resume/ui.py\", line 72, in compare\n    wait('return [...document.querySelectorAll(\".page:not([hidden]) button\")].some(e=>e.innerText.trim()===\"Compare \u2192\"&&!e.disabled)',30)\n  File \"/workspace/hour-exploration-20261027-resume/ui.py\", line 25, in wait\n    raise TimeoutError(script)\nTimeoutError: return [...document.querySelectorAll(\".page:not([hidden]) button\")].some(e=>e.innerText.trim()===\"Compare \u2192\"&&!e.disabled)\n"
+      },
+      {
+        "cycle": 24,
+        "case": "git",
+        "error": "return [...document.querySelectorAll(\".page:not([hidden]) button\")].some(e=>e.innerText.trim()===\"Compare \u2192\"&&!e.disabled)",
+        "traceback": "Traceback (most recent call last):\n  File \"/workspace/hour-exploration-20261027-resume/soak.py\", line 16, in <module>\n    case='git';compare(str(C/'repo')+'@main',str(C/'repo')+'@feature/a-very-long-branch-name-for-testing-side-specific-dropdown-and-the-path-layout');settled();pattern('*.txt')\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/hour-exploration-20261027-resume/ui.py\", line 72, in compare\n    wait('return [...document.querySelectorAll(\".page:not([hidden]) button\")].some(e=>e.innerText.trim()===\"Compare \u2192\"&&!e.disabled)',30)\n  File \"/workspace/hour-exploration-20261027-resume/ui.py\", line 25, in wait\n    raise TimeoutError(script)\nTimeoutError: return [...document.querySelectorAll(\".page:not([hidden]) button\")].some(e=>e.innerText.trim()===\"Compare \u2192\"&&!e.disabled)\n"
+      },
+      {
+        "cycle": 25,
+        "case": "folder",
+        "error": "return [...document.querySelectorAll(\".page:not([hidden]) button\")].some(e=>e.innerText.trim()===\"Compare \u2192\"&&!e.disabled)",
+        "traceback": "Traceback (most recent call last):\n  File \"/workspace/hour-exploration-20261027-resume/soak.py\", line 18, in <module>\n    case='folder';compare(C/'left',C/'right');settled();pattern(['*.txt','*.{txt,yaml}','nested/**','*.rs'][i%4]);click('Different',prefix=True);click('Flat');settled();click('All files',prefix=True)\n                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/hour-exploration-20261027-resume/ui.py\", line 72, in compare\n    wait('return [...document.querySelectorAll(\".page:not([hidden]) button\")].some(e=>e.innerText.trim()===\"Compare \u2192\"&&!e.disabled)',30)\n  File \"/workspace/hour-exploration-20261027-resume/ui.py\", line 25, in wait\n    raise TimeoutError(script)\nTimeoutError: return [...document.querySelectorAll(\".page:not([hidden]) button\")].some(e=>e.innerText.trim()===\"Compare \u2192\"&&!e.disabled)\n"
+      },
+      {
+        "cycle": 26,
+        "case": "text",
+        "error": "return [...document.querySelectorAll(\".page:not([hidden]) button\")].some(e=>e.innerText.trim()===\"Compare \u2192\"&&!e.disabled)",
+        "traceback": "Traceback (most recent call last):\n  File \"/workspace/hour-exploration-20261027-resume/soak.py\", line 23, in <module>\n    case='text';compare(C/'left/changed.txt',C/'right/changed.txt');settled()\n                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/hour-exploration-20261027-resume/ui.py\", line 72, in compare\n    wait('return [...document.querySelectorAll(\".page:not([hidden]) button\")].some(e=>e.innerText.trim()===\"Compare \u2192\"&&!e.disabled)',30)\n  File \"/workspace/hour-exploration-20261027-resume/ui.py\", line 25, in wait\n    raise TimeoutError(script)\nTimeoutError: return [...document.querySelectorAll(\".page:not([hidden]) button\")].some(e=>e.innerText.trim()===\"Compare \u2192\"&&!e.disabled)\n"
+      }
+    ]
+  }
+}

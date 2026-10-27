@@ -1,0 +1,235 @@
+[
+  {
+    "id": "E01",
+    "severity": "P3",
+    "title": "Correcting an unfinished quote leaves a stale pattern error",
+    "steps": [
+      "Compare literal-only/left and literal-only/right; apply *.txt.",
+      "Enter an unfinished double quote, wait for the error, then restore *.txt."
+    ],
+    "actual": "The original results remain usable, but the error Close the quote around the file pattern remains after the input is valid. Refresh clears it.",
+    "expected": "Clear the parse error when the current text parses successfully, including when it resolves to the already-active pattern list.",
+    "fix": "FolderView.applyPatterns/applyExcludes return early for an unchanged list, without clearing error. Store pattern validation errors separately from compare/operation errors and clear successful validation before that return.",
+    "evidence": [
+      "screenshots/02-error-after-correcting-quote.png",
+      "pattern-round.log"
+    ],
+    "source": [
+      {
+        "path": "app/src/lib/FolderView.svelte",
+        "line": 300,
+        "url": "https://github.com/erpel-dev/ParallaxCompare/blob/90c6ecfe5ccc30e50a76e536b56fb551f924c36a/app/src/lib/FolderView.svelte#L300"
+      },
+      {
+        "path": "app/src/lib/FolderView.svelte",
+        "line": 431,
+        "url": "https://github.com/erpel-dev/ParallaxCompare/blob/90c6ecfe5ccc30e50a76e536b56fb551f924c36a/app/src/lib/FolderView.svelte#L431"
+      }
+    ]
+  },
+  {
+    "id": "E02",
+    "severity": "P3",
+    "title": "Quoted exact patterns cannot match names with leading or trailing spaces",
+    "steps": [
+      "Create left and right files named \" leading.txt\" and \"trailing.txt \".",
+      "Compare the folders. *.txt* shows both files.",
+      "Enter the quoted exact pattern \" leading.txt\" or \"trailing.txt \"."
+    ],
+    "actual": "The exact patterns return zero files although the files exist and broad wildcard patterns find them.",
+    "expected": "Quoted literal filenames should preserve their boundary spaces. Leading spaces are valid on Windows and Unix; trailing spaces are Unix-specific.",
+    "fix": "splitPatterns.emit trims all token text, including quoted whitespace, and Includes::new trims patterns again. Preserve quoted/escaped boundary characters across tokenization and core compilation; trim only unquoted list separators.",
+    "evidence": [
+      "screenshots/01-literal-baseline.png",
+      "screenshots/03-literal-whitespace-True.png",
+      "screenshots/03-literal-whitespace-False.png",
+      "pattern-round.log"
+    ],
+    "source": [
+      {
+        "path": "app/src/lib/patterns.ts",
+        "line": 6,
+        "url": "https://github.com/erpel-dev/ParallaxCompare/blob/90c6ecfe5ccc30e50a76e536b56fb551f924c36a/app/src/lib/patterns.ts#L6"
+      },
+      {
+        "path": "crates/parallax-core/src/compare.rs",
+        "line": 203,
+        "url": "https://github.com/erpel-dev/ParallaxCompare/blob/90c6ecfe5ccc30e50a76e536b56fb551f924c36a/crates/parallax-core/src/compare.rs#L203"
+      }
+    ]
+  },
+  {
+    "id": "E03",
+    "severity": "P2",
+    "title": "Filtered parent copy promises to replace an archive but skips it when matches exist only on the destination",
+    "steps": [
+      "Create wrapper/normal.txt on both sides with different text.",
+      "Create wrapper/bundle.zip on the left containing only hidden.bin; on the right include hidden.bin and keep.txt.",
+      "Compare folders, apply *.txt, select wrapper and Copy \u2192; accept the confirmation."
+    ],
+    "actual": "The confirmation lists wrapper/bundle.zip as a whole archive to be replaced. Only normal.txt is copied; the target ZIP keeps its old hidden.bin and right-only keep.txt. Copying the archive row directly instead does replace it.",
+    "expected": "The copy plan and confirmation must agree for the same operation. Either include this displayed archive in the atomic copy, or omit it from the confirmation and explain the skip.",
+    "fix": "copyFilesBelow stops at every visible source archive. ops::copy_keeps rechecks matching descendants only in the source, while the compare tree was retained because of a matching destination descendant. Use one shared operation plan/eligibility policy for preview and execution.",
+    "evidence": [
+      "screenshots/21-copy-match-right-only-confirmation.png",
+      "screenshots/22-copy-match-right-only-after.png",
+      "copy-round.log"
+    ],
+    "source": [
+      {
+        "path": "app/src/lib/tree.ts",
+        "line": 214,
+        "url": "https://github.com/erpel-dev/ParallaxCompare/blob/90c6ecfe5ccc30e50a76e536b56fb551f924c36a/app/src/lib/tree.ts#L214"
+      },
+      {
+        "path": "crates/parallax-core/src/ops.rs",
+        "line": 114,
+        "url": "https://github.com/erpel-dev/ParallaxCompare/blob/90c6ecfe5ccc30e50a76e536b56fb551f924c36a/crates/parallax-core/src/ops.rs#L114"
+      }
+    ]
+  },
+  {
+    "id": "E04",
+    "severity": "P2",
+    "title": "Copying a filtered parent creates hidden empty directory trees",
+    "steps": [
+      "Create left/wrapper/normal.txt and left/wrapper/hidden/deep/secret.bin; create right/wrapper/normal.txt only.",
+      "Compare folders, apply *.txt; hidden/deep is pruned from the displayed tree.",
+      "Select wrapper and Copy \u2192; accept replacing normal.txt."
+    ],
+    "actual": "The destination gains wrapper/hidden/deep even though that subtree had no matching files and was absent from the filtered view. secret.bin is correctly not copied, leaving an empty directory tree.",
+    "expected": "Directory creation should follow the same include-pruning policy as the comparison; avoid touching unmatched hidden subtrees.",
+    "fix": "Filter::keeps admits all Dir entries, and ops::copy_entry creates each directory before discovering there are no matching files. collect_changes has the same traversal policy for archive destinations. Build/prune a copy plan before creating directories, while preserving explicitly selected or explicitly matched empty folders.",
+    "evidence": [
+      "screenshots/20-copy-empty-subtrees-before.png",
+      "screenshots/22-copy-empty-subtrees-after.png",
+      "copy-round.log"
+    ],
+    "source": [
+      {
+        "path": "crates/parallax-core/src/ops.rs",
+        "line": 187,
+        "url": "https://github.com/erpel-dev/ParallaxCompare/blob/90c6ecfe5ccc30e50a76e536b56fb551f924c36a/crates/parallax-core/src/ops.rs#L187"
+      },
+      {
+        "path": "crates/parallax-core/src/compare.rs",
+        "line": 300,
+        "url": "https://github.com/erpel-dev/ParallaxCompare/blob/90c6ecfe5ccc30e50a76e536b56fb551f924c36a/crates/parallax-core/src/compare.rs#L300"
+      }
+    ]
+  },
+  {
+    "id": "E05",
+    "severity": "P1",
+    "title": "Cached archive-member tabs miss external replacements and bypass stale-save confirmation",
+    "steps": [
+      "Create dirty.zip containing a.txt = old A\\n and b.txt = old B\\n. Compare a plain old-A file with dirty.zip!/a.txt directly, so no folder-comparison tab is open.",
+      "Edit the archive-side line to my edited A and leave the editor to commit the draft.",
+      "From another program atomically replace dirty.zip with a new ZIP containing a.txt = EXT A\\n and b.txt = EXT B\\n. Reproduces both with an ordinary new mtime and after restoring the old size/mtime. The UI receives the watcher event and displays The file changed on disk.",
+      "Press Ctrl+S. No overwrite confirmation appears.",
+      "In a clean archive-member tab, repeat replacement without making a draft and observe the automatic reload."
+    ],
+    "actual": "Ctrl+S writes my edited A over EXT A without asking; EXT B is preserved. A clean tab automatically reloads the cached old A and continues to say the files are identical, although the archive now contains EXT A.",
+    "expected": "Reload/read and stale-save validation must use the current container. An externally changed edited member must require confirmation before replacement; unrelated entries must remain preserved.",
+    "fix": "Watcher callbacks emit paths-changed but do not invalidate source VFS caches. TextView.load calls open_file_diff -> load_side, and save_side checks its on_disk stamp through the same cached ArchiveMount. ArchiveMount.apply correctly reopens the current container for rewriting, but only after the stale-content check already accepted the cached old member. Invalidate the affected container and all derived nested indexes before reload/save validation; invalidating only the inner path does not evict its enclosing archive. Add direct archive-entry sessions to stale-save and reload regressions, including atomic same-size/same-time replacement.",
+    "evidence": [
+      "screenshots/50-archive-external-before-save.png",
+      "screenshots/51-archive-save-native.png",
+      "screenshots/52-archive-after-stale-save.png",
+      "screenshots/53-archive-clean-stale-view.png",
+      "archive-stale.log",
+      "archive-stale-ordinary.log"
+    ],
+    "source": [
+      {
+        "path": "app/src-tauri/src/commands.rs",
+        "line": 436,
+        "url": "https://github.com/erpel-dev/ParallaxCompare/blob/90c6ecfe5ccc30e50a76e536b56fb551f924c36a/app/src-tauri/src/commands.rs#L436"
+      },
+      {
+        "path": "app/src-tauri/src/commands.rs",
+        "line": 1588,
+        "url": "https://github.com/erpel-dev/ParallaxCompare/blob/90c6ecfe5ccc30e50a76e536b56fb551f924c36a/app/src-tauri/src/commands.rs#L1588"
+      },
+      {
+        "path": "crates/parallax-core/src/vfs/mount.rs",
+        "line": 154,
+        "url": "https://github.com/erpel-dev/ParallaxCompare/blob/90c6ecfe5ccc30e50a76e536b56fb551f924c36a/crates/parallax-core/src/vfs/mount.rs#L154"
+      }
+    ]
+  },
+  {
+    "id": "E06",
+    "severity": "P2",
+    "title": "Flat matching stops pairing an entire moved-file group after its candidate cap is crossed",
+    "steps": [
+      "Create left/old0000/index.txt through old0099/index.txt and right/new0000/index.txt through new0099/index.txt; all files contain identical file\\n.",
+      "Compare the folders and enable Flat: there are 100 matched Same rows.",
+      "Repeat with 150 folders on each side, retaining identical contents and the same basename."
+    ],
+    "actual": "At 150 files per side, Flat shows 300 one-sided rows (150 left only, 150 right only) and zero Same rows, instead of pairing them as for the 100-file case.",
+    "expected": "The optimization should preserve a consistent moved-file matching policy or explicitly disclose its limits. Do not silently change matching solely because the group crossed a performance cap.",
+    "fix": "movedPairs switches when left.length * right.length > MAX_CANDIDATES (20,000). The bounded matchByFolderSuffix fallback has no final fallback for remaining same-name files with completely renamed folders. Retain bounded work but pair remaining candidates deterministically or by a bounded content/fingerprint strategy; add tests across the threshold. This is a behavioral gap in the fix for the old quadratic matching issue #8/F18, not a renewed allocation explosion.",
+    "evidence": [
+      "screenshots/60-flat-100.png",
+      "screenshots/60-flat-150.png",
+      "flat-round.log"
+    ],
+    "source": [
+      {
+        "path": "app/src/lib/tree.ts",
+        "line": 335,
+        "url": "https://github.com/erpel-dev/ParallaxCompare/blob/90c6ecfe5ccc30e50a76e536b56fb551f924c36a/app/src/lib/tree.ts#L335"
+      }
+    ]
+  },
+  {
+    "id": "E07",
+    "severity": "P2",
+    "title": "Closing a New comparison tab during opening lets the completed comparison reappear and steal focus",
+    "steps": [
+      "Fill a New comparison with valid sources.",
+      "Click Compare and immediately close that form tab while open_session is pending. Slow sources make the window for this action longer; the native reproduction dispatches the two actions in one event turn.",
+      "Wait for the open operation to finish. Reproduces for both file and folder comparisons."
+    ],
+    "actual": "The form is removed, but a newly created comparison tab appears and becomes active when the result arrives.",
+    "expected": "Closing the initiating form should abandon its result, free any late session and keep the remaining active tab selected.",
+    "fix": "App.start awaits api.openSession then looks up replaceKey; a missing initiating tab falls through to tabs.push and active = tab.key. Apply the same pending-request ownership, late-result cleanup and focus-preservation rules added to CLI startup in PR #16. A normal start with no replaceKey must still add a tab.",
+    "evidence": [
+      "screenshots/70-cancel-new-form-True.png",
+      "screenshots/70-cancel-new-form-False.png",
+      "cancel-form-round.log"
+    ],
+    "source": [
+      {
+        "path": "app/src/App.svelte",
+        "line": 196,
+        "url": "https://github.com/erpel-dev/ParallaxCompare/blob/90c6ecfe5ccc30e50a76e536b56fb551f924c36a/app/src/App.svelte#L196"
+      }
+    ]
+  },
+  {
+    "id": "E08",
+    "severity": "P2",
+    "title": "The GUI removes a glob escape inside brace alternatives and selects the wrong files",
+    "steps": [
+      "Create a,b.txt, a.txt, b.txt and c.txt on each side.",
+      "In the folder Files field enter {a\\,b,c}.txt. This means the literal a,b.txt or c.txt.",
+      "Compare the result with run_compare includes=[\"{a\\\\,b,c}.txt\"], preserving the escape in the backend argument."
+    ],
+    "actual": "The GUI selects a.txt, b.txt and c.txt (three rows), omitting a,b.txt. The same production backend with the intact pattern selects a,b.txt and c.txt (two rows).",
+    "expected": "Preserve glob escapes that protect alternate syntax, so GUI and backend pattern semantics agree.",
+    "fix": "splitPatterns consumes backslash + comma as a list-separator escape even inside braces (and within a quoted glob). The emitted glob becomes {a,b,c}.txt. Preserve syntax-level glob escapes while tokenizing list separators; test escaped commas inside alternatives and round-tripping saved patterns.",
+    "evidence": [
+      "screenshots/72-escaped-comma-alternative.png",
+      "escape-round.log"
+    ],
+    "source": [
+      {
+        "path": "app/src/lib/patterns.ts",
+        "line": 9,
+        "url": "https://github.com/erpel-dev/ParallaxCompare/blob/90c6ecfe5ccc30e50a76e536b56fb551f924c36a/app/src/lib/patterns.ts#L9"
+      }
+    ]
+  }
+]
