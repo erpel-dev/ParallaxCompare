@@ -75,3 +75,33 @@ test('large files keep compact ranges rather than per-row indices', () => {
   assert.equal(p.source(100_000_001),100_000_001);
   assert.equal(p.position(100_000_002),100_000_002);
 });
+
+test('moved-file groups remain paired across the bounded matching threshold', () => {
+  for (const n of [100, 141, 142, 150, 5000]) {
+    const entries = [];
+    for (let i = 0; i < n; i++) {
+      const suffix = String(i).padStart(5, '0');
+      entries.push(dir(`old${suffix}`, [file('index.txt', 'leftOnly')]));
+      entries.push(dir(`new${suffix}`, [file('index.txt', 'rightOnly')]));
+    }
+    const pairs = movedPairs(dir('', entries));
+    assert.equal(pairs.length, n);
+    assert.equal(new Set(pairs.map(([l]) => l)).size, n);
+    assert.equal(new Set(pairs.map(([,r]) => r)).size, n);
+    assert.deepEqual(pairs[0], ['old00000/index.txt', 'new00000/index.txt']);
+    assert.deepEqual(movedPairs(dir('', [...entries].reverse())), pairs);
+  }
+});
+
+test('bounded matching prioritizes common suffixes then pairs remaining unequal groups', () => {
+  const entries = [];
+  for (let i = 0; i < 150; i++) {
+    entries.push(dir(`old${i}`, [file('index.txt', 'leftOnly')]));
+    if (i < 149) entries.push(dir(`new${i}`, [file('index.txt', 'rightOnly')]));
+  }
+  entries.push(dir('left/shared', [file('index.txt','leftOnly')]));
+  entries.push(dir('right/shared', [file('index.txt','rightOnly')]));
+  const pairs = movedPairs(dir('', entries));
+  assert.equal(pairs.length, 150);
+  assert.ok(pairs.some(([l,r]) => l === 'left/shared/index.txt' && r === 'right/shared/index.txt'));
+});

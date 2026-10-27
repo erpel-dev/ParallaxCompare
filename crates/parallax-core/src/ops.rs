@@ -44,11 +44,12 @@ pub fn copy(from: &Source, to: &Source, paths: &[String], filter: &Filter, progr
     let mut into_archives = Vec::new();
     for rel in paths {
         let entry = from.stat(rel)?;
+        let plan = plan_entry(from, to, rel, entry.clone(), true, filter, progress)?.expect("selected entry");
         let Some(target) = to.vfs.local_path(&to.path(rel)) else {
             if !to.vfs.writable() {
                 return Err(Error::Unsupported(format!("{} is read-only", to.info.display)));
             }
-            into_archives.extend(collect_changes(from, to, rel, entry, filter, progress)?);
+            into_archives.extend(collect_changes(from, to, plan, progress)?);
             continue;
         };
         // A folder copied into itself would copy its own copies, without end.
@@ -68,7 +69,7 @@ pub fn copy(from: &Source, to: &Source, paths: &[String], filter: &Filter, progr
         if entry.kind != EntryKind::Dir {
             progress.expect(1);
         }
-        let result = copy_entry(from, &entry, rel, &target, filter, progress);
+        let result = copy_entry(from, &plan, &target, progress);
         // Also after a partial copy: whatever was written is on disk now.
         to.vfs.changed(&to.path(rel));
         copied += result?;
@@ -104,25 +105,62 @@ pub fn copy_file_as(from: &Source, to: &Source, src: &str, dst: &str, progress: 
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).map_err(|e| Error::io(parent.display().to_string(), e))?;
     }
-    let result = copy_entry(from, &entry, src, &target, &Filter::none(), progress);
+    let result = copy_entry(from, &CopyEntry { path: src.to_string(), entry, children: Vec::new() }, &target, progress);
     to.vfs.changed(&to.path(dst));
     result
 }
 
-/// Archives are copied atomically. Include one when its name or any descendant
-/// matches, exactly as the filtered tree presents it. Never enter excluded paths.
-fn copy_keeps(from: &Source, rel: &str, entry: &Entry, filter: &Filter, progress: &Progress) -> Result<bool> {
+/// A pruned source tree, built once before writing any of its directories.
+struct CopyEntry {
+    path: String,
+    entry: Entry,
+    children: Vec<CopyEntry>,
+}
+
+fn plan_entry(
+    from: &Source,
+    to: &Source,
+    rel: &str,
+    entry: Entry,
+    selected: bool,
+    filter: &Filter,
+    progress: &Progress,
+) -> Result<Option<CopyEntry>> {
     progress.check()?;
-    if filter.excluded(rel) {
-        return Ok(false);
+    if !selected && filter.excluded(rel) {
+        return Ok(None);
     }
-    if filter.keeps(rel, entry) {
-        return Ok(true);
+    let mut keep = selected || filter.included(rel);
+    let mut children = Vec::new();
+    if entry.kind == EntryKind::Dir {
+        children = from
+            .vfs
+            .list(&from.path(rel))?
+            .into_par_iter()
+            .map(|child| {
+                let path = join(rel, &child.name);
+                plan_entry(from, to, &path, child, false, filter, progress)
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+        keep |= !children.is_empty();
+    } else if !keep && entry.kind == EntryKind::Archive {
+        // The comparison retains an archive when either side has a matching
+        // member. Its displayed source archive is then copied as a whole.
+        keep = archive_has_match(from, rel, filter, progress)?;
+        if !keep {
+            match to.stat(rel) {
+                Ok(target) if target.kind == EntryKind::Archive => {
+                    keep = archive_has_match(to, rel, filter, progress)?;
+                }
+                Err(Error::NotFound(_)) | Ok(_) => {}
+                Err(e) => return Err(e),
+            }
+        }
     }
-    if entry.kind != EntryKind::Archive {
-        return Ok(false);
-    }
-    archive_has_match(from, rel, filter, progress)
+    Ok(keep.then(|| CopyEntry { path: rel.to_string(), entry, children }))
 }
 
 fn archive_has_match(from: &Source, dir: &str, filter: &Filter, progress: &Progress) -> Result<bool> {
@@ -132,40 +170,24 @@ fn archive_has_match(from: &Source, dir: &str, filter: &Filter, progress: &Progr
         if filter.excluded(&rel) {
             continue;
         }
-        if child.kind == EntryKind::Dir {
-            if filter.included(&rel) || archive_has_match(from, &rel, filter, progress)? {
-                return Ok(true);
-            }
-        } else if copy_keeps(from, &rel, &child, filter, progress)? {
+        if filter.included(&rel)
+            || (matches!(child.kind, EntryKind::Dir | EntryKind::Archive)
+                && archive_has_match(from, &rel, filter, progress)?)
+        {
             return Ok(true);
         }
     }
     Ok(false)
 }
 
-/// The writes that copy `rel` with everything below it; file contents are read in parallel.
-fn collect_changes(
-    from: &Source,
-    to: &Source,
-    rel: &str,
-    entry: Entry,
-    filter: &Filter,
-    progress: &Progress,
-) -> Result<Vec<Change>> {
-    let mut found = vec![(rel.to_string(), entry)];
-    let mut i = 0;
-    while i < found.len() {
+/// Turns the same pruned plan into a single archive rewrite; reads run in parallel.
+fn collect_changes(from: &Source, to: &Source, plan: CopyEntry, progress: &Progress) -> Result<Vec<Change>> {
+    let mut pending = vec![plan];
+    let mut found = Vec::new();
+    while let Some(plan) = pending.pop() {
         progress.check()?;
-        if found[i].1.kind == EntryKind::Dir {
-            let dir = found[i].0.clone();
-            for child in from.vfs.list(&from.path(&dir))? {
-                let rel = join(&dir, &child.name);
-                if copy_keeps(from, &rel, &child, filter, progress)? {
-                    found.push((rel, child));
-                }
-            }
-        }
-        i += 1;
+        found.push((plan.path, plan.entry));
+        pending.extend(plan.children);
     }
     progress.expect(found.len() as u64);
     found
@@ -184,28 +206,18 @@ fn collect_changes(
 }
 
 /// Copies one entry to `target`; the children of a folder in parallel.
-fn copy_entry(
-    from: &Source,
-    entry: &Entry,
-    rel: &str,
-    target: &Path,
-    filter: &Filter,
-    progress: &Progress,
-) -> Result<u64> {
+fn copy_entry(from: &Source, plan: &CopyEntry, target: &Path, progress: &Progress) -> Result<u64> {
+    let entry = &plan.entry;
+    let rel = &plan.path;
     let io_err = |e| Error::io(target.display().to_string(), e);
     progress.check()?;
     if entry.kind == EntryKind::Dir {
         fs::create_dir_all(target).map_err(io_err)?;
-        let mut children = Vec::new();
-        for child in from.vfs.list(&from.path(rel))? {
-            if copy_keeps(from, &join(rel, &child.name), &child, filter, progress)? {
-                children.push(child);
-            }
-        }
-        progress.expect(children.iter().filter(|c| c.kind != EntryKind::Dir).count() as u64);
-        return children
+        progress.expect(plan.children.iter().filter(|c| c.entry.kind != EntryKind::Dir).count() as u64);
+        return plan
+            .children
             .par_iter()
-            .map(|child| copy_entry(from, child, &join(rel, &child.name), &target.join(&child.name), filter, progress))
+            .map(|child| copy_entry(from, child, &target.join(&child.entry.name), progress))
             .try_reduce(|| 0, |a, b| Ok(a + b));
     }
     let source_path = from.vfs.local_path(&from.path(rel));

@@ -442,7 +442,19 @@ fn start_watching(app: AppHandle, id: u64, session: &Arc<Session>) {
     let excludes = session.excludes.clone();
     std::thread::spawn(move || {
         let ignore = Arc::new(move |rel: &str| excludes.read().covers(rel));
+        let watched = weak.clone();
         let emit = move |batch: parallax_core::watch::Batch| {
+            if let Some(session) = watched.upgrade() {
+                for source in [&session.left, &session.right] {
+                    if batch.full {
+                        source.vfs.changed(&source.path(""));
+                    } else {
+                        for path in &batch.paths {
+                            source.vfs.changed(&source.path(path));
+                        }
+                    }
+                }
+            }
             let changed = PathsChanged { session: id, paths: batch.paths, full: batch.full, origin: None };
             let _ = app.emit("paths-changed", changed);
         };
@@ -845,6 +857,9 @@ fn missing_side() -> SideInfo {
 /// a header (GGUF models) touch only the start of a multi-gigabyte file.
 fn load_side(source: &Source, path: &str) -> CmdResult<(SideInfo, Option<Data>)> {
     let full = source.path(path);
+    // Opening/reloading a file must not reuse a container from an earlier read,
+    // even if an external replacement kept its size and modification time.
+    source.vfs.changed(&full);
     let entry = match source.vfs.stat(&full) {
         Ok(entry) => entry,
         Err(parallax_core::Error::NotFound(_)) => return Ok((missing_side(), None)),
@@ -1597,6 +1612,7 @@ pub async fn save_side(
     let info = with_diff(state, id, move |fd| {
         check_editable(fd, side)?;
         let source = fd.source(side);
+        source.vfs.changed(&source.path(&fd.path));
         let now = source.vfs.read(&source.path(&fd.path)).ok().map(|d| crate::merge::stamp_of(&d));
         if now != fd.on_disk[side as usize] && !overwrite.unwrap_or(false) {
             found_stale.store(true, Ordering::Relaxed);

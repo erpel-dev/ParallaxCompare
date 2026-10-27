@@ -201,7 +201,7 @@ pub struct Includes {
 impl Includes {
     pub fn new(patterns: &[String]) -> Result<Self> {
         let (mut names, mut paths) = (Vec::new(), Vec::new());
-        for pattern in patterns.iter().map(|p| p.trim()).filter(|p| !p.is_empty()) {
+        for pattern in patterns.iter().filter(|p| !p.is_empty()) {
             let by_path = pattern.contains('/');
             let regex = glob_regex(pattern.trim_start_matches('/'), by_path)?;
             if by_path {

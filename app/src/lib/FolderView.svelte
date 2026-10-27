@@ -114,6 +114,8 @@
   let provisionalIndex = new Map<string, Node>();
   let progress = $state(0);
   let error = $state("");
+  let patternError = $state("");
+  let excludesError = $state("");
   let busy = $state("");
   /** A running copy or delete: what it is, and its progress. */
   let op = $state<{ label: string; done: number; total: number } | null>(null);
@@ -301,7 +303,8 @@
     clearTimeout(patternTimer);
     let list: string[];
     try { list = splitPatterns(patternText); }
-    catch (e) { error = String(e); return; }
+    catch (e) { patternError = String(e); return; }
+    patternError = "";
     if (list.join("\n") === options.includes.join("\n")) return;
     options.includes = list;
     run();
@@ -431,7 +434,8 @@
   function applyExcludes() {
     let next: string[];
     try { next = splitPatterns(excludesText, true); }
-    catch (e) { error = String(e); return; }
+    catch (e) { excludesError = String(e); return; }
+    excludesError = "";
     if (next.join("\n") !== options.excludes.join("\n")) {
       options.excludes = next;
       run();
@@ -1159,7 +1163,7 @@
       <button class="small" onclick={() => api.cancelOp(session.id)}>Cancel</button>
     {/if}
     {#if targets.length > 1}<span>{targets.length} selected</span>{/if}
-    {#if error}<span class="c-err" title={error}>{error}</span>{/if}
+    {#if error || patternError || excludesError}<span class="c-err" title={error || patternError || excludesError}>{error || patternError || excludesError}</span>{/if}
   </div>
   {#if menu}
     <Menu items={menu.items} context={menu.context} x={menu.x} y={menu.y} returnFocus={viewport} onClose={() => (menu = null)} />

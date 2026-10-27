@@ -194,15 +194,22 @@
   }
 
   async function start(request: Request, replaceKey?: number, inlineError = false) {
+    const form = tabs.find((t) => t.key === replaceKey);
+    if (replaceKey !== undefined && !form) return;
     try {
       const session = await api.openSession(request.left, request.right, request.options, request.mergeBase);
+      if (form && !tabs.includes(form)) {
+        api.closeSession(session.id);
+        return;
+      }
       const tab = sessionTab(session, request);
       const index = tabs.findIndex((t) => t.key === replaceKey);
       if (index >= 0) tabs[index] = tab;
       else tabs.push(tab);
-      active = tab.key;
+      if (replaceKey === undefined || active === replaceKey) active = tab.key;
       remember(request);
     } catch (e) {
+      if (form && !tabs.includes(form)) return;
       if (inlineError) throw e;
       notify(String(e));
     }
