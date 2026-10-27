@@ -1,0 +1,54 @@
+{
+  "sourceCommit": "e0610402530c47120055dae609480e62eb5ec521",
+  "testedBranchCommit": "6e02aec",
+  "version": "0.0.14",
+  "binarySha256": "18b7582e177d91fbc3497414bf38a4dce56268441e0c2c8b4a86d3a1f1db9626",
+  "results": [
+    {
+      "id": "E01",
+      "passed": true,
+      "detail": "Pattern error clears when restored to the already-active pattern"
+    },
+    {
+      "id": "E02",
+      "passed": true,
+      "detail": "Both quoted exact boundary-space filenames match one file"
+    },
+    {
+      "id": "E08",
+      "passed": true,
+      "detail": "Escaped comma alternative matches a,b.txt and c.txt"
+    },
+    {
+      "id": "E03",
+      "passed": true,
+      "detail": "Copy matches the displayed archive policy"
+    },
+    {
+      "id": "E04",
+      "passed": true,
+      "detail": "Filtered copy creates no hidden directory subtree"
+    },
+    {
+      "id": "E06",
+      "passed": true,
+      "detail": "100 and 150 moved-file groups both pair completely"
+    },
+    {
+      "id": "E07",
+      "passed": true,
+      "detail": "Closing file and folder forms during opening creates no late tabs"
+    },
+    {
+      "id": "E07-focus",
+      "passed": true,
+      "detail": "Finishing a background form preserves the selected tab"
+    },
+    {
+      "id": "E05",
+      "passed": true,
+      "detail": "Ordinary and same-size/same-mtime replacement: save asks, cancel preserves disk, explicit overwrite preserves unrelated member; clean tabs reload current content"
+    }
+  ],
+  "javascriptErrors": []
+}
