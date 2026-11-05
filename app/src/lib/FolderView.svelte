@@ -2,7 +2,7 @@
   import { splitPatterns, joinPatterns } from "./patterns";
   import { onMount, tick } from "svelte";
   import { listen } from "@tauri-apps/api/event";
-  import { ask } from "@tauri-apps/plugin-dialog";
+  import { ask } from "./confirm.svelte";
   import { api, defaultCompareOptions, sourceText, type CompareResult, type Node, type OpResult, type PathsChanged, type SessionInfo, type Side, type SourceSpec, type Version, type Versions } from "./api";
   import type { Command } from "./commands";
   import Dropdown from "./Dropdown.svelte";
@@ -226,7 +226,7 @@
     return result ? (flat ? countFlatFiles(flatRows) : countFiles(result.root)) : null;
   });
   const countFilters = $derived<CountFilter[]>([
-    { id: "all", label: "All files", count: counts?.files ?? 0 },
+    { id: "all", label: "All", count: counts?.files ?? 0, title: "Show all files" },
     { id: "diffs", label: "All differences", count: counts ? matchingCount(counts, "diffs") : 0, title: "Changed, left-only, right-only, and error entries", tone: "different" },
     { id: "same", label: "Same", count: counts?.same ?? 0, tone: "same" },
     { id: "similar", label: "Similar", count: counts?.similar ?? 0, title: "Equal content, different bytes", tone: "similar" },
@@ -318,10 +318,6 @@
     }
   }
 
-  /**
-   * Compares again. A refresh (`invalidate`) keeps showing the old result until the
-   * new one is there; otherwise the entries show as the compare finds them.
-   */
   /** What the view shows, to show the same after one side was switched. */
   export function viewState(): FolderViewState {
     return {
@@ -363,10 +359,39 @@
     if (path) selectOnly(path);
   }
 
+  // ---- Progress of a comparison ----
+
+  /** Slow work going on in the comparison, such as decompressing an archive. */
+  let activity = $state<string | null>(null);
+  let startedAt = 0;
+  let elapsed = $state(0);
+  let ticker: ReturnType<typeof setInterval> | undefined;
+  /** How the last comparison ended when it was cancelled: shown until the next one. */
+  let cancelled = $state<{ seconds: number } | null>(null);
+  let cancelling = $state(false);
+
+  function cancelRun() {
+    cancelling = true;
+    api.cancelCompare(session.id);
+  }
+
+  const seconds = (ms: number) => (ms < 10_000 ? (ms / 1000).toFixed(1) : Math.round(ms / 1000).toString());
+
+  /**
+   * Compares again. A refresh (`invalidate`) keeps showing the old result until the
+   * new one is there; otherwise the entries show as the compare finds them.
+   */
   async function run(invalidate = false) {
     running = true;
     error = "";
     progress = 0;
+    activity = null;
+    cancelled = null;
+    cancelling = false;
+    startedAt = performance.now();
+    elapsed = 0;
+    clearInterval(ticker);
+    ticker = setInterval(() => (elapsed = performance.now() - startedAt), 200);
     if (!invalidate) {
       // Folders the user opens meanwhile stay open, and those open before a side was switched.
       expanded = new Set(restoring?.expanded ?? []);
@@ -393,14 +418,25 @@
         await finishRestore(state);
       }
     } catch (e) {
-      if (String(e) !== "cancelled") error = String(e);
-      if (provisional) {
+      const wasCancelled = String(e) === "cancelled";
+      if (wasCancelled && cancelling) {
+        // What was found so far stays on screen, said to be partial.
+        cancelled = { seconds: (performance.now() - startedAt) / 1000 };
+        provisional = false;
+        version++;
+      } else if (!wasCancelled) {
+        error = String(e);
+      }
+      if (provisional && !cancelled) {
         provisional = false;
         result = null;
         version++;
       }
     } finally {
       running = false;
+      cancelling = false;
+      activity = null;
+      clearInterval(ticker);
     }
     // Changes that came in during the compare are in the new result already.
     deferred.clear();
@@ -410,9 +446,10 @@
   onMount(() => {
     run();
     const unlisten = [
-      listen<{ session: number; files: number; partial?: Partial }>("compare-progress", (e) => {
+      listen<{ session: number; files: number; partial?: Partial; activity?: string }>("compare-progress", (e) => {
         if (e.payload.session !== session.id) return;
         progress = e.payload.files;
+        activity = e.payload.activity ?? null;
         if (e.payload.partial && provisional && running && result) {
           mergePartial(result.root, provisionalIndex, e.payload.partial);
           version++;
@@ -515,7 +552,45 @@
     else if (top + ROW > at + viewHeight) viewport.scrollTop = (top + 2 * ROW - viewHeight) / scale;
   }
 
+  /** Files that differ (or exist on one side only, or failed), in tree order, also in closed folders. */
+  function differingFiles(): string[] {
+    if (!result) return [];
+    const out: string[] = [];
+    const walk = (node: Node, dir: string) => {
+      for (const child of node.children ?? []) {
+        const path = dir ? `${dir}/${child.name}` : child.name;
+        const container = (child.children?.length ?? 0) > 0;
+        if (container) walk(child, path);
+        else if (child.status !== "same" && child.status !== "pending" && filterAccepts(child)) out.push(path);
+      }
+    };
+    walk(result.root, "");
+    return out;
+  }
+
+  const filterAccepts = (node: Node) => filter === "all" || filter === "diffs" || selfMatches(node, filter);
+
+  /** Selects the next (or previous) file that differs, opening folders on the way. */
+  function nextDifference(dir: 1 | -1) {
+    const files = differingFiles();
+    if (!files.length) return;
+    const at = selected ? files.findIndex((p) => p === selected) : -1;
+    let index: number;
+    if (at >= 0) index = (at + dir + files.length) % files.length;
+    else {
+      // From a row that is not a differing file: the next one after it in tree order.
+      const after = selected ? files.findIndex((p) => p.localeCompare(selected!) > 0) : 0;
+      index = dir > 0 ? (after < 0 ? 0 : after) : (after <= 0 ? files.length - 1 : after - 1);
+    }
+    revealPath(files[index]);
+  }
+
   function onKey(e: KeyboardEvent) {
+    if (e.key === "F7" || e.key === "F8") {
+      nextDifference(e.key === "F8" ? 1 : -1);
+      e.preventDefault();
+      return;
+    }
     if (!rows.length) return;
     let index = selectedIndex;
     const row = selectedRow;
@@ -549,6 +624,11 @@
           index = rows.findIndex((r) => r.path === parent);
         }
         break;
+      case "Escape":
+        if (!selection.size) return;
+        selection = new Set();
+        e.preventDefault();
+        return;
       case "F5":
         if (!running) run(true);
         e.preventDefault();
@@ -987,16 +1067,28 @@
   }
 </script>
 
+{#snippet legend()}
+  <div class="lrow"><span class="g">=</span><b>Same</b><span>Byte for byte{options.mode === "quick" ? ", by size and date only" : ", or the same checksum in an archive or object in Git"}</span></div>
+  <div class="lrow"><span class="g sim">≈</span><b>Similar</b><span>The bytes differ, but the content is equal under a rule that is on (see below). The detail line under the tree says which.</span></div>
+  <div class="lrow"><span class="g diff">≠</span><b>Different</b><span>The content differs</span></div>
+  <div class="lrow"><span class="g left">◀</span><b>Left only</b><span>Only on the left side</span></div>
+  <div class="lrow"><span class="g right">▶</span><b>Right only</b><span>Only on the right side</span></div>
+  <div class="lrow"><span class="g diff">!</span><b>Error</b><span>Could not be read or compared</span></div>
+  <div class="foot">
+    Rules for ≈, set in Options:
+    <span class:on={options.ignoreLineEndings}>line endings {options.ignoreLineEndings ? "ignored" : "count"}</span> ·
+    <span class:on={options.compareContents}>equal content {options.compareContents ? "is similar" : "is different"}</span> (documents, images, data such as JSON, YAML, TOML, code without comments)
+  </div>
+{/snippet}
+
 <div class="view">
   <div class="toolbar">
     {#if nav}<Nav {nav} /><span class="sep"></span>{/if}
     <button onclick={() => run(true)} disabled={running} title="Compare again (F5)">⟳ Refresh</button>
     <button onclick={onSwap} title="Swap left and right">⇄ Swap</button>
-    <button
-      disabled={!pair || !onCompareRows}
-      onclick={() => pair && onCompareRows?.(pair[0], pair[1])}
-      title="Compare the two selected rows with each other, e.g. a file renamed between the sides (select with Ctrl+click)"
-    >⇆ Compare these</button>
+    <span class="sep"></span>
+    <button onclick={() => nextDifference(-1)} disabled={!counts || matchingCount(counts, "diffs") === 0} title="Previous difference (F7)">‹ Previous</button>
+    <button onclick={() => nextDifference(1)} disabled={!counts || matchingCount(counts, "diffs") === 0} title="Next difference (F8)">Next difference ›</button>
     <span class="sep"></span>
     <span class="patterns" class:active={options.includes.length > 0}>
       <input
@@ -1027,13 +1119,9 @@
     <button onclick={() => setAll(true)} disabled={flat} title="Expand all folders">Expand</button>
     <button onclick={() => setAll(false)} disabled={flat} title="Collapse all folders">Collapse</button>
     <button class:on={flat} onclick={() => setFlat(!flat)} title="All files in one list, without folders; files of the same name are matched across folders">Flat</button>
-    <span class="sep"></span>
-    <button disabled={!canCopy[1] || !!op} onclick={() => copy(true)} title="Copy the selection to the right side">Copy →</button>
-    <button disabled={!canCopy[0] || !!op} onclick={() => copy(false)} title="Copy the selection to the left side">← Copy</button>
-    <button disabled={!canDelete[0] || !!op} onclick={() => remove(true)} title="Delete the selection on the left side">Delete ◀</button>
-    <button disabled={!canDelete[1] || !!op} onclick={() => remove(false)} title="Delete the selection on the right side">Delete ▶</button>
     <span class="grow"></span>
     <Dropdown label="Options" title="Compare rule, line endings, excluded files" changed={optionsChanged}>
+      <p class="scope">Applies to this comparison and the files opened from it.</p>
       <div class="field">
         <span>Compare by</span>
         <select bind:value={options.mode} onchange={() => run()}>
@@ -1041,12 +1129,15 @@
           <option value="quick">Size &amp; date (faster)</option>
         </select>
       </div>
-      <label><input type="checkbox" bind:checked={options.ignoreLineEndings} onchange={() => run()} /> Ignore CRLF/LF differences</label>
-      <label title="Documents (PDF, Word, Excel, PowerPoint, Visio, OpenDocument) with the same text and images with the same pixels are marked ≈ instead of ≠">
-        <input type="checkbox" bind:checked={options.compareContents} onchange={() => run()} /> Equal content counts as similar (≈)
+      {#if options.mode === "quick"}<p class="scope">Size &amp; date compares no contents: the options below need Compare by: Content.</p>{/if}
+      <label title="Files that differ only in CRLF or LF line breaks are marked ≈ instead of ≠">
+        <input type="checkbox" bind:checked={options.ignoreLineEndings} disabled={options.mode === "quick"} onchange={() => run()} /> Ignore CRLF/LF differences <small>affects ≈</small>
+      </label>
+      <label title="Documents with the same text, images with the same pixels, and data files (JSON, YAML, TOML …) with the same data are marked ≈ instead of ≠">
+        <input type="checkbox" bind:checked={options.compareContents} disabled={options.mode === "quick"} onchange={() => run()} /> Equal content counts as similar <small>affects ≈</small>
       </label>
       <label title="Zip and 7z entries with the same CRC32 and size are taken as equal without decompressing them. Different data shares a CRC32 only by a one-in-four-billion chance or when made to. Verifying decompresses every such entry, which takes seconds for large solid 7z archives.">
-        <input type="checkbox" bind:checked={options.verifyChecksums} onchange={() => run()} /> Verify archive entries byte for byte
+        <input type="checkbox" bind:checked={options.verifyChecksums} disabled={options.mode === "quick"} onchange={() => run()} /> Verify archive entries byte for byte <small>affects =</small>
       </label>
       <div class="field">
         <span>Exclude (globs, comma separated)</span>
@@ -1063,7 +1154,29 @@
     </Dropdown>
   </div>
 
-  <FilterBar items={countFilters} value={filter} onSelect={(id) => setFilter(id as Filter)} disabled={!result}
+  {#if running}
+    <div class="progress" role="status">
+      <div class="pline">
+        <b>{cancelling ? "Cancelling…" : (activity ?? "Comparing")}</b>
+        <span>{progress.toLocaleString()} files compared</span>
+        <span>{seconds(elapsed)} s</span>
+        <span class="grow"></span>
+        <button class="small" onclick={cancelRun} disabled={cancelling}>Cancel</button>
+      </div>
+      <div class="track" aria-hidden="true"><i></i></div>
+    </div>
+  {:else if cancelled}
+    <div class="progress done" role="status">
+      <div class="pline">
+        <b class="warn">Cancelled after {cancelled.seconds.toFixed(1)} s</b>
+        <span>The list is partial: it holds what was finished before the stop.</span>
+        <span class="grow"></span>
+        <button class="small primary" onclick={() => run()}>Compare again</button>
+      </div>
+    </div>
+  {/if}
+
+  <FilterBar items={countFilters} value={filter} onSelect={(id) => setFilter(id as Filter)} disabled={!result} {legend}
     hint={running ? "Totals update during comparison" : flatRows.some((r) => r.pending) ? "Matched files are still being compared" : ""} />
   {#if result && filter !== "all"}
     <div class="filter-scope">
@@ -1148,14 +1261,43 @@
     </div>
   </div>
 
+  {#if selection.size > 0 && result}
+    <div class="selbar" role="toolbar" aria-label="Selected entries">
+      <b>{selection.size === 1 ? "1 selected" : `${selection.size.toLocaleString()} selected`}</b>
+      <button disabled={!canCopy[1] || !!op} onclick={() => copy(true)} title="Copy the selection from the left side to the right side">Copy left → right</button>
+      <button disabled={!canCopy[0] || !!op} onclick={() => copy(false)} title="Copy the selection from the right side to the left side">Copy right → left</button>
+      {#if pair && onCompareRows}<button onclick={() => onCompareRows?.(pair![0], pair![1])} title="Compare the two selected entries with each other, e.g. a file renamed between the sides">⇆ Compare these</button>{/if}
+      <span class="grow"></span>
+      <button class="danger" disabled={!canDelete[0] || !!op} onclick={() => remove(true)}>Delete on the left…</button>
+      <button class="danger" disabled={!canDelete[1] || !!op} onclick={() => remove(false)}>Delete on the right…</button>
+      <button class="link" onclick={() => { selection = new Set(); selected = null; }} title="Clear the selection (Esc)">Clear</button>
+    </div>
+  {/if}
+
+  {#if selectedRow && result}
+    {@const n = selectedRow.node}
+    {@const label = { same: "Same", similar: "Similar", different: "Different", leftOnly: "Left only", rightOnly: "Right only", error: "Error", pending: "Being compared" }[n.status]}
+    <div class="detailline" aria-live="polite">
+      <b class="name">{n.name}</b>
+      <span class="st {n.status}">{glyph[n.status]} {label}</span>
+      {#if n.message}<span>{n.message}</span>{/if}
+      {#if n.status === "similar"}
+        <span class="dim">rule: {n.message === "only line endings differ" ? "Ignore CRLF/LF differences" : "Equal content counts as similar"}</span>
+      {:else if n.status === "same" && !selectedRow.container}
+        <span class="dim">{options.mode === "quick" ? "same size and date" : "same bytes"}</span>
+      {/if}
+      <span class="grow"></span>
+      {#if !selectedRow.container && n.left && n.right}<button class="link" onclick={() => onOpenFile(selectedRow!.path)}>Open comparison (Enter)</button>{/if}
+    </div>
+  {/if}
+
   <div class="status">
     {#if running}
-      <span>Comparing… <b>{progress.toLocaleString()}</b> files</span>
-      <button class="small" onclick={() => api.cancelCompare(session.id)}>Cancel</button>
+      <span>Comparing…</span>
     {:else if result && counts}
       {@const s = result.summary}
       <span>Showing <b>{matchingFiles.toLocaleString()}</b> of <b>{counts.files.toLocaleString()}</b> files</span>
-      <span>compared in <b>{s.elapsedMs < 1000 ? `${s.elapsedMs} ms` : `${(s.elapsedMs / 1000).toFixed(2)} s`}</b>{s.identicalSubtrees ? ` · ${s.identicalSubtrees.toLocaleString()} identical folders skipped via Git tree ids` : ""}</span>
+      {#if cancelled}<span>partial: cancelled</span>{:else}<span>compared in <b>{s.elapsedMs < 1000 ? `${s.elapsedMs} ms` : `${(s.elapsedMs / 1000).toFixed(2)} s`}</b>{s.identicalSubtrees ? ` · ${s.identicalSubtrees.toLocaleString()} identical folders skipped via Git tree ids` : ""}</span>{/if}
     {/if}
     {#if busy}<span>{busy}</span>{/if}
     {#if op}
@@ -1186,6 +1328,32 @@
     background: var(--panel);
     border-bottom: 1px solid var(--line);
   }
+  .progress { display: grid; gap: 4px; padding: 5px 10px; border-bottom: 1px solid var(--line); background: var(--panel-2); font-size: 12px; }
+  .progress .pline { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; color: var(--dim); }
+  .progress .pline b { color: var(--fg); font-weight: 600; }
+  .progress .pline b.warn { color: var(--similar); }
+  .progress .grow { flex: 1; }
+  .track { height: 3px; border-radius: 2px; background: var(--line); overflow: hidden; position: relative; }
+  .track i { position: absolute; top: 0; bottom: 0; width: 30%; background: var(--accent); border-radius: 2px; animation: sweep 1.4s ease-in-out infinite; }
+  @keyframes sweep { from { left: -30%; } to { left: 100%; } }
+  @media (prefers-reduced-motion: reduce) { .track i { animation: none; left: 35%; opacity: 0.6; } }
+  .selbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 4px 10px; border-top: 1px solid var(--line); background: color-mix(in srgb, var(--accent) 9%, var(--panel-2)); font-size: 12px; }
+  .selbar b { margin-right: 6px; }
+  .selbar button { font-size: 12px; padding: 2px 8px; }
+  .selbar .grow { flex: 1; }
+  .selbar .danger { color: var(--error); }
+  .selbar .link, .detailline .link { border: none; background: none; color: var(--accent); padding: 0 4px; cursor: pointer; }
+  .detailline { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; padding: 4px 10px; border-top: 1px solid var(--line); background: var(--panel-2); font-size: 12px; min-height: 24px; }
+  .detailline .name { font-weight: 600; }
+  .detailline .st { font-weight: 600; }
+  .detailline .st.similar { color: var(--similar); }
+  .detailline .st.different, .detailline .st.error { color: var(--diff); }
+  .detailline .st.leftOnly { color: var(--left-only); }
+  .detailline .st.rightOnly { color: var(--right-only); }
+  .detailline .dim { color: var(--dim); }
+  .detailline .grow { flex: 1; }
+  .scope { margin: 0; font-size: 11.5px; color: var(--dim); max-width: 300px; }
+  label small { color: var(--dim); font-size: 10.5px; margin-left: auto; padding-left: 8px; white-space: nowrap; }
   .filter-scope { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 4px 10px; background: var(--panel-2); color: var(--dim); font-size: 11px; border-bottom: 1px solid var(--line); }
   .filter-scope strong { color: var(--accent); font-weight: 600; }
   .filter-scope button { font-size: 11px; padding: 0 6px; }

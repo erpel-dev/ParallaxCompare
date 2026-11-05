@@ -2,7 +2,9 @@
   import { onMount, tick } from "svelte";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
-  import { ask } from "@tauri-apps/plugin-dialog";
+  import { ask } from "./lib/confirm.svelte";
+  import ConfirmDialog from "./lib/ConfirmDialog.svelte";
+  import Shortcuts, { type ShortcutView } from "./lib/Shortcuts.svelte";
   import ConflictsView from "./lib/ConflictsView.svelte";
   import FolderView from "./lib/FolderView.svelte";
   import MergeView from "./lib/MergeView.svelte";
@@ -499,6 +501,7 @@
     const group = "App";
     const list: Command[] = [
       { group, title: "New comparison", keys: "Ctrl+T", run: newTab },
+      { group, title: "Keyboard shortcuts", keys: "?", run: () => (shortcutsOpen = true) },
       { group, title: "Close tab", keys: "Ctrl+W", run: () => close(active) },
       { group, title: "Next tab", keys: "Ctrl+Tab", enabled: tabs.length > 1, run: () => cycle(1) },
       { group, title: "Previous tab", keys: "Ctrl+Shift+Tab", enabled: tabs.length > 1, run: () => cycle(-1) },
@@ -531,10 +534,19 @@
     return [...(views[active]?.commands() ?? []), ...appCommands()];
   }
 
+  let shortcutsOpen = $state(false);
+  const shortcutView = $derived.by((): ShortcutView => {
+    const kind = tabs.find((t) => t.key === active)?.kind;
+    return kind === "folder" ? "folder" : kind === "text" ? "text" : kind === "merge" ? "merge" : "other";
+  });
+  const typing = (t: EventTarget | null) =>
+    t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement || (t instanceof HTMLElement && t.isContentEditable);
+
   function onKey(e: KeyboardEvent) {
     const mod = e.ctrlKey || e.metaKey;
     const key = e.key.toLowerCase();
-    if (mod && key === "w") close(active);
+    if (e.key === "?" && !mod && !e.altKey && !typing(e.target) && !paletteOpen) shortcutsOpen = !shortcutsOpen;
+    else if (mod && key === "w") close(active);
     else if (mod && key === "t") newTab();
     else if ((mod && e.shiftKey && key === "p") || (mod && !e.shiftKey && key === "k") || e.key === "F1") {
       paletteOpen = !paletteOpen;
@@ -713,6 +725,8 @@
   <Palette commands={allCommands()} onClose={() => (paletteOpen = false)} />
 {/if}
 <Toasts />
+<ConfirmDialog />
+{#if shortcutsOpen}<Shortcuts view={shortcutView} onClose={() => (shortcutsOpen = false)} />{/if}
 
 <style>
   .app {

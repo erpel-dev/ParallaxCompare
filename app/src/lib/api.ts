@@ -55,8 +55,17 @@ export interface FileHistory {
 }
 
 /** The last `depth` parts of a source's path (a file or folder name by default), or its Git revision. */
+/** A revision as people know it: the staged files are "staged", not their internal name. */
+export const revLabel = (rev: string) => (rev === "~staged" ? "staged" : rev);
+
 export function sourceName(spec: SourceSpec, depth = 1): string {
-  if (spec.type === "gitRev" && !spec.subpath) return spec.rev;
+  if (spec.type === "gitRev") {
+    const rev = revLabel(spec.rev);
+    if (!spec.subpath) return rev;
+    const repo = spec.repo.replace(/[\\/]+$/, "").split(/[\\/]/).pop() ?? "";
+    const parts = [repo, ...spec.subpath.split("/")].filter(Boolean);
+    return `${parts.slice(-depth).join("/")} (${rev})`;
+  }
   const parts = sourceText(spec).replace(/[\\/]+$/, "").split(/[\\/:!]/).filter(Boolean);
   return parts.slice(-depth).join("/");
 }
@@ -290,6 +299,8 @@ export interface FileDiffInfo {
   views: { id: View; label: string }[];
   image: ImageView | null;
   note: string | null;
+  /** Shown in its bytes: the view in which the files are equal. */
+  equalView: { id: View; label: string } | null;
 }
 
 export type SideName = "left" | "right";

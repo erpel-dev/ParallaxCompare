@@ -92,6 +92,10 @@ struct Cli {
     #[arg(long)]
     json: bool,
 
+    /// Print timings and peak memory to stderr, for repeatable before/after measurements
+    #[arg(long)]
+    stats: bool,
+
     /// Whitespace handling for file compare
     #[arg(long, value_enum, default_value_t = Ws::Exact)]
     whitespace: Ws,
@@ -147,7 +151,20 @@ fn main() -> ExitCode {
         return exit(merge_cmd::run(&cli));
     }
     let cli = Cli::parse();
-    exit(run(&cli))
+    let started = std::time::Instant::now();
+    let result = run(&cli);
+    if cli.stats {
+        let memory = peak_memory().map_or("unknown".into(), |kb| format!("{:.1} MB", kb as f64 / 1024.0));
+        eprintln!("stats: total {} ms, peak memory {memory}", started.elapsed().as_millis());
+    }
+    exit(result)
+}
+
+/// The most memory the process used, in KiB, where the system says (Linux).
+fn peak_memory() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find(|l| l.starts_with("VmHWM:"))?;
+    line.split_whitespace().nth(1)?.parse().ok()
 }
 
 fn exit(result: Result<bool>) -> ExitCode {

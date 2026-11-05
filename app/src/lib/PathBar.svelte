@@ -52,6 +52,13 @@
     active?: boolean;
   } = $props();
 
+  /** The path with its last part apart: that part tells the sides apart, the rest is dimmed. */
+  const shown = $derived.by(() => {
+    const full = `${info.display}${suffix ? ` › ${suffix}` : ""}`;
+    const cut = Math.max(full.lastIndexOf("/"), full.lastIndexOf("\\"), full.lastIndexOf("› ") + 1);
+    return cut > 0 && cut < full.length - 1 ? { pre: full.slice(0, cut + 1), last: full.slice(cut + 1) } : { pre: "", last: full };
+  });
+
   let chip = $state<VersionChip>();
   let chipShown = $state(false);
 
@@ -313,11 +320,11 @@
       />
     </div>
   {:else if edit}
-    <button class="path mono" onclick={startEdit} title="Click to compare with another path ({info.display})">
-      <span dir="ltr">{info.display}{suffix ? ` › ${suffix}` : ""}</span>
+    <button class="path mono" onclick={startEdit} title="Click to compare with another path ({info.display}{suffix ? ` › ${suffix}` : ''})">
+      <span class="pre">{shown.pre && `\u200e${shown.pre}\u200e`}</span><b>{shown.last}</b>
     </button>
   {:else}
-    <span class="path mono"><span dir="ltr">{info.display}{suffix ? ` › ${suffix}` : ""}</span></span>
+    <span class="path mono" title="{info.display}{suffix ? ` › ${suffix}` : ''}"><span class="pre">{shown.pre && `\u200e${shown.pre}\u200e`}</span><b>{shown.last}</b></span>
   {/if}
   {#if edit}
     <VersionChip bind:this={chip} bind:shown={chipShown} {edit} refreshKey="{info.display}\n{info.rev ?? ''}\n{suffix}" commit={info.commit} {active} />
@@ -450,14 +457,28 @@
     border: 1px solid var(--line);
     padding: 1px 6px;
     border-radius: 3px;
-    /* Long paths lose their beginning, not the interesting end. */
-    direction: rtl;
+    display: flex;
     text-align: left;
     font: inherit;
     color: inherit;
   }
   button.path {
     cursor: text;
+  }
+  /* Long paths lose their beginning, not the interesting end. */
+  .path .pre {
+    color: var(--dim);
+    direction: rtl;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .path b {
+    font-weight: 600;
+    flex-shrink: 0;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   button.path:hover {
     border-color: var(--accent);

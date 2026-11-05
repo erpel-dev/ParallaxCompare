@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount, tick, untrack } from "svelte";
-  import { ask } from "@tauri-apps/plugin-dialog";
+  import { ask } from "./confirm.svelte";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { api, END, type Choice, type InputRowView, type LineView, type MergeInfo, type MergeRequest, type ResultRowView } from "./api";
   import { notify } from "./toast.svelte";
@@ -743,8 +743,8 @@
 <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
 <div class="merge" bind:this={root} tabindex="0" onkeydown={onKey} role="application" aria-label="Merge">
   <div class="toolbar">
-    <button onclick={() => step(false)} disabled={!info?.conflicts.length} title="Previous conflict (F7)">↑ Previous conflict</button>
-    <button onclick={() => step(true)} disabled={!info?.conflicts.length} title="Next conflict (F8)">↓ Next conflict</button>
+    <button onclick={() => step(false)} disabled={!info?.conflicts.length} title="Previous conflict (F7)">‹ Previous conflict</button>
+    <button onclick={() => step(true)} disabled={!info?.conflicts.length} title="Next conflict (F8)">Next conflict ›</button>
     {#if info}
       {#if !info.clean && !info.stats.unresolved}
         <span class="counter open" title="Saving asks whether to keep them">Conflict markers in the result</span>
@@ -984,7 +984,7 @@
       <span>{info.encoding}{info.syntax ? ` · ${info.syntax}` : ""}</span>
       <span class="grow"></span>
       {#if savedNote}<span>{savedNote}</span>{/if}
-      <span>F7/F8 conflicts · Alt+←/→ take a side · Alt+↓ both{suggestionText.size ? " · Alt+S syntax-aware" : ""} · click a result line to edit</span>
+      <span>F7 / F8: previous / next conflict · click a result line to edit · <kbd>?</kbd> all keys</span>
     </div>
   {/if}
 </div>

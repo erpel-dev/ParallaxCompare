@@ -815,6 +815,8 @@ pub fn write_back(
 /// Source files larger than this are compared by bytes only (a minified
 /// bundle of 4 MB takes about a second).
 const MAX_SOURCE_COMPARE: usize = 16 * 1024 * 1024;
+/// JSON files up to this size are compared as data for the similar status.
+const MAX_JSON_COMPARE: usize = 64 * 1024 * 1024;
 
 /// Whether [`content_equal`] can apply to a file, judged by its name alone.
 pub fn has_content_rule(name: &str) -> bool {
@@ -1016,6 +1018,11 @@ fn content_equal_with(name: &str, left: &[u8], right: &[u8], renders: &mut Rende
         }
         Kind::Toml => {
             return data::same_toml(left, right)?.then_some("same data, only formatting, order or comments differ");
+        }
+        // Like YAML and TOML: equal as data. Numbers keep their spelling (1 is not 1.0).
+        Kind::Json if left.len().max(right.len()) <= MAX_JSON_COMPARE => {
+            let parse = |b: &[u8]| serde_json::from_slice::<serde_json::Value>(b).ok();
+            return (parse(left)? == parse(right)?).then_some("same data, only formatting or key order differ");
         }
         Kind::Rst => {
             let (l, r) = (text::decode(left).text, text::decode(right).text);
@@ -1411,9 +1418,19 @@ mod tests {
                 && has_content_rule("conan-create.json")
                 && has_content_rule("package.json")
         );
-        // Any .json name can hold a S-CORE configuration, but ordinary package
-        // manifests do not acquire a semantic-equivalence rule.
-        assert_eq!(content_equal("package.json", br#"{"version":"1.0"}"#, br#"{ "version": "1.0" }"#), None);
+        // Plain JSON is equal as data, like YAML: formatting and key order do not count.
+        assert!(
+            content_equal(
+                "package.json",
+                br#"{"version":"1.0","a":[1,2]}"#,
+                b"{\n  \"a\": [1, 2],\n  \"version\": \"1.0\"\n}\n"
+            )
+            .is_some()
+        );
+        assert_eq!(content_equal("package.json", br#"{"version":"1.0"}"#, br#"{"version":"1.1"}"#), None);
+        assert_eq!(content_equal("a.json", br#"{"n":1}"#, br#"{"n":1.0}"#), None);
+        assert_eq!(content_equal("a.json", br#"{"a":[1,2]}"#, br#"{"a":[2,1]}"#), None);
+        assert_eq!(content_equal("a.json", b"{not json", b"{not json "), None);
 
         // conanfile.txt and profiles.
         let (c1, c2) = (fixture("conan/conanfile-v1.txt"), fixture("conan/conanfile-v2.txt"));

@@ -497,6 +497,9 @@ struct CompareProgress {
     /// What is known of the result so far, since the last progress event.
     #[serde(skip_serializing_if = "Option::is_none")]
     partial: Option<compare::Partial>,
+    /// Slow work going on now, such as "Decompressing release.7z".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    activity: Option<String>,
 }
 
 #[tauri::command]
@@ -530,7 +533,8 @@ pub async fn run_compare(
                 std::thread::sleep(Duration::from_millis(120));
                 let files = control.files_done.load(Ordering::Relaxed);
                 let partial = control.take_partial();
-                let _ = app.emit("compare-progress", CompareProgress { session: id, files, partial });
+                let activity = parallax_core::activity::current();
+                let _ = app.emit("compare-progress", CompareProgress { session: id, files, partial, activity });
             }
         });
     }
@@ -838,6 +842,8 @@ pub struct FileDiffInfo {
     image: Option<ImageView>,
     /// Something the user should know, e.g. why a requested view is not shown.
     note: Option<String>,
+    /// Shown in its bytes (Text, Hex): the view in which the files are equal.
+    equal_view: Option<ViewOption>,
 }
 
 fn missing_side() -> SideInfo {
@@ -963,12 +969,23 @@ pub async fn open_file_diff(
         let mut note = None;
         // The texts of the chosen view, when finding it already made them.
         let mut rendered = None;
-        // ≈ similar files open in the view where they are equal, and say why.
-        if view.is_none()
-            && !identical
-            && let (Some(l), Some(r)) = (&left_data, &right_data)
-            && let Some(convert::Similar { view: similar, reason, texts }) = convert::similar_view(&name, l, r, &views)
-        {
+        // ≈ similar files open in the view where they are equal, and say why. Shown in
+        // their original bytes, the view where they are equal is offered instead.
+        let mut equal_view = None;
+        let similar = match (&left_data, &right_data) {
+            (Some(l), Some(r)) if !identical && (view.is_none() || matches!(chosen, View::Text | View::Hex)) => {
+                convert::similar_view(&name, l, r, &views)
+            }
+            _ => None,
+        };
+        let similar = match similar {
+            Some(found) if view.is_some() => {
+                equal_view = Some(ViewOption { id: found.view, label: found.view.label() });
+                None
+            }
+            other => other,
+        };
+        if let Some(convert::Similar { view: similar, reason, texts }) = similar {
             chosen = similar;
             // Flatbuffer data needs the schemas the generic rendering does not have.
             rendered = texts.filter(|_| similar != View::FlatbufferData);
@@ -1158,6 +1175,7 @@ pub async fn open_file_diff(
             views: view_options,
             image,
             note,
+            equal_view,
         };
         Ok((
             info,

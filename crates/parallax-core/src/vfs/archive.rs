@@ -314,7 +314,7 @@ impl ArchiveFs {
         let mut index = Index::new();
         let backend = match format {
             ArchiveFormat::Zip => open_zip(data, &mut index)?,
-            ArchiveFormat::SevenZ => open_7z(data, &mut index)?,
+            ArchiveFormat::SevenZ => open_7z(data, &mut index, &label)?,
             _ => open_tar(data, format, &mut index)?,
         };
         Ok(ArchiveFs { label, index, backend })
@@ -357,7 +357,7 @@ fn open_zip(data: ArchiveData, index: &mut Index) -> Result<Backend> {
     Ok(Backend::Zip { archive, index_of })
 }
 
-fn open_7z(data: ArchiveData, index: &mut Index) -> Result<Backend> {
+fn open_7z(data: ArchiveData, index: &mut Index, label: &str) -> Result<Backend> {
     let archive =
         sevenz_rust2::Archive::read(&mut data.reader(), &sevenz_rust2::Password::empty()).map_err(Error::archive)?;
     let mut index_of = HashMap::new();
@@ -392,7 +392,7 @@ fn open_7z(data: ArchiveData, index: &mut Index) -> Result<Backend> {
         }
     }
     let solid =
-        SolidBlocks(files_per_block.iter().map(|&n| (n > 1).then(|| Arc::new(SolidBlock::default()))).collect());
+        SolidBlocks(files_per_block.iter().map(|&n| (n > 1).then(|| Arc::new(SolidBlock::named(label)))).collect());
     Ok(Backend::SevenZ { data, archive: Arc::new(archive), index_of, solid, ends })
 }
 
@@ -567,6 +567,8 @@ struct SolidBlock {
     changed: parking_lot::Condvar,
     /// Files beyond the memory budget.
     spool: Mutex<Option<Spool>>,
+    /// The archive's file name, for progress.
+    name: String,
 }
 
 #[derive(Default)]
@@ -593,6 +595,11 @@ enum Decoded {
 }
 
 impl SolidBlock {
+    fn named(label: &str) -> Self {
+        let name = label.rsplit(['/', '\\']).next().unwrap_or(label).to_string();
+        SolidBlock { name, ..Default::default() }
+    }
+
     /// Waits until `path` is decoded, starting the decoder when it is not running.
     fn get(
         self: &Arc<Self>,
@@ -603,6 +610,8 @@ impl SolidBlock {
         threads: u32,
     ) -> Result<Option<Decoded>> {
         let mut st = self.state.lock();
+        // One activity for the whole wait: each decoded file wakes the waiters.
+        let mut decompressing = None;
         loop {
             if let Some(found) = st.files.get(path) {
                 return Ok(Some(found.clone()));
@@ -634,6 +643,7 @@ impl SolidBlock {
             }
             st.waiting += 1;
             self.changed.notify_all();
+            decompressing.get_or_insert_with(|| crate::activity::begin(format!("Decompressing {}", self.name)));
             self.changed.wait(&mut st);
             st.waiting -= 1;
         }

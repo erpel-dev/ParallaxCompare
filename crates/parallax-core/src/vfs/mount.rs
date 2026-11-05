@@ -78,6 +78,7 @@ impl ArchiveMount {
             return Ok(archive.clone());
         }
         let label = format!("{}/{}", vfs.label(), inner);
+        let _reading = crate::activity::begin(format!("Reading {}", split_parent(inner).1));
         let archive = Arc::new(match vfs.local_path(inner) {
             Some(path) => ArchiveFs::open_file(&path, format, label)?,
             None => ArchiveFs::open(vfs.read(inner)?, format, label)?,

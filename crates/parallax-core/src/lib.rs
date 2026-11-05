@@ -5,6 +5,7 @@
 //! text diff ([`textdiff`]) and the highlighter ([`highlight`]) only ever see
 //! those trees, so any source can be compared against any other source.
 
+pub mod activity;
 pub mod compare;
 pub mod conflicts;
 pub mod convert;

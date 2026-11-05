@@ -9,15 +9,32 @@
 </script>
 
 <script lang="ts">
-  let { items, value, onSelect, disabled = false, label = "Show", hint = "" }: {
+  import type { Snippet } from "svelte";
+
+  let { items, value, onSelect, disabled = false, label = "Show", hint = "", legend }: {
     items: CountFilter[];
     value: string;
     onSelect: (id: string) => void;
     disabled?: boolean;
     label?: string;
     hint?: string;
+    /** What the statuses mean, opened from the "?" button. */
+    legend?: Snippet;
   } = $props();
+
+  let open = $state(false);
+  let el = $state<HTMLDivElement>();
+
+  /** Opens the legend; also from the command palette. */
+  export function showLegend() {
+    open = true;
+  }
 </script>
+
+<svelte:window
+  onmousedown={(e) => open && el && !el.contains(e.target as Node) && (open = false)}
+  onkeydown={(e) => open && e.key === "Escape" && (open = false)}
+/>
 
 <div class="filters" role="group" aria-label="Filter comparison by status">
   <span class="label">{label}</span>
@@ -29,6 +46,12 @@
       {item.label} <b>{item.count.toLocaleString()}</b>
     </button>
   {/each}
+  {#if legend}
+    <div class="legendwrap" bind:this={el}>
+      <button class="help" class:on={open} aria-expanded={open} title="What the statuses mean" aria-label="What the statuses mean" onclick={() => (open = !open)}>?</button>
+      {#if open}<div class="legend" role="dialog" aria-label="What the statuses mean">{@render legend()}</div>{/if}
+    </div>
+  {/if}
   {#if hint}<span class="hint">{hint}</span>{/if}
 </div>
 
@@ -46,4 +69,20 @@
   .right { background: var(--right-only); }
   .error { background: var(--error); }
   .hint { margin-left: auto; font-size: 11px; color: var(--dim); }
+  .legendwrap { position: relative; }
+  .help { width: 22px; height: 22px; justify-content: center; padding: 0; border-radius: 50%; font-weight: 600; }
+  .help.on { border-color: var(--accent); }
+  .legend {
+    position: absolute; top: calc(100% + 6px); left: 0; z-index: 70; width: 420px; max-width: 80vw;
+    display: grid; gap: 7px; padding: 12px 14px; font-size: 12.5px; line-height: 1.4; white-space: normal;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  }
+  .legend :global(.lrow) { display: grid; grid-template-columns: 18px 82px 1fr; gap: 6px; align-items: baseline; }
+  .legend :global(.g) { font-family: var(--mono); text-align: center; }
+  .legend :global(.foot) { border-top: 1px solid var(--line); padding-top: 8px; color: var(--dim); }
+  .legend :global(.on) { color: var(--fg); font-weight: 600; }
+  .legend :global(.g.sim) { color: var(--similar); }
+  .legend :global(.g.diff) { color: var(--diff); }
+  .legend :global(.g.left) { color: var(--left-only); }
+  .legend :global(.g.right) { color: var(--right-only); }
 </style>

@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from "svelte";
   import { listen } from "@tauri-apps/api/event";
-  import { ask, open } from "@tauri-apps/plugin-dialog";
+  import { open } from "@tauri-apps/plugin-dialog";
+  import { ask } from "./confirm.svelte";
   import {
     api,
     defaultDiffOptions,
@@ -145,13 +146,13 @@
   const projection = $derived(new RowProjection(info?.rowRuns ?? [], rowFilter));
   const displayTotal = $derived(projection.length);
   const rowFilters = $derived<CountFilter[]>([
-    { id: "all", label: "All rows", count: total },
-    { id: "diffs", label: "All differences", count: (info?.stats.changed ?? 0) + (info?.stats.added ?? 0) + (info?.stats.removed ?? 0), tone: "different" },
-    { id: "equal", label: "Same", count: total - (info?.stats.changed ?? 0) - (info?.stats.added ?? 0) - (info?.stats.removed ?? 0) - (info?.stats.minor ?? 0), tone: "same" },
-    { id: "minor", label: "Ignored", count: info?.stats.minor ?? 0, title: "Rows differing only in ignored whitespace or case", tone: "similar" },
-    { id: "changed", label: "Changed", count: info?.stats.changed ?? 0, tone: "different" },
-    { id: "removed", label: "Removed (left only)", count: info?.stats.removed ?? 0, tone: "left" },
-    { id: "added", label: "Added (right only)", count: info?.stats.added ?? 0, tone: "right" },
+    { id: "all", label: "All", count: total, title: "Show all lines" },
+    { id: "diffs", label: "All differences", count: (info?.stats.changed ?? 0) + (info?.stats.added ?? 0) + (info?.stats.removed ?? 0), title: "Different, left-only and right-only lines", tone: "different" },
+    { id: "equal", label: "Same", count: total - (info?.stats.changed ?? 0) - (info?.stats.added ?? 0) - (info?.stats.removed ?? 0) - (info?.stats.minor ?? 0), title: "Lines that are the same on both sides", tone: "same" },
+    { id: "minor", label: "Similar", count: info?.stats.minor ?? 0, title: "Lines that differ only in ignored whitespace or case", tone: "similar" },
+    { id: "changed", label: "Different", count: info?.stats.changed ?? 0, title: "Lines that differ (removed on the left, added on the right)", tone: "different" },
+    { id: "removed", label: "Left only", count: info?.stats.removed ?? 0, title: "Lines only on the left (removed)", tone: "left" },
+    { id: "added", label: "Right only", count: info?.stats.added ?? 0, title: "Lines only on the right (added)", tone: "right" },
   ]);
   const projectedSections = $derived.by(() => {
     const out: { index: number; start: number; end: number; source: number }[] = [];
@@ -1181,6 +1182,17 @@
 
   /** Whitespace, case and grammar changes keep the edits. */
   let pathbars = $state<PathBar[]>([]);
+  /** Whether a view shows the files' bytes as they are, or something made from them. */
+  const viewKind = (id: string) => (id === "text" ? " (original)" : id === "hex" ? " (bytes)" : id === "image" ? "" : " (generated)");
+  const generated = $derived(!!info && !["text", "hex", "image"].includes(info.view));
+
+  function switchView(id: View) {
+    if (anyDirty) return;
+    view = id;
+    syntaxOverride = "";
+    load();
+  }
+
   const hasSyntax = $derived(
     info?.view === "text" ||
       info?.view === "prettyXml" ||
@@ -1447,7 +1459,7 @@
       return;
     }
     // Two empty files: typing, Enter or F2 starts the first line.
-    if (info?.rows === 0 && info.view === "text" && !mod && !e.altKey && (e.key.length === 1 || e.key === "Enter" || e.key === "F2")) {
+    if (info?.rows === 0 && info.view === "text" && !mod && !e.altKey && ((e.key.length === 1 && e.key !== "?") || e.key === "Enter" || e.key === "F2")) {
       const side = editable[activeSide] ? activeSide : activeSide === 0 ? 1 : 0;
       if (editable[side]) {
         e.preventDefault();
@@ -1455,8 +1467,9 @@
         return;
       }
     }
-    // Typing on a selected line of an editable side edits it, from its end.
-    if (e.key.length === 1 && !mod && !e.altKey && selected !== null && editable[activeSide]) {
+    // Typing on a selected line of an editable side edits it, from its end. "?"
+    // opens the key list instead; Enter or F2 open the editor for it.
+    if (e.key.length === 1 && e.key !== "?" && !mod && !e.altKey && selected !== null && editable[activeSide]) {
       e.preventDefault();
       openEditor(activeSide, selected, undefined, e.key);
       return;
@@ -1611,7 +1624,7 @@
     {#if info && info.views.length > 1}
       <select bind:value={view} onchange={() => { syntaxOverride = ""; load(); }} disabled={anyDirty} title={anyDirty ? "Save or undo the edits to change the view" : "How the files are shown"}>
         {#each info.views as v (v.id)}
-          <option value={v.id}>{v.label}</option>
+          <option value={v.id}>{v.label}{viewKind(v.id)}</option>
         {/each}
       </select>
       <span class="sep"></span>
@@ -1627,8 +1640,8 @@
       </Dropdown>
     {/if}
 {#if info?.view !== "image"}
-    <button onclick={() => next(-1)} disabled={!projectedSections.length} title="Previous difference (F7)">◀ Prev</button>
-    <button onclick={() => next(1)} disabled={!projectedSections.length} title="Next difference (F8)">Next ▶</button>
+    <button onclick={() => next(-1)} disabled={!projectedSections.length} title="Previous difference (F7)">‹ Previous</button>
+    <button onclick={() => next(1)} disabled={!projectedSections.length} title="Next difference (F8)">Next difference ›</button>
     {#if info}
       <span class="count" title={shownSection >= 0 || !projectedSections.length ? undefined : "No difference on screen; the view is between these two"}
         >{shownSection >= 0
@@ -1642,15 +1655,17 @@
     {/if}
     {#if editable[0] || editable[1]}
       <span class="sep"></span>
-      <button onclick={() => copySection(currentSection, 0)} disabled={!editable[0] || currentSection < 0} title="Copy the current difference to the left side (Alt+←)">Copy ←</button>
-      <button onclick={() => copySection(currentSection, 1)} disabled={!editable[1] || currentSection < 0} title="Copy the current difference to the right side (Alt+→)">Copy →</button>
-      <button onclick={undo} disabled={!canUndo} title="Undo (Ctrl+Z)">↶</button>
-      <button onclick={redo} disabled={!canRedo} title="Redo (Ctrl+Y)">↷</button>
+      <button onclick={() => copySection(currentSection, 0)} disabled={!editable[0] || currentSection < 0} title="Copy the current difference to the left side (Alt+←)">← Copy to left</button>
+      <button onclick={() => copySection(currentSection, 1)} disabled={!editable[1] || currentSection < 0} title="Copy the current difference to the right side (Alt+→)">Copy to right →</button>
+      <button onclick={undo} disabled={!canUndo} title="Undo (Ctrl+Z)">↶ Undo</button>
+      <button onclick={redo} disabled={!canRedo} title="Redo (Ctrl+Y)">↷ Redo</button>
     {/if}
     <span class="sep"></span>
     <button class:on={findOpen} onclick={() => (findOpen ? closeFind() : openFind())} disabled={!info} title="Find in both files (Ctrl+F)">Find</button>
     <span class="grow"></span>
+    {#if anyDirty}<button class="primary" onclick={() => save()} disabled={!!busy} title="Save the changed sides (Ctrl+S)">Save</button>{/if}
     <Dropdown label="Options" title="Whitespace, case, diff algorithm, syntax highlighting" changed={optionsChanged}>
+      <p class="scope">Applies to this file comparison. Whitespace and case rules mark lines ≈ Similar.</p>
       <div class="field">
         <span>Whitespace</span>
         <select bind:value={options.whitespace} onchange={settingsChanged}>
@@ -1679,7 +1694,7 @@
   </div>
 
   {#if info && info.view !== "image"}
-    <FilterBar items={rowFilters} value={rowFilter} onSelect={(id) => setRowFilter(id as RowFilter)} disabled={loading || awaiting}
+    <FilterBar items={rowFilters} value={rowFilter} onSelect={(id) => setRowFilter(id as RowFilter)} disabled={loading || awaiting} legend={lineLegend}
       hint={rowFilter !== "all" ? "Editing and range selections show all rows" : ""} />
     {#if rowFilter !== "all"}
       <div class="filter-scope">
@@ -1700,7 +1715,7 @@
         oninput={searchSoon}
         onkeydown={findKey}
         placeholder="Find in both files"
-        title="Searches all rows; revealing a hidden match switches to All rows"
+        title="Searches all lines; revealing a hidden match switches to All"
         spellcheck="false"
       />
       <button class="opt" class:on={findOptions.matchCase} onclick={() => toggle("matchCase")} title="Match case">Aa</button>
@@ -1740,6 +1755,19 @@
       {#if eolFix.right}<button onclick={() => setLineEndings(1, eolFix.right!)}>Use {eolFix.right} on the right</button>{/if}
     </div>
   {/if}
+  {#snippet lineLegend()}
+    <div class="lrow"><span class="g">=</span><b>Same</b><span>The line is the same on both sides</span></div>
+    <div class="lrow"><span class="g sim">≈</span><b>Similar</b><span>The lines differ only in what Options ignore{options.whitespace !== "exact" || options.ignoreCase ? "" : " (nothing is ignored now)"}</span></div>
+    <div class="lrow"><span class="g diff">≠</span><b>Different</b><span>The line differs</span></div>
+    <div class="lrow"><span class="g left">−</span><b>Left only</b><span>The line is only on the left (removed)</span></div>
+    <div class="lrow"><span class="g right">+</span><b>Right only</b><span>The line is only on the right (added)</span></div>
+    <div class="foot">
+      Ignored now:
+      <span class:on={options.whitespace !== "exact"}>{options.whitespace === "exact" ? "no whitespace" : options.whitespace === "normalize" ? "changes in whitespace" : "all whitespace"}</span> ·
+      <span class:on={options.ignoreCase}>{options.ignoreCase ? "case" : "no case differences"}</span>
+      · View: {info?.views.find((v) => v.id === info?.view)?.label ?? ""}{info ? viewKind(info.view) : ""}
+    </div>
+  {/snippet}
   {#snippet lineEditor(index: number, s: 0 | 1, fill: boolean, number: string)}
     <div class="ln" class:fill>{number}</div>
     <div class="code editing">
@@ -1764,13 +1792,19 @@
   {#if error}
     <div class="banner err">{error}</div>
   {:else if info?.note}
-    <div class="banner">{info.note}</div>
+    <div class="banner">{info.note}{#if generated && info.views.some((v) => v.id === "text")} <button class="bannerlink" onclick={() => switchView("text")}>Show the original text</button>{/if}</div>
+  {:else if info?.equalView && info.sections.length}
+    <div class="banner info">“{info.equalView.label}” shows <b>no differences</b>: the files differ only in bytes that view does not show. <button class="bannerlink" onclick={() => switchView(info!.equalView!.id)}>Show {info.equalView.label}</button></div>
   {:else if info?.identical && info.view !== "image"}
     <div class="banner ok">The files are identical.</div>
   {:else if info && info.view !== "image" && !info.sections.length && !loading}
     <div class="banner ok">
       No differences in this view{info.view !== "text" ? " — the files differ only in bytes this view does not show" : ""}{info.stats.minor ? ` (${info.stats.minor} ${info.stats.minor === 1 ? "line differs" : "lines differ"} only in ignored whitespace or case)` : ""}.
     </div>
+  {/if}
+
+  {#if generated && !info?.note && !error}
+    <div class="banner gen">Generated view “{info?.views.find((v) => v.id === info?.view)?.label}”: made from the files’ contents{editable[0] || editable[1] ? "; edits are written back into the files" : ", read-only"}.{#if info?.views.some((v) => v.id === "text")} <button class="bannerlink" onclick={() => switchView("text")}>Show the original text</button>{/if}</div>
   {/if}
 
   {#if info?.view === "image" && info.image}
@@ -1890,7 +1924,7 @@
       {#if uncommitted}
         <span class="nudge">{uncommitted.name} has uncommitted changes. <button class="link" onclick={compareWithHead} title="Compare it with its last commit (Alt+H)">Compare with HEAD</button> <button class="link dim" onclick={() => { uncommitted = null; uncommittedDismissed = true; }} aria-label="Dismiss">×</button></span>
       {/if}
-      <span class="hint">{editable[0] || editable[1] ? "Click to edit · Shift+click or the line number selects lines · Ctrl+C/X/V, Delete · Alt+←/→: copy difference · " : ""}F7 / F8: previous / next difference · Ctrl+F: find</span>
+      <span class="hint">{editable[0] || editable[1] ? "Click a line to edit · " : ""}F7 / F8: previous / next difference · <kbd>?</kbd> all keys</span>
     {/if}
   </div>
 </div>
@@ -1972,6 +2006,28 @@
   }
   .banner.ok {
     color: var(--right-only);
+  }
+  .banner.info {
+    background: color-mix(in srgb, var(--accent) 10%, var(--panel));
+  }
+  .banner.gen {
+    padding: 3px 12px;
+    color: var(--dim);
+    font-size: 12px;
+  }
+  .bannerlink {
+    border: none;
+    background: none;
+    padding: 0 4px;
+    color: var(--accent);
+    font: inherit;
+    cursor: pointer;
+  }
+  .scope {
+    margin: 0;
+    max-width: 280px;
+    color: var(--dim);
+    font-size: 11.5px;
   }
   .banner.err {
     color: var(--error);
