@@ -139,9 +139,13 @@ const MAX_ENTRY: u64 = 2 << 30;
 /// No 7z block is decoded beyond this; what does not fit in memory goes to disk.
 const MAX_BLOCK: u64 = 4 << 30;
 
-/// Decoded files of one solid 7z block kept in memory; the rest of the block goes
-/// to a temporary file. A solid block can hold gigabytes.
-const SOLID_MEMORY: usize = if cfg!(test) { 1 << 10 } else { 64 << 20 };
+/// Decoded files of solid 7z blocks kept in memory, for all blocks of all open
+/// archives together; the rest goes to temporary files. A solid block can hold
+/// gigabytes, and an archive many blocks.
+const SOLID_MEMORY: usize = if cfg!(test) { 1 << 10 } else { 128 << 20 };
+
+/// The memory all solid blocks keep now, at most [`SOLID_MEMORY`].
+static SOLID_MEMORY_USED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// A solid block's decoder stops after this long without a reader waiting for it,
 /// so idle archives do not hold a decoder (and its dictionary) each.
@@ -234,7 +238,10 @@ impl Spool {
     fn read(&self, span: Span) -> Result<Vec<u8>> {
         use std::io::{Seek, SeekFrom};
         let err = |e| Error::io("a temporary file for the tar stream", e);
-        let mut buf = Vec::with_capacity(span.len.min(READ_HINT as u64) as usize);
+        // The length is known and the bytes are in our own file: one exact allocation,
+        // instead of doubling (up to 2.5 times the file while growing).
+        let mut buf =
+            Vec::with_capacity(usize::try_from(span.len).map_err(|_| Error::Unsupported("too large".into()))?);
         let mut file = self.file.lock();
         file.seek(SeekFrom::Start(span.at)).map_err(err)?;
         file.by_ref().take(span.len).read_to_end(&mut buf).map_err(err)?;
@@ -594,6 +601,12 @@ enum Decoded {
     Spooled(Span),
 }
 
+impl Drop for SolidState {
+    fn drop(&mut self) {
+        SOLID_MEMORY_USED.fetch_sub(self.memory, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
 impl SolidBlock {
     fn named(label: &str) -> Self {
         let name = label.rsplit(['/', '\\']).next().unwrap_or(label).to_string();
@@ -709,11 +722,25 @@ impl SolidBlock {
     /// Keeps a decoded file: in memory while the block's budget lasts, else on disk.
     fn keep(&self, r: &mut dyn Read, size: u64) -> Result<Decoded> {
         let hint = entry_hint(size)?;
-        let fits = self.state.lock().memory + size as usize <= SOLID_MEMORY;
-        if fits {
+        use std::sync::atomic::Ordering;
+        let size_usize = usize::try_from(size).unwrap_or(usize::MAX);
+        let mut used = SOLID_MEMORY_USED.load(Ordering::Acquire);
+        let reserved = loop {
+            let Some(total) = used.checked_add(size_usize).filter(|&t| t <= SOLID_MEMORY) else { break false };
+            match SOLID_MEMORY_USED.compare_exchange_weak(used, total, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => break true,
+                Err(now) => used = now,
+            }
+        };
+        if reserved {
             let mut buf = Vec::with_capacity(hint);
-            r.take(size).read_to_end(&mut buf).map_err(Error::archive)?;
-            self.state.lock().memory += buf.len();
+            if let Err(e) = r.take(size).read_to_end(&mut buf) {
+                SOLID_MEMORY_USED.fetch_sub(size_usize, Ordering::AcqRel);
+                return Err(Error::archive(e));
+            }
+            // Reserved for `size`; the block gives back what it holds when dropped.
+            SOLID_MEMORY_USED.fetch_sub(size_usize - buf.len().min(size_usize), Ordering::AcqRel);
+            self.state.lock().memory += buf.len().min(size_usize);
             return Ok(Decoded::Memory(Arc::new(buf)));
         }
         let mut spool = self.spool.lock();

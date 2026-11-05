@@ -152,10 +152,7 @@ impl SourceSpec {
         if Path::new(text).exists() {
             return SourceSpec::Local { path: text.to_string() };
         }
-        // A remote repository: `url@rev:path`, or a link to a file or folder on GitHub & co.
-        if let Some(spec) = crate::remote::parse(text) {
-            return spec;
-        }
+        // A local repository first: `.@v1.0:src` looks like `user@host:path` too.
         if let Some(at) = text.rfind('@') {
             let (repo, rest) = (&text[..at], &text[at + 1..]);
             if !repo.is_empty() && Path::new(repo).is_dir() {
@@ -166,6 +163,10 @@ impl SourceSpec {
                     subpath: subpath.to_string(),
                 };
             }
+        }
+        // A remote repository: `url@rev:path`, or a link to a file or folder on GitHub & co.
+        if let Some(spec) = crate::remote::parse(text) {
+            return spec;
         }
         SourceSpec::Local { path: text.to_string() }
     }
@@ -726,6 +727,11 @@ mod tests {
         );
         assert_eq!(SourceSpec::parse(&repo), SourceSpec::Local { path: repo.clone() });
         assert_eq!(SourceSpec::parse("missing.zip!/bin"), SourceSpec::Local { path: "missing.zip!/bin".into() });
+        // `.@v1.0:src` is the current folder, not a remote `user@host:path`.
+        assert_eq!(
+            SourceSpec::parse(".@v0.0.13:crates/core"),
+            SourceSpec::GitRev { repo: ".".into(), rev: "v0.0.13".into(), subpath: "crates/core".into() }
+        );
     }
 
     #[test]
