@@ -14,6 +14,8 @@ pub enum Error {
     Git(String),
     #[error("archive: {0}")]
     Archive(String),
+    #[error("{0}")]
+    ArchiveResource(String),
     #[error("invalid source: {0}")]
     InvalidSource(String),
     #[error("not supported: {0}")]

@@ -178,8 +178,24 @@ pub(super) fn entry_hint(size: u64) -> Result<usize> {
 
 /// Reads the `size` bytes of an entry whose header says so.
 pub(super) fn read_entry(r: &mut dyn Read, size: u64) -> Result<Vec<u8>> {
-    let mut buf = Vec::with_capacity(entry_hint(size)?);
-    r.take(size).read_to_end(&mut buf).map_err(Error::archive)?;
+    let mut buf = Vec::new();
+    let allocation = |_| {
+        Error::ArchiveResource("Not enough memory to read an archive entry. Close other comparisons and retry.".into())
+    };
+    buf.try_reserve_exact(entry_hint(size)?).map_err(allocation)?;
+    let mut reader = r.take(size);
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        let n = reader.read(&mut chunk).map_err(Error::archive)?;
+        if n == 0 {
+            break;
+        }
+        if buf.len() + n > buf.capacity() {
+            let capacity = buf.capacity().saturating_mul(2).max(buf.len() + n).min(size as usize);
+            buf.try_reserve_exact(capacity - buf.len()).map_err(allocation)?;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
     Ok(buf)
 }
 
@@ -213,20 +229,72 @@ impl TarContent {
 /// The decompressed stream of a compressed tar, in a temporary file: a tar holds
 /// every entry, so keeping them in memory would let one archive take the machine.
 struct Spool {
-    file: Mutex<std::fs::File>,
+    file: Arc<Mutex<std::fs::File>>,
     len: u64,
+    context: Arc<SpoolContext>,
+}
+
+struct SpoolContext {
+    archive: String,
+    directory: std::path::PathBuf,
+}
+
+impl SpoolContext {
+    fn error(&self, e: std::io::Error) -> Error {
+        let full = e.kind() == std::io::ErrorKind::StorageFull
+            || (cfg!(windows) && matches!(e.raw_os_error(), Some(39 | 112)));
+        let reason = if full { "Temporary drive is full" } else { "Could not use temporary storage" };
+        Error::ArchiveResource(format!(
+            "{reason} while decompressing {}. Temporary directory: {}. Free space or choose another temporary directory, then retry. ({e})",
+            self.archive,
+            self.directory.display()
+        ))
+    }
+}
+
+/// Independent, bounded cursors serialize seeks and I/O, including on Windows,
+/// where offset reads change the file position. Readers retain the handle across
+/// cache cleanup.
+#[derive(Clone)]
+struct SpoolReader {
+    file: Arc<Mutex<std::fs::File>>,
+    context: Arc<SpoolContext>,
+    at: u64,
+    remaining: u64,
+}
+
+impl Read for SpoolReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let len = buf.len().min(self.remaining.min(usize::MAX as u64) as usize);
+        if len == 0 {
+            return Ok(0);
+        }
+        let mut file = self.file.lock();
+        let result = file.seek(SeekFrom::Start(self.at)).and_then(|_| file.read(&mut buf[..len]));
+        let n = result.map_err(|e| std::io::Error::other(self.context.error(e)))?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "decompressed archive entry is truncated",
+            ));
+        }
+        self.at += n as u64;
+        self.remaining -= n as u64;
+        Ok(n)
+    }
 }
 
 impl Spool {
-    fn new() -> Result<Self> {
-        let file = tempfile::tempfile().map_err(|e| Error::io("a temporary file for the tar stream", e))?;
-        Ok(Spool { file: Mutex::new(file), len: 0 })
+    fn new(archive: &str) -> Result<Self> {
+        let context = Arc::new(SpoolContext { archive: archive.into(), directory: std::env::temp_dir() });
+        let file = tempfile::tempfile_in(&context.directory).map_err(|e| context.error(e))?;
+        Ok(Spool { file: Arc::new(Mutex::new(file)), len: 0, context })
     }
 
     /// Appends `size` bytes of `r`, which the caller has already counted.
     fn append(&mut self, r: &mut dyn Read, size: u64) -> Result<Span> {
         use std::io::{Seek, SeekFrom};
-        let err = |e| Error::io("a temporary file for the tar stream", e);
+        let err = |e| self.context.error(e);
         let mut file = self.file.lock();
         file.seek(SeekFrom::Start(self.len)).map_err(err)?;
         let at = self.len;
@@ -236,19 +304,15 @@ impl Spool {
     }
 
     fn read(&self, span: Span) -> Result<Vec<u8>> {
-        use std::io::{Seek, SeekFrom};
-        let err = |e| Error::io("a temporary file for the tar stream", e);
-        // The length is known and the bytes are in our own file: one exact allocation,
-        // instead of doubling (up to 2.5 times the file while growing).
-        let mut buf =
-            Vec::with_capacity(usize::try_from(span.len).map_err(|_| Error::Unsupported("too large".into()))?);
-        let mut file = self.file.lock();
-        file.seek(SeekFrom::Start(span.at)).map_err(err)?;
-        file.by_ref().take(span.len).read_to_end(&mut buf).map_err(err)?;
+        let buf = read_entry(&mut self.open(span), span.len)?;
         if buf.len() as u64 != span.len {
-            return Err(Error::Unsupported("the tar archive is truncated".into()));
+            return Err(Error::Unsupported("the decompressed archive entry is truncated".into()));
         }
         Ok(buf)
+    }
+
+    fn open(&self, span: Span) -> SpoolReader {
+        SpoolReader { file: self.file.clone(), context: self.context.clone(), at: span.at, remaining: span.len }
     }
 }
 
@@ -458,7 +522,7 @@ fn open_tar(data: ArchiveData, format: ArchiveFormat, index: &mut Index) -> Resu
                     count(&mut expanded, size, limit)?;
                     let spool = match &mut spool {
                         Some(spool) => spool,
-                        None => spool.insert(Spool::new()?),
+                        None => spool.insert(Spool::new("the tar archive")?),
                     };
                     TarContent::Spooled(spool.append(&mut entry, size)?)
                 }
@@ -576,6 +640,7 @@ struct SolidBlock {
     spool: Mutex<Option<Spool>>,
     /// The archive's file name, for progress.
     name: String,
+    label: String,
 }
 
 #[derive(Default)]
@@ -592,13 +657,14 @@ struct SolidState {
     restart: bool,
     finished: bool,
     error: Option<String>,
+    retryable: bool,
     cancelled: bool,
 }
 
 #[derive(Clone)]
 enum Decoded {
     Memory(Arc<Vec<u8>>),
-    Spooled(Span),
+    Spooled(SpoolReader),
 }
 
 impl Drop for SolidState {
@@ -610,7 +676,7 @@ impl Drop for SolidState {
 impl SolidBlock {
     fn named(label: &str) -> Self {
         let name = label.rsplit(['/', '\\']).next().unwrap_or(label).to_string();
-        SolidBlock { name, ..Default::default() }
+        SolidBlock { name, label: label.into(), ..Default::default() }
     }
 
     /// Waits until `path` is decoded, starting the decoder when it is not running.
@@ -623,6 +689,12 @@ impl SolidBlock {
         threads: u32,
     ) -> Result<Option<Decoded>> {
         let mut st = self.state.lock();
+        // All readers of the failed attempt see its error. A later request may
+        // retry a resource failure after space or memory has become available.
+        if st.retryable && !st.running && st.waiting == 0 {
+            st.error = None;
+            st.retryable = false;
+        }
         // One activity for the whole wait: each decoded file wakes the waiters.
         let mut decompressing = None;
         loop {
@@ -630,7 +702,7 @@ impl SolidBlock {
                 return Ok(Some(found.clone()));
             }
             if let Some(e) = &st.error {
-                return Err(Error::Unsupported(e.clone()));
+                return Err(Error::ArchiveResource(e.clone()));
             }
             if st.finished {
                 return Ok(None);
@@ -646,13 +718,13 @@ impl SolidBlock {
                 st.threads = threads.max(st.threads);
                 st.restart = false;
                 let (me, data, archive) = (self.clone(), data.clone(), archive.clone());
-                std::thread::Builder::new()
-                    .name("7z block".into())
-                    .spawn({
-                        let threads = st.threads;
-                        move || me.decode(&data, &archive, block, threads)
-                    })
-                    .map_err(|e| Error::io("a thread to decode the 7z block", e))?;
+                if let Err(e) = std::thread::Builder::new().name("7z block".into()).spawn({
+                    let threads = st.threads;
+                    move || me.decode(&data, &archive, block, threads)
+                }) {
+                    st.running = false;
+                    return Err(Error::io("a thread to decode the 7z block", e));
+                }
             }
             st.waiting += 1;
             self.changed.notify_all();
@@ -666,10 +738,9 @@ impl SolidBlock {
     fn bytes(&self, decoded: Decoded) -> Result<Data> {
         match decoded {
             Decoded::Memory(bytes) => Ok(Data::from_shared(bytes)),
-            Decoded::Spooled(span) => {
-                let spool = self.spool.lock();
-                let spool = spool.as_ref().ok_or_else(|| Error::Unsupported("the decoded 7z block is gone".into()))?;
-                Ok(Data::from_vec(spool.read(span)?))
+            Decoded::Spooled(mut reader) => {
+                let size = reader.remaining;
+                Ok(Data::from_vec(read_entry(&mut reader, size)?))
             }
         }
     }
@@ -680,48 +751,79 @@ impl SolidBlock {
     fn decode(&self, data: &ArchiveData, archive: &sevenz_rust2::Archive, block: usize, threads: u32) {
         let password = sevenz_rust2::Password::empty();
         let mut source = data.reader();
-        let result = sevenz_rust2::BlockDecoder::new(threads, block, archive, &password, &mut source).for_each_entries(
-            &mut |entry, r| {
-                if entry.is_directory {
-                    return Ok(true);
-                }
-                let Some(path) = normalize(&entry.name) else { return Ok(true) };
-                let known = self.state.lock().files.contains_key(&path);
-                if known {
-                    // Decoded before the decoder last stopped: skipped, not kept twice.
-                    std::io::copy(&mut r.take(entry.size), &mut std::io::sink())?;
-                } else {
-                    let decoded = self.keep(r, entry.size).map_err(std::io::Error::other)?;
-                    self.state.lock().files.insert(path, decoded);
-                }
-                let mut st = self.state.lock();
-                self.changed.notify_all();
-                if st.restart {
-                    return Ok(false);
-                }
-                while st.waiting == 0 && !st.cancelled && !st.restart {
-                    if self.changed.wait_for(&mut st, SOLID_IDLE).timed_out() && st.waiting == 0 {
+        let mut failure = None;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sevenz_rust2::BlockDecoder::new(threads, block, archive, &password, &mut source).for_each_entries(
+                &mut |entry, r| {
+                    if entry.is_directory {
+                        return Ok(true);
+                    }
+                    let Some(path) = normalize(&entry.name) else { return Ok(true) };
+                    let known = self.state.lock().files.contains_key(&path);
+                    if known {
+                        // Decoded before the decoder last stopped: skipped, not kept twice.
+                        std::io::copy(&mut r.take(entry.size), &mut std::io::sink())?;
+                    } else {
+                        let decoded = self.keep(r, entry.size).map_err(|e| {
+                            let message = e.to_string();
+                            failure = Some(e);
+                            std::io::Error::other(message)
+                        })?;
+                        self.state.lock().files.insert(path, decoded);
+                    }
+                    let mut st = self.state.lock();
+                    self.changed.notify_all();
+                    if st.restart {
                         return Ok(false);
                     }
-                }
-                Ok(!st.cancelled && !st.restart)
-            },
-        );
+                    while st.waiting == 0 && !st.cancelled && !st.restart {
+                        if self.changed.wait_for(&mut st, SOLID_IDLE).timed_out() && st.waiting == 0 {
+                            return Ok(false);
+                        }
+                    }
+                    Ok(!st.cancelled && !st.restart)
+                },
+            )
+        }));
+        self.finish_decode(result, failure);
+    }
+
+    fn finish_decode(
+        &self,
+        result: std::thread::Result<std::result::Result<bool, sevenz_rust2::Error>>,
+        failure: Option<Error>,
+    ) {
         let mut st = self.state.lock();
         st.running = false;
         match result {
-            Err(e) => st.error = Some(Error::archive(e).to_string()),
+            Err(_) => {
+                st.error =
+                    Some(format!("Could not decompress {}: internal decoder error. Retry the comparison.", self.label));
+                st.retryable = true;
+            }
+            Ok(Err(e)) => {
+                st.retryable = matches!(&failure, Some(Error::ArchiveResource(_)));
+                st.error = Some(failure.map_or_else(|| Error::archive(e).to_string(), |e| e.to_string()));
+            }
             // The whole block: what a reader still waits for is not in it.
-            Ok(true) => st.finished = true,
+            Ok(Ok(true)) => st.finished = true,
             // Stopped while idle, for a faster decoder, or dropped: a read starts it again.
-            Ok(false) => {}
+            Ok(Ok(false)) => {}
+        }
+        if st.error.is_some() {
+            // A failed block cannot reuse its partial stream. Active readers
+            // retain their own handles; all other cached bytes are released now.
+            st.files.clear();
+            SOLID_MEMORY_USED.fetch_sub(st.memory, std::sync::atomic::Ordering::AcqRel);
+            st.memory = 0;
+            self.spool.lock().take();
         }
         self.changed.notify_all();
     }
 
     /// Keeps a decoded file: in memory while the block's budget lasts, else on disk.
     fn keep(&self, r: &mut dyn Read, size: u64) -> Result<Decoded> {
-        let hint = entry_hint(size)?;
+        entry_hint(size)?;
         use std::sync::atomic::Ordering;
         let size_usize = usize::try_from(size).unwrap_or(usize::MAX);
         let mut used = SOLID_MEMORY_USED.load(Ordering::Acquire);
@@ -733,11 +835,13 @@ impl SolidBlock {
             }
         };
         if reserved {
-            let mut buf = Vec::with_capacity(hint);
-            if let Err(e) = r.take(size).read_to_end(&mut buf) {
-                SOLID_MEMORY_USED.fetch_sub(size_usize, Ordering::AcqRel);
-                return Err(Error::archive(e));
-            }
+            let buf = match read_entry(r, size) {
+                Ok(buf) => buf,
+                Err(e) => {
+                    SOLID_MEMORY_USED.fetch_sub(size_usize, Ordering::AcqRel);
+                    return Err(e);
+                }
+            };
             // Reserved for `size`; the block gives back what it holds when dropped.
             SOLID_MEMORY_USED.fetch_sub(size_usize - buf.len().min(size_usize), Ordering::AcqRel);
             self.state.lock().memory += buf.len().min(size_usize);
@@ -745,13 +849,13 @@ impl SolidBlock {
         }
         let mut spool = self.spool.lock();
         if spool.is_none() {
-            *spool = Some(Spool::new()?);
+            *spool = Some(Spool::new(&self.label)?);
         }
         let span = spool.as_mut().expect("just created").append(r, size)?;
         if span.len != size {
             return Err(Error::Unsupported("the 7z block is truncated".into()));
         }
-        Ok(Decoded::Spooled(span))
+        Ok(Decoded::Spooled(spool.as_ref().expect("just created").open(span)))
     }
 }
 
@@ -804,6 +908,30 @@ impl Vfs for ArchiveFs {
     }
 
     fn open(&self, path: &str) -> Result<Box<dyn Read + Send>> {
+        check_rel(path)?;
+        if let Backend::SevenZ { index_of, .. } = &self.backend
+            && let Some(block) = self.solid_block_of(path)
+        {
+            let i = *index_of.get(path).ok_or_else(|| Error::NotFound(join(&self.label, path)))?;
+            let decoded = self.solid_file(block, i, path)?.ok_or_else(|| Error::NotFound(join(&self.label, path)))?;
+            return Ok(match decoded {
+                Decoded::Memory(bytes) => Box::new(Cursor::new(Data::from_shared(bytes))),
+                Decoded::Spooled(reader) => Box::new(reader),
+            });
+        }
+        if let Backend::Tar { data, contents, spool, .. } = &self.backend {
+            return Ok(match contents.get(path).ok_or_else(|| Error::NotFound(join(&self.label, path)))? {
+                TarContent::Direct(span) => {
+                    let mut reader = data.reader();
+                    reader.seek(SeekFrom::Start(span.at)).map_err(Error::archive)?;
+                    Box::new(reader.take(span.len))
+                }
+                TarContent::Spooled(span) => Box::new(
+                    spool.as_ref().ok_or_else(|| Error::Unsupported("the tar stream is missing".into()))?.open(*span),
+                ),
+                TarContent::Bytes(bytes) => Box::new(Cursor::new(Data::from_shared(bytes.clone()))),
+            });
+        }
         // Zip entries are decompressed while they are read, so a comparison that
         // stops at the first difference decompresses only up to it.
         if let Backend::Zip { archive, index_of } = &self.backend {
@@ -898,6 +1026,94 @@ fn civil_to_unix(y: i64, m: i64, d: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn temporary_storage_errors_identify_the_archive_and_directory() {
+        let context = SpoolContext { archive: "C:\\models\\left.7z".into(), directory: "C:\\Users\\test\\Temp".into() };
+        let message = context.error(std::io::Error::from(std::io::ErrorKind::StorageFull)).to_string();
+        assert!(message.contains("Temporary drive is full"), "{message}");
+        assert!(message.contains("left.7z") && message.contains("C:\\Users\\test\\Temp"));
+        assert!(!message.contains("tar") && !message.contains("not supported"));
+        #[cfg(windows)]
+        for code in [39, 112] {
+            assert!(
+                context.error(std::io::Error::from_raw_os_error(code)).to_string().contains("Temporary drive is full")
+            );
+        }
+    }
+
+    #[test]
+    fn spooled_streams_have_independent_positions_and_survive_cache_cleanup() {
+        let mut spool = Spool::new("streams.7z").unwrap();
+        let a = spool.append(&mut Cursor::new(b"abcdef"), 6).unwrap();
+        let b = spool.append(&mut Cursor::new(b"1234"), 4).unwrap();
+        let (mut left, mut right) = (spool.open(a), spool.open(b));
+        // Reads of an existing entry can overlap appends by the decoder. In
+        // particular, a Windows read must not redirect the writer's file cursor.
+        let repeated = spool.open(a);
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                for _ in 0..100 {
+                    let mut reader = repeated.clone();
+                    let mut bytes = [0; 6];
+                    reader.read_exact(&mut bytes).unwrap();
+                    assert_eq!(&bytes, b"abcdef");
+                }
+            });
+            for _ in 0..100 {
+                let span = spool.append(&mut Cursor::new(b"tail"), 4).unwrap();
+                assert_eq!(spool.read(span).unwrap(), b"tail");
+            }
+        });
+        drop(spool);
+        let mut bytes = [0; 2];
+        left.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, b"ab");
+        right.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, b"12");
+        left.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, b"cd");
+        let mut tail = Vec::new();
+        right.read_to_end(&mut tail).unwrap();
+        assert_eq!(&tail, b"34");
+        assert_eq!(right.read(&mut bytes).unwrap(), 0);
+    }
+
+    #[test]
+    fn failed_solid_block_releases_its_cache_and_retries_without_reopening() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        for name in ["a.bin", "b.bin"] {
+            std::fs::write(src.join(name), vec![42; 8192]).unwrap();
+        }
+        let path = dir.path().join("retry.7z");
+        let mut writer = sevenz_rust2::ArchiveWriter::create(&path).unwrap();
+        writer.set_content_methods(vec![sevenz_rust2::EncoderConfiguration::new(sevenz_rust2::EncoderMethod::COPY)]);
+        writer.push_source_path(&src, |_| true).unwrap();
+        writer.finish().unwrap();
+        let fs = ArchiveFs::open_file(&path, ArchiveFormat::SevenZ, "retry.7z").unwrap();
+        let mut reader = fs.open("a.bin").unwrap();
+        let block = fs.solid_block_of("a.bin").unwrap();
+        // Let the real decoder exit before applying a failed-attempt outcome.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while block.state.lock().running && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!block.state.lock().running);
+        assert!(block.spool.lock().is_some());
+        let error =
+            block.spool.lock().as_ref().unwrap().context.error(std::io::Error::from(std::io::ErrorKind::StorageFull));
+        block.finish_decode(Ok(Err(std::io::Error::other("write failed").into())), Some(error));
+        assert!(block.spool.lock().is_none(), "the failed temporary file is released");
+        assert!(block.state.lock().files.is_empty());
+        // An already-open cursor still owns the data it was handed.
+        let mut old = Vec::new();
+        reader.read_to_end(&mut old).unwrap();
+        assert_eq!(old, vec![42; 8192]);
+        assert_eq!(&*fs.read("b.bin").unwrap(), &vec![42; 8192]);
+        assert!(block.state.lock().error.is_none());
+    }
 
     /// A solid block decodes as far as reads need, keeps what it decoded (beyond the
     /// memory budget on disk), and serves reads in any order and from any thread.

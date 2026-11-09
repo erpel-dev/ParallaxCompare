@@ -225,6 +225,16 @@
     void version;
     return result ? (flat ? countFlatFiles(flatRows) : countFiles(result.root)) : null;
   });
+  const comparisonError = $derived.by(() => {
+    if (running || !result?.summary.errors) return "";
+    const pending = [result.root];
+    while (pending.length) {
+      const node = pending.pop()!;
+      if (node.status === "error" && node.message) return node.message;
+      pending.push(...(node.children ?? []));
+    }
+    return "Some entries could not be read or compared.";
+  });
   const countFilters = $derived<CountFilter[]>([
     { id: "all", label: "All", count: counts?.files ?? 0, title: "Show all files" },
     { id: "diffs", label: "All differences", count: counts ? matchingCount(counts, "diffs") : 0, title: "Changed, left-only, right-only, and error entries", tone: "different" },
@@ -1176,6 +1186,15 @@
     </div>
   {/if}
 
+  {#if comparisonError}
+    <div class="comparison-error" role="alert">
+      <strong>Comparison incomplete — {result?.summary.errors.toLocaleString()} entries could not be compared.</strong>
+      <span>{comparisonError}</span>
+      <button class="small" onclick={() => setFilter("error")}>Show errors</button>
+      <button class="small" onclick={() => run(true)}>Retry comparison</button>
+    </div>
+  {/if}
+
   <FilterBar items={countFilters} value={filter} onSelect={(id) => setFilter(id as Filter)} disabled={!result} {legend}
     hint={running ? "Totals update during comparison" : flatRows.some((r) => r.pending) ? "Matched files are still being compared" : ""} />
   {#if result && filter !== "all"}
@@ -1313,6 +1332,17 @@
 </div>
 
 <style>
+  .comparison-error {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 10px;
+    color: var(--error);
+    border: 1px solid currentColor;
+    overflow-wrap: anywhere;
+  }
+  .comparison-error span { flex-basis: 100%; }
   .view {
     display: flex;
     flex-direction: column;
