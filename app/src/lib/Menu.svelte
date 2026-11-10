@@ -172,8 +172,9 @@
   }
   .menu[data-side="right"] { --menu-accent: #b798ee; }
   @media (prefers-color-scheme: light) {
-    .menu[data-side="right"] { --menu-accent: #7550c7; }
+    :global(:root:not([data-theme="dark"])) .menu[data-side="right"] { --menu-accent: #7550c7; }
   }
+  :global(:root[data-theme="light"]) .menu[data-side="right"] { --menu-accent: #7550c7; }
   .context { padding: 9px 14px; margin-bottom: 4px; border-bottom: 1px solid var(--line); }
   .origin { display: flex; justify-content: space-between; align-items: center; gap: 24px; margin-bottom: 7px; color: var(--menu-accent); font-size: 11px; }
   .origin span { color: var(--dim); font-size: 10px; }

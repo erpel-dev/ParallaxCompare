@@ -5,6 +5,8 @@
   import { ask } from "./lib/confirm.svelte";
   import ConfirmDialog from "./lib/ConfirmDialog.svelte";
   import Shortcuts, { type ShortcutView } from "./lib/Shortcuts.svelte";
+  import Preferences from "./lib/Preferences.svelte";
+  import { prefs } from "./lib/prefs.svelte";
   import ConflictsView from "./lib/ConflictsView.svelte";
   import FolderView from "./lib/FolderView.svelte";
   import MergeView from "./lib/MergeView.svelte";
@@ -502,6 +504,10 @@
     const list: Command[] = [
       { group, title: "New comparison", keys: "Ctrl+T", run: newTab },
       { group, title: "Keyboard shortcuts", keys: "?", run: () => (shortcutsOpen = true) },
+      { group, title: "Preferences", keys: "Ctrl+,", run: () => (prefsOpen = true) },
+      { group, title: "Larger text", keys: "Ctrl++", run: () => prefs.step(1) },
+      { group, title: "Smaller text", keys: "Ctrl+−", run: () => prefs.step(-1) },
+      { group, title: "Text size 100 %", keys: "Ctrl+0", enabled: prefs.zoom !== 1, run: () => prefs.step(0) },
       { group, title: "Close tab", keys: "Ctrl+W", run: () => close(active) },
       { group, title: "Next tab", keys: "Ctrl+Tab", enabled: tabs.length > 1, run: () => cycle(1) },
       { group, title: "Previous tab", keys: "Ctrl+Shift+Tab", enabled: tabs.length > 1, run: () => cycle(-1) },
@@ -535,6 +541,15 @@
   }
 
   let shortcutsOpen = $state(false);
+  let prefsOpen = $state(false);
+  // The user's theme wins over the system's; the text size scales the whole window.
+  $effect(() => {
+    if (prefs.theme === "system") delete document.documentElement.dataset.theme;
+    else document.documentElement.dataset.theme = prefs.theme;
+  });
+  $effect(() => {
+    getCurrentWebview().setZoom(prefs.zoom).catch(() => {});
+  });
   const shortcutView = $derived.by((): ShortcutView => {
     const kind = tabs.find((t) => t.key === active)?.kind;
     return kind === "folder" ? "folder" : kind === "text" ? "text" : kind === "merge" ? "merge" : "other";
@@ -546,6 +561,10 @@
     const mod = e.ctrlKey || e.metaKey;
     const key = e.key.toLowerCase();
     if (e.key === "?" && !mod && !e.altKey && !typing(e.target) && !paletteOpen) shortcutsOpen = !shortcutsOpen;
+    else if (mod && !e.altKey && e.key === ",") prefsOpen = !prefsOpen;
+    else if (mod && !e.altKey && (e.key === "+" || e.key === "=")) prefs.step(1);
+    else if (mod && !e.altKey && (e.key === "-" || e.key === "_")) prefs.step(-1);
+    else if (mod && !e.altKey && e.key === "0") prefs.step(0);
     else if (mod && key === "w") close(active);
     else if (mod && key === "t") newTab();
     else if ((mod && e.shiftKey && key === "p") || (mod && !e.shiftKey && key === "k") || e.key === "F1") {
@@ -650,6 +669,8 @@
       </div>
     {/each}
     <button class="add" onclick={newTab} title="New comparison (Ctrl+T)">＋</button>
+    <span class="tabs-grow"></span>
+    <button class="add prefs" onclick={() => (prefsOpen = true)} title="Preferences: theme, text size, context lines (Ctrl+,)" aria-label="Preferences">⚙</button>
   </div>
 
   {#if starting}
@@ -726,6 +747,7 @@
 {/if}
 <Toasts />
 <ConfirmDialog />
+{#if prefsOpen}<Preferences onClose={() => (prefsOpen = false)} />{/if}
 {#if shortcutsOpen}<Shortcuts view={shortcutView} onClose={() => (shortcutsOpen = false)} />{/if}
 
 <style>
@@ -803,6 +825,8 @@
     border: none;
     color: var(--dim);
   }
+  .tabs-grow { flex: 1; }
+  .prefs { position: sticky; right: 0; background: var(--chrome); font-size: 14px; }
   .startup {
     display: flex;
     align-items: center;

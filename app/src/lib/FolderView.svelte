@@ -26,13 +26,16 @@
     differingFolders,
     copyFilesBelow,
     findNode,
+    closedArchive,
     flatFiles,
     flatten,
+    joinPath,
     mergePartial,
     movedPairs,
     pairRows,
     refreshTarget,
     replaceNode,
+    type Counts,
     type Filter,
     type FlatRow,
     type Partial,
@@ -113,6 +116,14 @@
   let provisional = $state(false);
   let provisionalIndex = new Map<string, Node>();
   let progress = $state(0);
+  /** Files found so far in the folders listed, and when that number last grew. */
+  let listed = $state(0);
+  let listedAt = 0;
+  /** The view's width: narrow windows get a one-row header. */
+  let width = $state(1400);
+  const compact = $derived(width < 1000);
+  const narrow = $derived(width < 760);
+  let errorsDismissed = $state(false);
   let error = $state("");
   let patternError = $state("");
   let excludesError = $state("");
@@ -225,16 +236,6 @@
     void version;
     return result ? (flat ? countFlatFiles(flatRows) : countFiles(result.root)) : null;
   });
-  const comparisonError = $derived.by(() => {
-    if (running || !result?.summary.errors) return "";
-    const pending = [result.root];
-    while (pending.length) {
-      const node = pending.pop()!;
-      if (node.status === "error" && node.message) return node.message;
-      pending.push(...(node.children ?? []));
-    }
-    return "Some entries could not be read or compared.";
-  });
   const countFilters = $derived<CountFilter[]>([
     { id: "all", label: "All", count: counts?.files ?? 0, title: "Show all files" },
     { id: "diffs", label: "All differences", count: counts ? matchingCount(counts, "diffs") : 0, title: "Changed, left-only, right-only, and error entries", tone: "different" },
@@ -246,6 +247,76 @@
     { id: "error", label: "Errors", count: counts?.errors ?? 0, tone: "error" },
   ]);
   const matchingFiles = $derived(counts ? matchingCount(counts, filter) : 0);
+
+  /** What a folder holds by status, for the counts on collapsed folders. */
+  const insideMemo = $derived.by(() => {
+    void version;
+    void result;
+    return new WeakMap<Node, Counts>();
+  });
+  function inside(node: Node): Counts {
+    let c = insideMemo.get(node);
+    if (!c) insideMemo.set(node, (c = countFiles(node)));
+    return c;
+  }
+
+  /** The share of each status among the files, for the bar under the filters. */
+  const shares = $derived.by(() => {
+    if (!counts || !counts.files) return [];
+    const parts: [Filter, string, number, string][] = [
+      ["same", "same", counts.same, "Same"],
+      ["similar", "similar", counts.similar, "Similar"],
+      ["different", "different", counts.different, "Different"],
+      ["leftOnly", "left", counts.leftOnly, "Left only"],
+      ["rightOnly", "right", counts.rightOnly, "Right only"],
+      ["error", "error", counts.errors, "Errors"],
+    ];
+    return parts.filter((p) => p[2] > 0).map(([id, tone, n, label]) => ({ id, tone, n, label, share: n / counts.files }));
+  });
+
+  /** "permission denied" from "/a/b: Permission denied (os error 13)". */
+  function causeOf(message: string | undefined): string {
+    const text = (message ?? "").replace(/\s*\(os error \d+\)/, "").trim();
+    const last = text.slice(text.lastIndexOf(": ") + (text.includes(": ") ? 2 : 0)).trim();
+    return last ? last.charAt(0).toLowerCase() + last.slice(1) : "could not be read";
+  }
+  /** The entries that could not be read or compared, by cause. */
+  const errorInfo = $derived.by(() => {
+    void version;
+    if (!result || !counts?.errors) return null;
+    const causes = new Map<string, number>();
+    const lines: string[] = [];
+    const walk = (node: Node, path: string) => {
+      for (const child of node.children ?? []) {
+        const at = joinPath(path, child.name);
+        if (child.status === "error") {
+          const cause = causeOf(child.message);
+          causes.set(cause, (causes.get(cause) ?? 0) + 1);
+          if (lines.length < 20000) lines.push(`${at}\t${child.message ?? ""}`);
+        } else walk(child, at);
+      }
+    };
+    walk(result.root, "");
+    const top = [...causes].sort((a, b) => b[1] - a[1]).slice(0, 3);
+    return { count: lines.length, top, more: causes.size - top.length, lines };
+  });
+
+  /** What is left of a running comparison, once the number of files has settled. */
+  const remaining = $derived.by(() => {
+    const total = Math.max(listed, progress);
+    if (!running || !total) return null;
+    const settled = performance.now() - listedAt > 1500 && elapsed > 1500;
+    const left = settled && progress > 20 && progress < total ? Math.round(((elapsed / progress) * (total - progress)) / 1000) : null;
+    return { total, share: Math.min(1, progress / total), left };
+  });
+
+  /** "+2.9 KB": how much larger or smaller the right file is. */
+  function changeOf(node: Node): string {
+    const { left, right } = node;
+    if (!left || !right || left.kind === "dir" || right.kind === "dir" || (node.status !== "different" && node.status !== "similar")) return "";
+    const delta = right.size - left.size;
+    return delta === 0 ? "same size" : `${delta > 0 ? "+" : "−"}${formatSize(Math.abs(delta))}`;
+  }
 
   function setFilter(id: Filter) {
     filter = id;
@@ -400,6 +471,9 @@
     cancelling = false;
     startedAt = performance.now();
     elapsed = 0;
+    listed = 0;
+    listedAt = startedAt;
+    errorsDismissed = false;
     clearInterval(ticker);
     ticker = setInterval(() => (elapsed = performance.now() - startedAt), 200);
     if (!invalidate) {
@@ -456,9 +530,13 @@
   onMount(() => {
     run();
     const unlisten = [
-      listen<{ session: number; files: number; partial?: Partial; activity?: string }>("compare-progress", (e) => {
+      listen<{ session: number; files: number; listed: number; partial?: Partial; activity?: string }>("compare-progress", (e) => {
         if (e.payload.session !== session.id) return;
         progress = e.payload.files;
+        if (e.payload.listed !== listed) {
+          listed = e.payload.listed;
+          listedAt = performance.now();
+        }
         activity = e.payload.activity ?? null;
         if (e.payload.partial && provisional && running && result) {
           mergePartial(result.root, provisionalIndex, e.payload.partial);
@@ -1091,14 +1169,20 @@
   </div>
 {/snippet}
 
-<div class="view">
+{#snippet treeButtons()}
+  <button onclick={() => setAll(true)} disabled={flat} title="Expand all folders">Expand</button>
+  <button onclick={() => setAll(false)} disabled={flat} title="Collapse all folders">Collapse</button>
+  <button class:on={flat} onclick={() => setFlat(!flat)} title="All files in one list, without folders; files of the same name are matched across folders">Flat</button>
+{/snippet}
+
+<div class="view" class:compact class:narrow bind:clientWidth={width}>
   <div class="toolbar">
     {#if nav}<Nav {nav} /><span class="sep"></span>{/if}
-    <button onclick={() => run(true)} disabled={running} title="Compare again (F5)">⟳ Refresh</button>
-    <button onclick={onSwap} title="Swap left and right">⇄ Swap</button>
+    <button onclick={() => run(true)} disabled={running} title="Compare again (F5)">⟳{#if !compact}{" "}Refresh{/if}</button>
+    <button onclick={onSwap} title="Swap left and right">⇄{#if !compact}{" "}Swap{/if}</button>
     <span class="sep"></span>
-    <button onclick={() => nextDifference(-1)} disabled={!counts || matchingCount(counts, "diffs") === 0} title="Previous difference (F7)">‹ Previous</button>
-    <button onclick={() => nextDifference(1)} disabled={!counts || matchingCount(counts, "diffs") === 0} title="Next difference (F8)">Next difference ›</button>
+    <button onclick={() => nextDifference(-1)} disabled={!counts || matchingCount(counts, "diffs") === 0} title="Previous difference (F7)">‹{#if !compact}{" "}Previous{/if}</button>
+    <button onclick={() => nextDifference(1)} disabled={!counts || matchingCount(counts, "diffs") === 0} title="Next difference (F8)">{#if !compact}Next difference{" "}{/if}›</button>
     <span class="sep"></span>
     <span class="patterns" class:active={options.includes.length > 0}>
       <input
@@ -1125,12 +1209,15 @@
           }}>×</button
         >{/if}
     </span>
-    <span class="sep"></span>
-    <button onclick={() => setAll(true)} disabled={flat} title="Expand all folders">Expand</button>
-    <button onclick={() => setAll(false)} disabled={flat} title="Collapse all folders">Collapse</button>
-    <button class:on={flat} onclick={() => setFlat(!flat)} title="All files in one list, without folders; files of the same name are matched across folders">Flat</button>
+    {#if compact}
+      <FilterBar items={countFilters} value={filter} onSelect={(id) => setFilter(id as Filter)} disabled={!result} {legend} compact inline />
+    {:else}
+      <span class="sep"></span>
+      {@render treeButtons()}
+    {/if}
     <span class="grow"></span>
-    <Dropdown label="Options" title="Compare rule, line endings, excluded files" changed={optionsChanged}>
+    <Dropdown label={compact ? "⋯" : "Options"} title={compact ? "Expand, collapse, flat list and compare options" : "Compare rule, line endings, excluded files"} changed={optionsChanged}>
+      {#if compact}<div class="treebtns">{@render treeButtons()}</div>{/if}
       <p class="scope">Applies to this comparison and the files opened from it.</p>
       <div class="field">
         <span>Compare by</span>
@@ -1168,12 +1255,16 @@
     <div class="progress" role="status">
       <div class="pline">
         <b>{cancelling ? "Cancelling…" : (activity ?? "Comparing")}</b>
-        <span>{progress.toLocaleString()} files compared</span>
-        <span>{seconds(elapsed)} s</span>
+        {#if remaining}
+          <span><b>{progress.toLocaleString()}</b> of {remaining.total.toLocaleString()} files</span>
+        {:else}
+          <span>Listing…</span>
+        {/if}
+        <span>{seconds(elapsed)} s{#if remaining?.left != null}{" "}· about {remaining.left < 1 ? "1" : remaining.left.toLocaleString()} s left{/if}</span>
         <span class="grow"></span>
         <button class="small" onclick={cancelRun} disabled={cancelling}>Cancel</button>
       </div>
-      <div class="track" aria-hidden="true"><i></i></div>
+      <div class="track" aria-hidden="true">{#if remaining}<i class="det" style:width="{remaining.share * 100}%"></i>{:else}<i></i>{/if}</div>
     </div>
   {:else if cancelled}
     <div class="progress done" role="status">
@@ -1186,22 +1277,37 @@
     </div>
   {/if}
 
-  {#if comparisonError}
-    <div class="comparison-error" role="alert">
-      <strong>Comparison incomplete — {result?.summary.errors.toLocaleString()} entries could not be compared.</strong>
-      <span>{comparisonError}</span>
-      <button class="small" onclick={() => setFilter("error")}>Show errors</button>
-      <button class="small" onclick={() => run(true)}>Retry comparison</button>
+  {#if errorInfo && !errorsDismissed && filter !== "error"}
+    <div class="banner" role="alert">
+      <b>{errorInfo.count.toLocaleString()} {errorInfo.count === 1 ? "entry" : "entries"} could not be read or compared</b>
+      <span>{errorInfo.top.map(([cause, n]) => `${cause} (${n.toLocaleString()})`).join(", ")}{errorInfo.more > 0 ? `, ${errorInfo.more} other causes` : ""}</span>
+      <span class="grow"></span>
+      <button class="link" onclick={() => setFilter("error")}>Show them</button>
+      <button class="link" onclick={() => run(true)} title="Compare again, reading archives and folders afresh">Retry</button>
+      <button class="link" onclick={() => navigator.clipboard.writeText(errorInfo!.lines.join("\n")).catch(() => {})} title="Copy the paths and messages">Copy the list</button>
+      <button class="link x" onclick={() => (errorsDismissed = true)} title="Hide this note; the Errors filter stays" aria-label="Hide">✕</button>
+    </div>
+  {/if}
+  {#if error || patternError || excludesError}
+    <div class="banner" role="alert">
+      <b>{error ? "That did not work" : "Pattern not valid"}</b>
+      <span class="msg">{error || patternError || excludesError}</span>
+      <span class="grow"></span>
+      {#if error}<button class="link x" onclick={() => (error = "")} aria-label="Hide">✕</button>{/if}
     </div>
   {/if}
 
-  <FilterBar items={countFilters} value={filter} onSelect={(id) => setFilter(id as Filter)} disabled={!result} {legend}
-    hint={running ? "Totals update during comparison" : flatRows.some((r) => r.pending) ? "Matched files are still being compared" : ""} />
-  {#if result && filter !== "all"}
-    <div class="filter-scope">
-      <strong>{countFilters.find((f) => f.id === filter)?.label ?? "Only on one side"}</strong>
-      <span>· {matchingFiles.toLocaleString()} matching files · {flat ? "Flat file list" : "Parent folders remain visible"}</span>
-      <button onclick={() => setFilter("all")}>Show all</button>
+  {#if !compact}
+    <FilterBar items={countFilters} value={filter} onSelect={(id) => setFilter(id as Filter)} disabled={!result} {legend}
+      hint={running ? "Totals update during comparison" : flatRows.some((r) => r.pending) ? "Matched files are still being compared" : ""} />
+  {/if}
+  {#if shares.length > 1}
+    <div class="shares" role="group" aria-label="Share of each status; click to filter">
+      {#each shares as part (part.id)}
+        <button class={part.tone} class:on={filter === part.id} style:flex-grow={Math.max(part.share, 0.004)}
+          title="{part.label}: {part.n.toLocaleString()} of {counts!.files.toLocaleString()} files ({(part.share * 100).toFixed(part.share < 0.1 ? 1 : 0)} %). Click to show only these."
+          aria-label="{part.label}: {part.n}" onclick={() => setFilter(filter === part.id ? "all" : part.id)}></button>
+      {/each}
     </div>
   {/if}
 
@@ -1211,9 +1317,9 @@
   </div>
 
   <div class="head">
-    <div class="side"><span>Name</span><span class="num">Size</span><span class="num">Modified</span></div>
+    <div class="side"><span>Name</span><span class="num">Size</span><span class="num mod">Modified</span></div>
     <div class="mid"></div>
-    <div class="side"><span>Name</span><span class="num">Size</span><span class="num">Modified</span></div>
+    <div class="side r"><span>Name</span><span class="num">Size</span><span class="num chg" title="How the right side differs in size from the left">Change</span><span class="num mod">Modified</span></div>
   </div>
 
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
@@ -1255,8 +1361,9 @@
                 <div class="mid">{row.pending ? "…" : glyph[row.node.status]}{row.rightPath ? "↷" : ""}</div>
               {/if}
               {#if side}
+                {@const other = i === 0 ? row.node.right : row.node.left}
                 <!-- svelte-ignore a11y_no_static_element_interactions -->
-                <div class="side" class:ignored={side.ignored} data-side={i === 0 ? "left" : "right"} onmousedown={() => (activeSide = i === 0 ? "left" : "right")} oncontextmenu={(e) => { e.preventDefault(); rowMenu(row.path, i === 0 ? "left" : "right", e.clientX, e.clientY); }}>
+                <div class="side" class:r={i === 1} class:ignored={side.ignored} data-side={i === 0 ? "left" : "right"} onmousedown={() => (activeSide = i === 0 ? "left" : "right")} oncontextmenu={(e) => { e.preventDefault(); rowMenu(row.path, i === 0 ? "left" : "right", e.clientX, e.clientY); }}>
                   <span class="name" style:padding-left="{row.depth * 16}px">
                     {#if row.container}
                       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -1264,10 +1371,11 @@
                     {:else}
                       <span class="chev"></span>
                     {/if}
-                    <span class="icon">{icon(side)}</span>{#if row.folders?.[i]}<span class="dir">{row.folders[i]}/</span>{/if}{i === 1 && row.rightPath ? row.rightPath.split("/").pop() : row.node.name}{#if side.ignored && !row.inIgnored?.[i]}<span class="ignored-tag" title="Ignored by Git: a .gitignore rule matches it, and it is not tracked">ignored</span>{/if}
+                    <span class="icon">{icon(side)}</span>{#if row.folders?.[i]}<span class="dir">{row.folders[i]}/</span>{/if}{i === 1 && row.rightPath ? row.rightPath.split("/").pop() : row.node.name}{#if side.ignored && !row.inIgnored?.[i]}<span class="ignored-tag" title="Ignored by Git: a .gitignore rule matches it, and it is not tracked">ignored</span>{/if}{#if row.container && !row.expanded && !row.pending && !closedArchive(row.node) && (i === 0 || !row.node.left)}{@const c = inside(row.node)}{#if c.files > c.same}<span class="inside" title="Files in this folder that are not the same, by status">{#if c.different}<span class="different">{c.different.toLocaleString()} ≠</span>{/if}{#if c.similar}<span class="similar">{c.similar.toLocaleString()} ≈</span>{/if}{#if c.leftOnly}<span class="leftOnly">{c.leftOnly.toLocaleString()} ◀</span>{/if}{#if c.rightOnly}<span class="rightOnly">{c.rightOnly.toLocaleString()} ▶</span>{/if}{#if c.errors}<span class="error">{c.errors.toLocaleString()} !</span>{/if}</span>{/if}{/if}
                   </span>
                   <span class="num">{side.kind === "dir" ? "" : formatSize(side.size)}</span>
-                  <span class="num">{formatTime(side.mtime)}</span>
+                  {#if i === 1}<span class="num chg">{changeOf(row.node)}</span>{/if}
+                  <span class="num mod" class:newer={!!other && !!side.mtime && !!other.mtime && side.mtime > other.mtime && row.node.status !== "same" && side.kind !== "dir"} title={!!other && !!side.mtime && !!other.mtime && side.mtime > other.mtime && side.kind !== "dir" ? "Newer than the other side" : undefined}>{formatTime(side.mtime)}</span>
                 </div>
               {:else}
                 <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -1324,7 +1432,6 @@
       <button class="small" onclick={() => api.cancelOp(session.id)}>Cancel</button>
     {/if}
     {#if targets.length > 1}<span>{targets.length} selected</span>{/if}
-    {#if error || patternError || excludesError}<span class="c-err" title={error || patternError || excludesError}>{error || patternError || excludesError}</span>{/if}
   </div>
   {#if menu}
     <Menu items={menu.items} context={menu.context} x={menu.x} y={menu.y} returnFocus={viewport} onClose={() => (menu = null)} />
@@ -1332,17 +1439,6 @@
 </div>
 
 <style>
-  .comparison-error {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 8px;
-    padding: 10px;
-    color: var(--error);
-    border: 1px solid currentColor;
-    overflow-wrap: anywhere;
-  }
-  .comparison-error span { flex-basis: 100%; }
   .view {
     display: flex;
     flex-direction: column;
@@ -1367,6 +1463,38 @@
   .track i { position: absolute; top: 0; bottom: 0; width: 30%; background: var(--accent); border-radius: 2px; animation: sweep 1.4s ease-in-out infinite; }
   @keyframes sweep { from { left: -30%; } to { left: 100%; } }
   @media (prefers-reduced-motion: reduce) { .track i { animation: none; left: 35%; opacity: 0.6; } }
+  .track i.det { position: static; display: block; height: 100%; animation: none; transition: width 0.2s linear; }
+  .banner { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; padding: 5px 10px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--error) 13%, var(--panel-2)); font-size: 12px; }
+  .banner b { color: var(--error); font-weight: 600; }
+  .banner .msg { overflow-wrap: anywhere; min-width: 0; }
+  .banner .grow { flex: 1; }
+  .banner .link { border: none; background: none; color: var(--accent); padding: 0 4px; cursor: pointer; }
+  .banner .x { color: var(--dim); }
+  .shares { display: flex; gap: 1px; height: 7px; background: var(--panel-2); border-bottom: 1px solid var(--line); }
+  .shares button { flex: 1 1 0; min-width: 3px; padding: 0; border: none; border-radius: 0; background: var(--faint); opacity: 0.85; cursor: pointer; }
+  .shares button:hover, .shares button.on { opacity: 1; box-shadow: inset 0 -2px var(--fg); }
+  .shares .similar { background: var(--similar); }
+  .shares .different { background: var(--diff); }
+  .shares .left { background: var(--left-only); }
+  .shares .right { background: var(--right-only); }
+  .shares .error { background: var(--error); }
+  .inside { display: inline-flex; gap: 8px; margin-left: 10px; font-family: var(--mono); font-size: 10.5px; }
+  .inside .different, .inside .error { color: var(--diff); }
+  .inside .similar { color: var(--similar); }
+  .inside .leftOnly { color: var(--left-only); }
+  .inside .rightOnly { color: var(--right-only); }
+  .treebtns { display: flex; gap: 4px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+  .side.r { grid-template-columns: 1fr 78px 72px 124px; }
+  .chg { font-size: 11px; }
+  .mod.newer { color: var(--fg); font-weight: 600; }
+  /* Narrow windows: names before dates, then before the change column. */
+  .view.compact .side { grid-template-columns: 1fr 70px; }
+  .view.compact .side.r { grid-template-columns: 1fr 70px 68px; }
+  .view.compact .mod { display: none; }
+  .view.narrow .side.r { grid-template-columns: 1fr 64px; }
+  .view.narrow .chg { display: none; }
+  .view.compact .patterns { flex: 1 1 110px; min-width: 80px; }
+  .view.compact .toolbar { flex-wrap: nowrap; }
   .selbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 4px 10px; border-top: 1px solid var(--line); background: color-mix(in srgb, var(--accent) 9%, var(--panel-2)); font-size: 12px; }
   .selbar b { margin-right: 6px; }
   .selbar button { font-size: 12px; padding: 2px 8px; }
@@ -1384,9 +1512,6 @@
   .detailline .grow { flex: 1; }
   .scope { margin: 0; font-size: 11.5px; color: var(--dim); max-width: 300px; }
   label small { color: var(--dim); font-size: 10.5px; margin-left: auto; padding-left: 8px; white-space: nowrap; }
-  .filter-scope { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 4px 10px; background: var(--panel-2); color: var(--dim); font-size: 11px; border-bottom: 1px solid var(--line); }
-  .filter-scope strong { color: var(--accent); font-weight: 600; }
-  .filter-scope button { font-size: 11px; padding: 0 6px; }
   .check {
     display: flex;
     gap: 4px;
@@ -1572,12 +1697,5 @@
   }
   .small {
     padding: 0 8px;
-  }
-  .c-err {
-    color: var(--error);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 60ch;
   }
 </style>

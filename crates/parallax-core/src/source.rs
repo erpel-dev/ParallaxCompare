@@ -144,6 +144,17 @@ impl Source {
     }
 }
 
+/// The work tree and the path inside it of `dir`, when `dir` is a folder below
+/// the root of a work tree.
+fn inside_worktree(dir: &str) -> Option<(String, String)> {
+    let full = std::fs::canonicalize(dir).ok()?;
+    let workdir = std::fs::canonicalize(GitRepo::discover(dir).ok()?.workdir()?).ok()?;
+    let rel = full.strip_prefix(&workdir).ok()?;
+    let rel = rel.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
+    // The repository's own folder (`.git`) is the repository, not a folder in it.
+    (!rel.is_empty() && rel != ".git" && !rel.starts_with(".git/")).then(|| (plain_path(&workdir), rel))
+}
+
 impl SourceSpec {
     pub fn parse(text: &str) -> SourceSpec {
         let text = expand_home(text.trim());
@@ -157,10 +168,17 @@ impl SourceSpec {
             let (repo, rest) = (&text[..at], &text[at + 1..]);
             if !repo.is_empty() && Path::new(repo).is_dir() {
                 let (rev, subpath) = rest.split_once(':').unwrap_or((rest, ""));
+                // A folder inside a work tree names that folder at the revision, not
+                // the repository's root.
+                let (repo, subpath) = match inside_worktree(repo) {
+                    Some((root, inner)) if subpath.is_empty() => (root, inner),
+                    Some((root, inner)) => (root, format!("{inner}/{subpath}")),
+                    None => (repo.to_string(), subpath.to_string()),
+                };
                 return SourceSpec::GitRev {
-                    repo: repo.to_string(),
+                    repo,
                     rev: if rev.is_empty() { "HEAD".to_string() } else { rev.to_string() },
-                    subpath: subpath.to_string(),
+                    subpath,
                 };
             }
         }
@@ -727,11 +745,30 @@ mod tests {
         );
         assert_eq!(SourceSpec::parse(&repo), SourceSpec::Local { path: repo.clone() });
         assert_eq!(SourceSpec::parse("missing.zip!/bin"), SourceSpec::Local { path: "missing.zip!/bin".into() });
+        // A folder inside a work tree keeps its place in the repository.
+        let work = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(work.path()).unwrap();
+        let ok = std::process::Command::new("git").arg("-C").arg(&root).args(["init", "-q"]).status();
+        if ok.is_ok_and(|s| s.success()) {
+            std::fs::create_dir_all(root.join("a/b")).unwrap();
+            let inner = root.join("a").display().to_string();
+            let at = |subpath: &str| SourceSpec::GitRev {
+                repo: plain_path(&root),
+                rev: "v1".into(),
+                subpath: subpath.into(),
+            };
+            assert_eq!(SourceSpec::parse(&format!("{inner}@v1")), at("a"));
+            assert_eq!(SourceSpec::parse(&format!("{inner}@v1:b")), at("a/b"));
+        }
         // `.@v1.0:src` is the current folder, not a remote `user@host:path`.
-        assert_eq!(
-            SourceSpec::parse(".@v0.0.13:crates/core"),
-            SourceSpec::GitRev { repo: ".".into(), rev: "v0.0.13".into(), subpath: "crates/core".into() }
-        );
+        // (The tests may run in a folder of a work tree, which then leads the path.)
+        match SourceSpec::parse(".@v0.0.13:crates/core") {
+            SourceSpec::GitRev { rev, subpath, .. } => {
+                assert_eq!(rev, "v0.0.13");
+                assert!(subpath.ends_with("crates/core"), "{subpath}");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

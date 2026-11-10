@@ -11,13 +11,19 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
 
-  let { items, value, onSelect, disabled = false, label = "Show", hint = "", legend }: {
+  let { items, value, onSelect, disabled = false, label = "Show", hint = "", legend, extra, compact = false, inline = false }: {
     items: CountFilter[];
     value: string;
     onSelect: (id: string) => void;
     disabled?: boolean;
     label?: string;
     hint?: string;
+    /** One menu naming the active filter instead of a button per filter, for narrow windows. */
+    compact?: boolean;
+    /** Inside a toolbar: no bar of its own. */
+    inline?: boolean;
+    /** Controls that belong to the filters, at the end of the bar. */
+    extra?: Snippet;
     /** What the statuses mean, opened from the "?" button. */
     legend?: Snippet;
   } = $props();
@@ -36,8 +42,15 @@
   onkeydown={(e) => open && e.key === "Escape" && (open = false)}
 />
 
-<div class="filters" role="group" aria-label="Filter comparison by status">
+<div class="filters" class:inline role="group" aria-label="Filter comparison by status">
   <span class="label">{label}</span>
+  {#if compact}
+    <select class="pick" {disabled} value={value} aria-label="Show" title="Which entries to show"
+      onchange={(e) => onSelect(e.currentTarget.value)}>
+      {#each items as item (item.id)}<option value={item.id}>{item.label} ({item.count.toLocaleString()})</option>{/each}
+      {#if !items.some((i) => i.id === value)}<option value={value}>Other filter</option>{/if}
+    </select>
+  {:else}
   {#each items as item (item.id)}
     <button class:on={value === item.id} aria-pressed={value === item.id} {disabled}
       data-filter={item.id} title={item.title ?? `Show ${item.label.toLowerCase()}`}
@@ -46,17 +59,22 @@
       {item.label} <b>{item.count.toLocaleString()}</b>
     </button>
   {/each}
+  {/if}
   {#if legend}
     <div class="legendwrap" bind:this={el}>
       <button class="help" class:on={open} aria-expanded={open} title="What the statuses mean" aria-label="What the statuses mean" onclick={() => (open = !open)}>?</button>
       {#if open}<div class="legend" role="dialog" aria-label="What the statuses mean">{@render legend()}</div>{/if}
     </div>
   {/if}
+  {#if extra}<span class="extra">{@render extra()}</span>{/if}
   {#if hint}<span class="hint">{hint}</span>{/if}
 </div>
 
 <style>
   .filters { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 7px 10px; border-bottom: 1px solid var(--line); background: var(--panel-2); }
+  .filters.inline { padding: 0; border: none; background: none; flex-wrap: nowrap; }
+  .filters.inline .label { display: none; }
+  .pick { font-size: 12px; padding: 2px 4px; max-width: 190px; }
   .label { color: var(--dim); font-size: 10px; text-transform: uppercase; letter-spacing: 1px; margin-right: 4px; }
   button { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 4px 8px; }
   button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -69,6 +87,8 @@
   .right { background: var(--right-only); }
   .error { background: var(--error); }
   .hint { margin-left: auto; font-size: 11px; color: var(--dim); }
+  .extra { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--dim); }
+  .extra + .hint { margin-left: 0; }
   .legendwrap { position: relative; }
   .help { width: 22px; height: 22px; justify-content: center; padding: 0; border-radius: 50%; font-weight: 600; }
   .help.on { border-color: var(--accent); }

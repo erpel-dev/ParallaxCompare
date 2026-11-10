@@ -307,6 +307,9 @@ impl Filter {
 pub struct Control {
     pub cancel: AtomicBool,
     pub files_done: AtomicU64,
+    /// Files found so far in the folders listed: what `files_done` is heading for.
+    /// It grows while folders are still being listed.
+    pub files_listed: AtomicU64,
     /// When set, the folders listed and the entries finished so far, in the top
     /// [`PARTIAL_DEPTH`] levels, for showing the result while it is computed.
     /// The caller takes them out as it shows them.
@@ -634,6 +637,9 @@ impl<'a> Engine<'a> {
             let container = l.as_ref().or(r.as_ref()).is_some_and(|e| e.kind.is_container());
             (!container, name.to_lowercase(), name.clone())
         });
+        let files =
+            pairs.iter().filter(|(_, (l, r))| l.as_ref().or(r.as_ref()).is_some_and(|e| e.kind != EntryKind::Dir));
+        self.control.files_listed.fetch_add(files.count() as u64, Ordering::Relaxed);
         if let Some(partial) = &self.control.partial
             && depth(rel) < PARTIAL_DEPTH
         {

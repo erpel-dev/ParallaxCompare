@@ -234,12 +234,23 @@ pub fn intraline(left: &str, right: &str) -> (Vec<Range<u32>>, Vec<Range<u32>>) 
         let offset = utf16_len(&left[..prefix]) as u32;
         let shift = |v: Vec<Range<u32>>| v.into_iter().map(|x| x.start + offset..x.end + offset).collect::<Vec<_>>();
         if l.len() <= MAX_INTRALINE_LEN && r.len() <= MAX_INTRALINE_LEN {
-            let (a, b) = intraline(l, r);
+            let (a, b) = token_marks(l, r);
             return (shift(a), shift(b));
         }
         let whole = |s: &str| std::iter::once(0..utf16_len(s) as u32).filter(|r| !r.is_empty()).collect();
         return (shift(whole(l)), shift(whole(r)));
     }
+    let (left_ranges, right_ranges) = token_marks(left, right);
+    // Lines with little in common: the row's colour says they differ, and marks
+    // over most of both would only add noise.
+    if mostly(left, &left_ranges) && mostly(right, &right_ranges) {
+        return (Vec::new(), Vec::new());
+    }
+    (left_ranges, right_ranges)
+}
+
+/// The differing ranges of two lines by their tokens, phrases joined.
+fn token_marks(left: &str, right: &str) -> (Vec<Range<u32>>, Vec<Range<u32>>) {
     let a = tokenize(left);
     let b = tokenize(right);
     let ops = similar::capture_diff_slices(similar::Algorithm::Myers, &a, &b);
@@ -280,7 +291,39 @@ pub fn intraline(left: &str, right: &str) -> (Vec<Range<u32>>, Vec<Range<u32>>) 
             }
         }
     }
-    (left_ranges, right_ranges)
+    (calm(left, left_ranges), calm(right, right_ranges))
+}
+
+/// Joins marks that only whitespace or up to two other characters separate, so a
+/// changed phrase is one mark instead of one per word.
+fn calm(line: &str, ranges: Vec<Range<u32>>) -> Vec<Range<u32>> {
+    if ranges.len() < 2 {
+        return ranges;
+    }
+    let units: Vec<u16> = line.encode_utf16().collect();
+    let space = |u: &u16| *u == b' ' as u16 || *u == b'\t' as u16;
+    let mut out: Vec<Range<u32>> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        match out.last_mut() {
+            Some(last) => {
+                let gap = &units[last.end as usize..range.start as usize];
+                if gap.iter().all(space) || gap.iter().filter(|u| !space(u)).count() <= 2 && gap.len() <= 4 {
+                    last.end = range.end;
+                } else {
+                    out.push(range);
+                }
+            }
+            None => out.push(range),
+        }
+    }
+    out
+}
+
+/// Whether the marks cover more than two thirds of the line's text.
+fn mostly(line: &str, ranges: &[Range<u32>]) -> bool {
+    let text = utf16_len(line.trim()) as u32;
+    let marked: u32 = ranges.iter().map(|r| r.end - r.start).sum();
+    text > 0 && marked * 3 > text * 2
 }
 
 fn tokenize(s: &str) -> Vec<&str> {
@@ -380,5 +423,11 @@ mod tests {
         let (l, r) = intraline("items: CartItem[])", "items: CartItem[], d?: Discount)");
         assert!(l.is_empty());
         assert_eq!(r, vec![17..31]);
+        // A changed phrase is one mark, not one per word.
+        let (l, r) = intraline("/// Values that are lists of ids", "/// Values of the fields kept as lists of ids");
+        assert_eq!((l.len(), r.len()), (1, 1));
+        // Lines with little in common are not marked at all.
+        let (l, r) = intraline("let parts = value.split(',').collect();", "if listy {");
+        assert!(l.is_empty() && r.is_empty());
     }
 }

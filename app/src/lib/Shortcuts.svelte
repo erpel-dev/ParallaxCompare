@@ -5,6 +5,8 @@
   const shared: [string, string][] = [
     ["Command palette", "Ctrl+K · F1"],
     ["This list", "?"],
+    ["Preferences", "Ctrl+,"],
+    ["Larger / smaller text", "Ctrl++ · Ctrl+−"],
     ["New comparison", "Ctrl+T"],
     ["Close tab", "Ctrl+W"],
     ["Next / previous tab", "Ctrl+Tab · Ctrl+Shift+Tab"],

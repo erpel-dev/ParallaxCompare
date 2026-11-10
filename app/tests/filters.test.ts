@@ -51,26 +51,53 @@ test('flat view totals count a moved pair once and use its resolved status', () 
   assert.equal(flatFiles(root,'leftOnly',moved,new Map([['old/moved.txt\nnew/moved.txt',{status:'same',message:null}]])).length,1);
 });
 const runs = [{start:0,end:100,kind:'equal'},{start:100,end:102,kind:'changed'},{start:102,end:103,kind:'removed'},{start:103,end:200,kind:'equal'},{start:200,end:203,kind:'added'},{start:203,end:204,kind:'minor'},{start:204,end:205,kind:'changed'}];
-test('filtered rows preserve original IDs and precise boundaries across gaps', () => {
+test('filtered rows keep original IDs, with one fold bar per hidden stretch', () => {
   const p = new RowProjection(runs,'changed');
-  assert.equal(p.length,3);
-  assert.deepEqual([0,1,2,3,-1].map(i=>p.source(i)),[100,101,204,null,null]);
-  for(const [row,position,contains] of [[0,0,false],[100,0,true],[101,1,true],[102,2,false],[203,2,false],[204,2,true],[205,3,false]]) {
+  // fold(0..100) 100 101 fold(102..204) 204
+  assert.equal(p.length,5);
+  assert.equal(p.folds,2);
+  assert.deepEqual([0,1,2,3,4,5,-1].map(i=>p.source(i)),[null,100,101,null,204,null,null]);
+  assert.deepEqual(p.fold(0),{start:0,end:100});
+  assert.deepEqual(p.fold(3),{start:102,end:204});
+  assert.equal(p.fold(1),null);
+  for(const [row,position,contains] of [[0,0,false],[100,1,true],[101,2,true],[102,3,false],[203,3,false],[204,4,true],[205,5,false]]) {
     assert.equal(p.position(row),position);assert.equal(p.contains(row),contains);
   }
-  assert.equal(p.position(102)-p.position(100),2);
-  assert.equal(p.position(204)-p.position(103),0);
+  // Moving past a fold bar lands on the next row.
+  assert.equal(p.rowNear(0,1),100);
+  assert.equal(p.rowNear(3,1),204);
+  assert.equal(p.rowNear(3,-1),101);
+});
+test('context keeps rows around matches and merges what touches', () => {
+  const p = new RowProjection(runs,'changed',3);
+  // 97..105 (100,101 with 3 around; 102,103 are context too), then 201..205
+  assert.deepEqual([0,1,2].map(i=>p.source(i)),[null,97,98]);
+  assert.equal(p.contains(99),true);
+  assert.equal(p.contains(104),true);
+  assert.equal(p.contains(105),false);
+  assert.equal(p.contains(201),true);
+  const whole = new RowProjection(runs,'diffs',1000);
+  assert.equal(whole.length,205);
+  assert.equal(whole.folds,0);
+  // An opened stretch shows although the filter hides it.
+  const opened = new RowProjection(runs,'changed',0,[{start:0,end:20}]);
+  assert.equal(opened.source(0),0);
+  assert.equal(opened.contains(19),true);
+  assert.deepEqual(opened.fold(20),{start:20,end:100});
 });
 test('all difference kinds combine, while minor rows stay separate', () => {
+  const rows = (p) => p.length - p.folds;
   assert.equal(new RowProjection(runs,'all').length,205);
-  assert.equal(new RowProjection(runs,'diffs').length,7);
-  assert.equal(new RowProjection(runs,'minor').length,1);
-  assert.equal(new RowProjection(runs,'removed').source(0),102);
+  assert.equal(new RowProjection(runs,'all',3).folds,0);
+  assert.equal(rows(new RowProjection(runs,'diffs')),7);
+  assert.equal(rows(new RowProjection(runs,'minor')),1);
+  assert.equal(new RowProjection(runs,'removed').rowNear(0,1),102);
   assert.equal(new RowProjection([], 'changed').source(0),null);
+  assert.equal(new RowProjection([{start:0,end:9,kind:'equal'}], 'changed').length,0);
 });
 test('large files keep compact ranges rather than per-row indices', () => {
   const p = new RowProjection([{start:0,end:100_000_000,kind:'equal'},{start:100_000_000,end:100_000_002,kind:'added'}],'all');
-  assert.equal(p.runs.length,2);
+  assert.equal(p.parts.length,1);
   assert.equal(p.length,100_000_002);
   assert.equal(p.source(100_000_001),100_000_001);
   assert.equal(p.position(100_000_002),100_000_002);

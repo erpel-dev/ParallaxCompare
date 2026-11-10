@@ -494,6 +494,8 @@ pub async fn close_session(state: State<'_, AppState>, id: u64) -> CmdResult<()>
 struct CompareProgress {
     session: u64,
     files: u64,
+    /// Files found so far in the folders listed.
+    listed: u64,
     /// What is known of the result so far, since the last progress event.
     #[serde(skip_serializing_if = "Option::is_none")]
     partial: Option<compare::Partial>,
@@ -532,9 +534,10 @@ pub async fn run_compare(
             while !done.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(120));
                 let files = control.files_done.load(Ordering::Relaxed);
+                let listed = control.files_listed.load(Ordering::Relaxed);
                 let partial = control.take_partial();
                 let activity = parallax_core::activity::current();
-                let _ = app.emit("compare-progress", CompareProgress { session: id, files, partial, activity });
+                let _ = app.emit("compare-progress", CompareProgress { session: id, files, listed, partial, activity });
             }
         });
     }

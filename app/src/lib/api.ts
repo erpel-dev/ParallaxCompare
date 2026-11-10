@@ -615,6 +615,9 @@ export const api = {
 };
 
 export function theme(): "dark" | "light" {
+  // The theme chosen in Preferences wins over the system's.
+  const chosen = document.documentElement.dataset.theme;
+  if (chosen === "light" || chosen === "dark") return chosen;
   return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
 }
 

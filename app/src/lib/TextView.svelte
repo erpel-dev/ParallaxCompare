@@ -22,7 +22,8 @@
   } from "./api";
   import ImagePanel from "./ImagePanel.svelte";
   import FilterBar, { type CountFilter } from "./FilterBar.svelte";
-  import { RowProjection, type RowFilter } from "./rowFilter";
+  import { RowProjection, type Fold, type RowFilter } from "./rowFilter";
+  import { prefs, CONTEXTS } from "./prefs.svelte";
   import Menu, { type MenuItem, type MenuContext } from "./Menu.svelte";
   import type { Command } from "./commands";
   import Dropdown from "./Dropdown.svelte";
@@ -143,7 +144,23 @@
 
   let rowFilter = $state<RowFilter>("all");
   const total = $derived(info?.rows ?? 0);
-  const projection = $derived(new RowProjection(info?.rowRuns ?? [], rowFilter));
+  // A theme chosen in Preferences recolours the code like a change of the system's.
+  let themeReady = false;
+  $effect(() => {
+    void prefs.theme;
+    if (themeReady) tick().then(() => resetRows());
+  });
+  /** The view's width: narrow windows get short buttons and one filter menu. */
+  let width = $state(1400);
+  const compact = $derived(width < 1000);
+  /** The line pane under the rows wraps long lines instead of scrolling sideways. */
+  let wrapDetail = $state(false);
+  /** Unchanged lines kept around each difference while a filter is on. */
+  let context = $state(prefs.context);
+  /** Hidden stretches the user opened from their fold bar. */
+  let opened = $state<Fold[]>([]);
+  // "Same" shows the unchanged lines themselves: no context of differences around them.
+  const projection = $derived(new RowProjection(info?.rowRuns ?? [], rowFilter, rowFilter === "equal" ? 0 : context, opened));
   const displayTotal = $derived(projection.length);
   const rowFilters = $derived<CountFilter[]>([
     { id: "all", label: "All", count: total, title: "Show all lines" },
@@ -157,8 +174,12 @@
   const projectedSections = $derived.by(() => {
     const out: { index: number; start: number; end: number; source: number }[] = [];
     for (const [index, s] of (info?.sections ?? []).entries()) {
-      const start = projection.position(s.start), end = projection.position(s.end);
-      if (end > start) out.push({ index, start, end, source: projection.source(start)! });
+      let start = projection.position(s.start);
+      const end = projection.position(s.end);
+      // A section hidden from its start begins after the fold bar that hides it.
+      if (projection.fold(start)) start += 1;
+      const source = projection.source(start);
+      if (end > start && source !== null) out.push({ index, start, end, source });
     }
     return out;
   });
@@ -173,12 +194,21 @@
     editing = null;
     menu = null;
     rowFilter = id;
+    opened = [];
     anchor = null;
-    selected = projection.source(0);
+    selected = projection.rowNear(0, 1);
     section = -1;
     scrollTop = 0;
     if (viewport) viewport.scrollTop = 0;
     ensureLoaded();
+  }
+
+  /** Shows the lines behind a fold bar: all of them, or `count` from its start or end. */
+  function openFold(fold: Fold, count?: number, fromStart = true) {
+    const part = count === undefined ? fold : fromStart ? { start: fold.start, end: fold.start + count } : { start: fold.end - count, end: fold.end };
+    opened = [...opened, part];
+    ensureLoaded();
+    keepFocus();
   }
 
   const sectionOrdinals = $derived(new Map(projectedSections.map((s, i) => [s.index, i])));
@@ -217,8 +247,16 @@
   const last = $derived(Math.min(displayTotal, first + Math.ceil(viewHeight / ROW) + 40));
   const visible = $derived.by(() => {
     void cacheVersion;
-    const out: { index: number; row: RowView | undefined }[] = [];
-    for (let i = first; i < last; i++) { const index = projection.source(i)!; out.push({ index, row: cache.get(index) }); }
+    const out: { index: number; row: RowView | undefined; fold: Fold | null }[] = [];
+    for (let i = first; i < last; i++) {
+      const index = projection.source(i);
+      if (index !== null) out.push({ index, row: cache.get(index), fold: null });
+      else {
+        const fold = projection.fold(i);
+        // Fold bars get keys below the rows': -1 - start.
+        if (fold) out.push({ index: -1 - fold.start, row: undefined, fold });
+      }
+    }
     return out;
   });
   const selectedRow = $derived.by(() => {
@@ -1500,20 +1538,20 @@
     else if (e.key === "ArrowDown" && selected !== null) {
       if (e.shiftKey) showAllRows();
       anchor = e.shiftKey ? (anchor ?? selected) : null;
-      selected = projection.source(Math.min(displayTotal - 1, projection.position(selected) + 1)) ?? selected;
+      selected = projection.rowNear(projection.position(selected) + 1, 1) ?? selected;
       reveal(selected);
     } else if (e.key === "ArrowUp" && selected !== null) {
       if (e.shiftKey) showAllRows();
       anchor = e.shiftKey ? (anchor ?? selected) : null;
-      selected = projection.source(Math.max(0, projection.position(selected) - 1)) ?? selected;
+      selected = projection.rowNear(projection.position(selected) - 1, -1) ?? selected;
       reveal(selected);
     } else if (e.key === "PageDown" || e.key === "PageUp") {
       const page = Math.max(1, Math.floor(viewHeight / ROW) - 2) * (e.key === "PageDown" ? 1 : -1);
-      if (selected !== null) selected = projection.source(Math.max(0, Math.min(displayTotal - 1, projection.position(selected) + page))) ?? selected;
+      if (selected !== null) selected = projection.rowNear(projection.position(selected) + page, page > 0 ? 1 : -1) ?? selected;
       scrollToV(vTop + page * ROW);
     } else if (e.key === "Home" || e.key === "End") {
       const end = e.key === "End";
-      if (selected !== null) selected = projection.source(end ? displayTotal - 1 : 0);
+      if (selected !== null) selected = projection.rowNear(end ? displayTotal - 1 : 0, end ? -1 : 1);
       scrollToV(end ? displayTotal * ROW : 0);
     } else return;
     e.preventDefault();
@@ -1591,6 +1629,7 @@
     const media = window.matchMedia("(prefers-color-scheme: light)");
     const onTheme = () => resetRows();
     media.addEventListener("change", onTheme);
+    themeReady = true;
     // The file changed on disk (or was saved from another tab).
     const unlisten = listen<PathsChanged>("paths-changed", (e) => {
       const p = e.payload;
@@ -1616,7 +1655,7 @@
 
 <svelte:window onkeydown={onWindowKey} />
 
-<div class="view" bind:this={root}>
+<div class="view" bind:this={root} bind:clientWidth={width}>
   <div class="toolbar">
     {#if nav}<Nav {nav} />{/if}
     {#if onSwap}<button onclick={onSwap} title="Swap left and right">⇄ Swap</button>{/if}
@@ -1640,8 +1679,8 @@
       </Dropdown>
     {/if}
 {#if info?.view !== "image"}
-    <button onclick={() => next(-1)} disabled={!projectedSections.length} title="Previous difference (F7)">‹ Previous</button>
-    <button onclick={() => next(1)} disabled={!projectedSections.length} title="Next difference (F8)">Next difference ›</button>
+    <button onclick={() => next(-1)} disabled={!projectedSections.length} title="Previous difference (F7)">‹{#if !compact}{" "}Previous{/if}</button>
+    <button onclick={() => next(1)} disabled={!projectedSections.length} title="Next difference (F8)">{#if !compact}Next difference{" "}{/if}›</button>
     {#if info}
       <span class="count" title={shownSection >= 0 || !projectedSections.length ? undefined : "No difference on screen; the view is between these two"}
         >{shownSection >= 0
@@ -1655,13 +1694,14 @@
     {/if}
     {#if editable[0] || editable[1]}
       <span class="sep"></span>
-      <button onclick={() => copySection(currentSection, 0)} disabled={!editable[0] || currentSection < 0} title="Copy the current difference to the left side (Alt+←)">← Copy to left</button>
-      <button onclick={() => copySection(currentSection, 1)} disabled={!editable[1] || currentSection < 0} title="Copy the current difference to the right side (Alt+→)">Copy to right →</button>
-      <button onclick={undo} disabled={!canUndo} title="Undo (Ctrl+Z)">↶ Undo</button>
-      <button onclick={redo} disabled={!canRedo} title="Redo (Ctrl+Y)">↷ Redo</button>
+      <button onclick={() => copySection(currentSection, 0)} disabled={!editable[0] || currentSection < 0} title="Copy the current difference to the left side (Alt+←)">←{#if !compact}{" "}Copy to left{/if}</button>
+      <button onclick={() => copySection(currentSection, 1)} disabled={!editable[1] || currentSection < 0} title="Copy the current difference to the right side (Alt+→)">{#if !compact}Copy to right{" "}{/if}→</button>
+      <button onclick={undo} disabled={!canUndo} title="Undo (Ctrl+Z)">↶{#if !compact}{" "}Undo{/if}</button>
+      <button onclick={redo} disabled={!canRedo} title="Redo (Ctrl+Y)">↷{#if !compact}{" "}Redo{/if}</button>
     {/if}
     <span class="sep"></span>
     <button class:on={findOpen} onclick={() => (findOpen ? closeFind() : openFind())} disabled={!info} title="Find in both files (Ctrl+F)">Find</button>
+    <button class:on={wrapDetail} aria-pressed={wrapDetail} onclick={() => (wrapDetail = !wrapDetail)} disabled={!info} title="Show the whole selected line, wrapped, in the pane under the rows">Wrap line</button>
     <span class="grow"></span>
     {#if anyDirty}<button class="primary" onclick={() => save()} disabled={!!busy} title="Save the changed sides (Ctrl+S)">Save</button>{/if}
     <Dropdown label="Options" title="Whitespace, case, diff algorithm, syntax highlighting" changed={optionsChanged}>
@@ -1694,15 +1734,8 @@
   </div>
 
   {#if info && info.view !== "image"}
-    <FilterBar items={rowFilters} value={rowFilter} onSelect={(id) => setRowFilter(id as RowFilter)} disabled={loading || awaiting} legend={lineLegend}
-      hint={rowFilter !== "all" ? "Editing and range selections show all rows" : ""} />
-    {#if rowFilter !== "all"}
-      <div class="filter-scope">
-        <strong>{rowFilters.find((f) => f.id === rowFilter)?.label}</strong>
-        <span>· {displayTotal.toLocaleString()} matching rows · Original line numbers</span>
-        <button onclick={() => setRowFilter("all")}>Show all</button>
-      </div>
-    {/if}
+    <FilterBar items={rowFilters} value={rowFilter} onSelect={(id) => setRowFilter(id as RowFilter)} disabled={loading || awaiting} legend={lineLegend} {compact}
+      extra={rowFilter !== "all" && rowFilter !== "equal" ? contextControl : undefined} />
   {/if}
 
   {#if findOpen && info?.view !== "image"}
@@ -1755,7 +1788,16 @@
       {#if eolFix.right}<button onclick={() => setLineEndings(1, eolFix.right!)}>Use {eolFix.right} on the right</button>{/if}
     </div>
   {/if}
-  {#snippet lineLegend()}
+  {#snippet contextControl()}
+  <label class="ctx" title="Unchanged lines shown around each difference. Editing and range selections show all rows.">
+    Context
+    <select bind:value={context} onchange={() => { opened = []; }}>
+      {#each [...new Set([...CONTEXTS, context])].sort((a, b) => a - b) as n (n)}<option value={n}>{n === 0 ? "none" : `${n} lines`}</option>{/each}
+    </select>
+  </label>
+{/snippet}
+
+{#snippet lineLegend()}
     <div class="lrow"><span class="g">=</span><b>Same</b><span>The line is the same on both sides</span></div>
     <div class="lrow"><span class="g sim">≈</span><b>Similar</b><span>The lines differ only in what Options ignore{options.whitespace !== "exact" || options.ignoreCase ? "" : " (nothing is ignored now)"}</span></div>
     <div class="lrow"><span class="g diff">≠</span><b>Different</b><span>The line differs</span></div>
@@ -1855,7 +1897,19 @@
       {/if}
       <div class="spacer" style:height="{spacerHeight(displayTotal * ROW)}px">
         <div class="window" style:transform="translateY({windowOffset(scrollTop, scale, first, ROW)}px)">
-          {#each visible as { index, row } (index)}
+          {#each visible as { index, row, fold } (index)}
+            {#if fold}
+              {@const hidden = fold.end - fold.start}
+              <div class="row foldbar" role="row">
+                <span class="dots">⋯</span>
+                <span>{hidden.toLocaleString()} {rowFilter === "diffs" ? (hidden === 1 ? "unchanged line" : "unchanged lines") : hidden === 1 ? "other line" : "other lines"}</span>
+                {#if hidden > 20}
+                  <button onclick={() => openFold(fold, 20, true)} title="Show the first 20 of these lines">Show 20 ↓</button>
+                  <button onclick={() => openFold(fold, 20, false)} title="Show the last 20 of these lines">Show 20 ↑</button>
+                {/if}
+                <button onclick={() => openFold(fold)} title="Show these lines">Show {hidden > 20 ? "all" : "them"}</button>
+              </div>
+            {:else}
             <!-- svelte-ignore a11y_click_events_have_key_events -->
             <div class="row {row?.k ?? 'equal'}" class:loading={!row} class:cur={index === selected} role="row" tabindex="-1" oncontextmenu={(e) => rowContext(e, index)} onmousedown={(e) => e.shiftKey && e.preventDefault()} onclick={(e) => { if (e.shiftKey) showAllRows(); anchor = e.shiftKey && selected !== null ? (anchor ?? selected) : null; selected = index; keepFocus(); }}>
               {#each [row?.l, row?.r] as line, side (side)}
@@ -1864,8 +1918,8 @@
                   <div class="mid">
                     {#if sectionStarts.has(index) && (editable[0] || editable[1])}
                       {@const i = sectionStarts.get(index)!}
-                      {#if editable[0]}<button class="arrow" onclick={(e) => { e.stopPropagation(); copySection(i, 0); }} title="Copy this difference to the left">←</button>{/if}
-                      {#if editable[1]}<button class="arrow" onclick={(e) => { e.stopPropagation(); copySection(i, 1); }} title="Copy this difference to the right">→</button>{/if}
+                      {#if editable[0]}<button class="arrow" onclick={(e) => { e.stopPropagation(); copySection(i, 0); }} title="Copy this difference to the left">←<span class="cp"> Copy</span></button>{/if}
+                      {#if editable[1]}<button class="arrow" onclick={(e) => { e.stopPropagation(); copySection(i, 1); }} title="Copy this difference to the right"><span class="cp">Copy </span>→</button>{/if}
                     {:else}
                       {row && row.k !== "equal" ? { minor: "≈", changed: "≠", removed: "−", added: "+" }[row.k] : ""}
                     {/if}
@@ -1889,6 +1943,7 @@
                 {/if}
               {/each}
             </div>
+            {/if}
           {/each}
         </div>
       </div>
@@ -1897,7 +1952,7 @@
 
   {/if}
 
-  <div class="detail mono" bind:this={detail} hidden={info?.view === "image"}>
+  <div class="detail mono" class:wrap={wrapDetail} bind:this={detail} hidden={info?.view === "image"}>
     {#each [["Left", selectedRow?.l], ["Right", selectedRow?.r]] as const as [label, line] (label)}
       <div class="dline">
         <span class="lbl">{label}</span>
@@ -1916,7 +1971,7 @@
     {:else if info?.view === "image"}
       <span>{info.views.find((v) => v.id === info?.view)?.label}</span>
     {:else if info}
-      <span>Showing <b>{displayTotal.toLocaleString()}</b> of <b>{total.toLocaleString()}</b> rows</span>
+      <span>Showing <b>{(displayTotal - projection.folds).toLocaleString()}</b> of <b>{total.toLocaleString()}</b> rows{#if rowFilter !== "all" && rowFilter !== "equal" && context}{" "}· {context} of context{/if}</span>
       <span><b>{projectedSections.length.toLocaleString()}</b> of {info.sections.length.toLocaleString()} difference sections</span>
       {#if selected !== null}<span>Row {selected + 1} of {total}</span>{/if}
       <span>{info.view === "text" ? (info.syntax ?? "Plain text") : info.views.find((v) => v.id === info?.view)?.label}</span>
@@ -1939,9 +1994,7 @@
   .nudge { color: var(--fg); }
   .nudge .link { border: none; background: none; padding: 0; color: var(--accent); font-size: inherit; cursor: pointer; }
   .nudge .link.dim { color: var(--dim); margin-left: 4px; }
-  .filter-scope { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 4px 10px; background: var(--panel-2); color: var(--dim); font-size: 11px; border-bottom: 1px solid var(--line); }
-  .filter-scope strong { color: var(--accent); font-weight: 600; }
-  .filter-scope button, .filter-empty button { font-size: 11px; padding: 0 6px; }
+  .filter-empty button { font-size: 11px; padding: 0 6px; }
   .filter-empty { padding: 30px; color: var(--dim); text-align: center; }
   .toolbar {
     display: flex;
@@ -2090,6 +2143,22 @@
     color: var(--faint);
     font-style: italic;
   }
+  .row.foldbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 12px;
+    font-family: var(--ui);
+    font-size: 11.5px;
+    color: var(--dim);
+    background: var(--panel);
+    box-shadow: inset 0 1px var(--line), inset 0 -1px var(--line);
+  }
+  .foldbar .dots { letter-spacing: 1px; }
+  .foldbar button { border: none; background: none; padding: 0 2px; color: var(--accent); font-size: 11.5px; line-height: 1; cursor: pointer; }
+  .foldbar button:hover { text-decoration: underline; }
+  .ctx { display: inline-flex; align-items: center; gap: 6px; }
+  .ctx select { font-size: 12px; padding: 1px 4px; }
   .row.cur {
     outline: 1px solid var(--accent);
     outline-offset: -1px;
@@ -2142,6 +2211,11 @@
     color: var(--dim);
     font-size: 11px;
   }
+  /* On the current row the copy arrows are labelled buttons, laid over the panes' edges. */
+  .arrow .cp { display: none; }
+  .row.cur .mid:has(.arrow) { position: relative; z-index: 3; overflow: visible; white-space: nowrap; gap: 3px; }
+  .row.cur .arrow { padding: 0 6px; font-family: var(--ui); border-color: var(--accent); color: var(--accent); background: var(--panel); flex-shrink: 0; }
+  .row.cur .arrow .cp { display: inline; }
   .arrow {
     padding: 0 3px;
     min-width: 0;
@@ -2256,6 +2330,9 @@
     padding: 2px 0;
     overflow-x: auto;
   }
+  .detail.wrap { overflow-x: hidden; max-height: 40vh; overflow-y: auto; }
+  .detail.wrap .dline { white-space: pre-wrap; overflow-wrap: anywhere; padding-left: 62px; text-indent: -52px; }
+  .detail.wrap .lbl { text-indent: 0; }
   .dline {
     white-space: pre;
     padding: 0 10px;
