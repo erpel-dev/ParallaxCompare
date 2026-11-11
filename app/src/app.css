@@ -36,45 +36,7 @@
   color-scheme: dark;
 }
 
-/* The light palette: for a light system unless the user chose dark, and when they chose light. */
-@media (prefers-color-scheme: light) {
-  :root:not([data-theme="dark"]) {
-    --bg: #ffffff;
-    --panel: #f1f2f4;
-    --panel-2: #f7f8f9;
-    --chrome: #e6e8eb;
-    --line: #d5d8dd;
-    --text: #1f2328;
-    --dim: #5d6470;
-    --faint: #9aa1ab;
-    --accent: #2f6fdb;
-    --accent-bg: #d6e4fb;
-    --sel: #cfe0fb;
-    --input: #ffffff;
-    --btn: #ffffff;
-    --btn-border: #c9cdd3;
-    --diff: #c2362f;
-    --similar: #a26d00;
-    --left-only: #7b3fc4;
-    --right-only: #0a7ea4;
-    --error: #c2362f;
-    --row-changed: #fde8e7;
-    --row-changed-gutter: #f8d7d5;
-    --row-added: #e2f3f9;
-    --row-added-gutter: #cfe9f3;
-    --row-removed: #efe6fb;
-    --row-removed-gutter: #e3d6f6;
-    --row-minor: #f1f3f6;
-    --mark: #f5b5b1;
-    --mark-added: #b5e0ee;
-    --hit: #ffe27a;
-    --hit-cur: #f29d1f;
-    --hit-cur-text: #1f2328;
-    --filler: repeating-linear-gradient(135deg, #f1f2f4 0 6px, #e8eaed 6px 12px);
-    color-scheme: light;
-  }
-}
-
+/* The resolved system or explicit theme selects this single light palette. */
 :root[data-theme="light"] {
   --bg: #ffffff;
   --panel: #f1f2f4;

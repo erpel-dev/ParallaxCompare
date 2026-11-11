@@ -506,19 +506,34 @@ pub fn replace_file(
     mtime: Option<i64>,
     permissions: Option<fs::Permissions>,
 ) -> std::io::Result<()> {
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    fs::create_dir_all(parent)?;
+    let dir = cap_std::fs::Dir::open_ambient_dir(parent, cap_std::ambient_authority())?;
+    let name = path.file_name().ok_or_else(|| std::io::Error::other("missing file name"))?;
+    replace_file_at(&dir, Path::new(name), data, mtime, permissions)
+}
+
+/// All resolution is relative to an already-open destination root. In particular,
+/// a parent symlink or junction cannot redirect the temporary file outside it.
+pub(crate) fn replace_file_at(
+    root: &cap_std::fs::Dir,
+    path: &Path,
+    data: &[u8],
+    mtime: Option<i64>,
+    permissions: Option<fs::Permissions>,
+) -> std::io::Result<()> {
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    // A name of its own for every write, created exclusively: two writers never share it.
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    root.create_dir_all(parent)?;
+    let dir = root.open_dir(parent)?;
+    let name = path.file_name().ok_or_else(|| std::io::Error::other("missing file name"))?;
     let (temp, mut file) = loop {
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let temp = path.with_file_name(format!(".{name}.{}-{n}.parallax-tmp", std::process::id()));
-        match fs::OpenOptions::new().write(true).create_new(true).open(&temp) {
-            Ok(file) => break (temp, file),
+        let temp = format!(".{}.{}-{n}.parallax-tmp", name.to_string_lossy(), std::process::id());
+        match dir.open_with(&temp, cap_std::fs::OpenOptions::new().write(true).create_new(true)) {
+            Ok(file) => break (temp, file.into_std()),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e),
         }
@@ -529,14 +544,16 @@ pub fn replace_file(
             file.set_modified(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(mtime as u64))?;
         }
         file.sync_all()?;
-        if let Some(permissions) = permissions.or_else(|| fs::metadata(path).ok().map(|m| m.permissions())) {
+        if let Some(permissions) = permissions {
             file.set_permissions(permissions)?;
+        } else if let Ok(meta) = dir.metadata(name) {
+            file.set_permissions(meta.permissions().into_std(&file)?)?;
         }
         drop(file);
-        fs::rename(&temp, path)
+        dir.rename(&temp, &dir, name)
     })();
     if result.is_err() {
-        let _ = fs::remove_file(&temp);
+        let _ = dir.remove_file(&temp);
     }
     result
 }

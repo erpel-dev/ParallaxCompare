@@ -542,10 +542,17 @@
 
   let shortcutsOpen = $state(false);
   let prefsOpen = $state(false);
-  // The user's theme wins over the system's; the text size scales the whole window.
+  // Resolve system changes as well as explicit choices against one CSS palette.
+  let systemLight = $state(window.matchMedia("(prefers-color-scheme: light)").matches);
+  onMount(() => {
+    const media = window.matchMedia("(prefers-color-scheme: light)");
+    const update = () => (systemLight = media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  });
   $effect(() => {
-    if (prefs.theme === "system") delete document.documentElement.dataset.theme;
-    else document.documentElement.dataset.theme = prefs.theme;
+    document.documentElement.dataset.theme = prefs.theme === "system" ? (systemLight ? "light" : "dark") : prefs.theme;
   });
   $effect(() => {
     getCurrentWebview().setZoom(prefs.zoom).catch(() => {});

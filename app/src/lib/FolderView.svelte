@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { summarizeErrors, exportErrors } from "./errorSummary";
   import { splitPatterns, joinPatterns } from "./patterns";
   import { onMount, tick } from "svelte";
   import { listen } from "@tauri-apps/api/event";
@@ -274,32 +275,23 @@
     return parts.filter((p) => p[2] > 0).map(([id, tone, n, label]) => ({ id, tone, n, label, share: n / counts.files }));
   });
 
-  /** "permission denied" from "/a/b: Permission denied (os error 13)". */
-  function causeOf(message: string | undefined): string {
-    const text = (message ?? "").replace(/\s*\(os error \d+\)/, "").trim();
-    const last = text.slice(text.lastIndexOf(": ") + (text.includes(": ") ? 2 : 0)).trim();
-    return last ? last.charAt(0).toLowerCase() + last.slice(1) : "could not be read";
-  }
-  /** The entries that could not be read or compared, by cause. */
+  /** Summarize only settled trees; progress events can update hundreds of times. */
   const errorInfo = $derived.by(() => {
+    if (running || !result) return null;
     void version;
-    if (!result || !counts?.errors) return null;
-    const causes = new Map<string, number>();
-    const lines: string[] = [];
-    const walk = (node: Node, path: string) => {
-      for (const child of node.children ?? []) {
-        const at = joinPath(path, child.name);
-        if (child.status === "error") {
-          const cause = causeOf(child.message);
-          causes.set(cause, (causes.get(cause) ?? 0) + 1);
-          if (lines.length < 20000) lines.push(`${at}\t${child.message ?? ""}`);
-        } else walk(child, at);
-      }
-    };
-    walk(result.root, "");
-    const top = [...causes].sort((a, b) => b[1] - a[1]).slice(0, 3);
-    return { count: lines.length, top, more: causes.size - top.length, lines };
+    return summarizeErrors(result.root);
   });
+
+  async function copyErrors() {
+    if (!result) return;
+    const list = exportErrors(result.root);
+    try {
+      await navigator.clipboard.writeText(list.text);
+      if (list.truncated) notify(`Copied ${list.copied.toLocaleString()} of ${list.total.toLocaleString()} errors. The list reached its export limit.`);
+    } catch (e) {
+      notify(`Could not copy the error list: ${String(e)}`);
+    }
+  }
 
   /** What is left of a running comparison, once the number of files has settled. */
   const remaining = $derived.by(() => {
@@ -1277,14 +1269,14 @@
     </div>
   {/if}
 
-  {#if errorInfo && !errorsDismissed && filter !== "error"}
+  {#if errorInfo && !errorsDismissed && (filter !== "error" || result?.root.status === "error")}
     <div class="banner" role="alert">
       <b>{errorInfo.count.toLocaleString()} {errorInfo.count === 1 ? "entry" : "entries"} could not be read or compared</b>
       <span>{errorInfo.top.map(([cause, n]) => `${cause} (${n.toLocaleString()})`).join(", ")}{errorInfo.more > 0 ? `, ${errorInfo.more} other causes` : ""}</span>
       <span class="grow"></span>
       <button class="link" onclick={() => setFilter("error")}>Show them</button>
       <button class="link" onclick={() => run(true)} title="Compare again, reading archives and folders afresh">Retry</button>
-      <button class="link" onclick={() => navigator.clipboard.writeText(errorInfo!.lines.join("\n")).catch(() => {})} title="Copy the paths and messages">Copy the list</button>
+      <button class="link" onclick={copyErrors} title="Copy paths and messages (up to 20,000 entries or 4 MiB; truncation is reported)">Copy the list</button>
       <button class="link x" onclick={() => (errorsDismissed = true)} title="Hide this note; the Errors filter stays" aria-label="Hide">✕</button>
     </div>
   {/if}
