@@ -235,7 +235,14 @@
   }
   const counts = $derived.by(() => {
     void version;
-    return result ? (flat ? countFlatFiles(flatRows) : countFiles(result.root)) : null;
+    if (!result) return null;
+    const totals = flat ? countFlatFiles(flatRows) : countFiles(result.root);
+    // The root is not a row, but its own failure belongs in the error totals.
+    if (result.root.status === "error") {
+      totals.files++;
+      totals.errors++;
+    }
+    return totals;
   });
   const countFilters = $derived<CountFilter[]>([
     { id: "all", label: "All", count: counts?.files ?? 0, title: "Show all files" },
@@ -1274,7 +1281,7 @@
       <b>{errorInfo.count.toLocaleString()} {errorInfo.count === 1 ? "entry" : "entries"} could not be read or compared</b>
       <span>{errorInfo.top.map(([cause, n]) => `${cause} (${n.toLocaleString()})`).join(", ")}{errorInfo.more > 0 ? `, ${errorInfo.more} other causes` : ""}</span>
       <span class="grow"></span>
-      <button class="link" onclick={() => setFilter("error")}>Show them</button>
+      {#if result?.root.status !== "error" || errorInfo.count > 1}<button class="link" onclick={() => setFilter("error")}>Show them</button>{/if}
       <button class="link" onclick={() => run(true)} title="Compare again, reading archives and folders afresh">Retry</button>
       <button class="link" onclick={copyErrors} title="Copy paths and messages (up to 20,000 entries or 4 MiB; truncation is reported)">Copy the list</button>
       <button class="link x" onclick={() => (errorsDismissed = true)} title="Hide this note; the Errors filter stays" aria-label="Hide">✕</button>
@@ -1326,7 +1333,7 @@
     role="tree"
   >
     {#if result && rows.length === 0 && !running}
-      <div class="empty">{filter !== "all" ? "Nothing matches the current filter." : result.root.status === "same" ? "Both sides are identical." : "No files to compare."}</div>
+      <div class="empty">{result.root.status === "error" ? (result.root.message ?? "The compared root could not be read. Retry the comparison.") : filter !== "all" ? "Nothing matches the current filter." : result.root.status === "same" ? "Both sides are identical." : "No files to compare."}</div>
     {/if}
     <div class="spacer" style:height="{spacerHeight(rows.length * ROW)}px">
       <div class="window" style:transform="translateY({windowOffset(scrollTop, scale, first, ROW)}px)">
