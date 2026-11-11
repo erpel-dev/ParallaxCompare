@@ -1893,3 +1893,59 @@ fn member_invalidation_reopens_all_nested_indexes_of_an_externally_replaced_arch
     assert_eq!(&*source.vfs.read(&source.path("")).unwrap(), b"EXT A");
     assert_eq!(&*source.vfs.read(&sibling).unwrap(), b"EXT B");
 }
+
+/// Parent links must not redirect any part of a copy outside the destination.
+#[test]
+fn copying_refuses_destination_parent_links_that_escape_the_root() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    write(a.path(), &[("sub/file.txt", "new content"), ("sub/new/deep.txt", "new")]);
+    write(outside.path(), &[("file.txt", "DO NOT OVERWRITE")]);
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(outside.path(), b.path().join("sub")).unwrap();
+    #[cfg(windows)]
+    {
+        // Junctions need no developer mode or elevation, unlike Windows symlinks.
+        let output = Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(b.path().join("sub"))
+            .arg(outside.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    }
+    let (l, r) = pair(a.path(), b.path());
+    for selected in ["sub", "sub/file.txt", "sub/new/deep.txt"] {
+        let error = copy(&l, &r, selected).unwrap_err().to_string();
+        assert!(!error.is_empty());
+        assert_eq!(fs::read_to_string(outside.path().join("file.txt")).unwrap(), "DO NOT OVERWRITE");
+        assert!(!outside.path().join("new").exists());
+    }
+    assert!(ops::copy_file_as(&l, &r, "sub/file.txt", "sub/file.txt", &Progress::default()).is_err());
+    assert!(ops::copy_file_as(&l, &r, "sub/file.txt", "sub/created/deep.txt", &Progress::default()).is_err());
+    assert!(!outside.path().join("created").exists());
+    assert_eq!(fs::read_to_string(outside.path().join("file.txt")).unwrap(), "DO NOT OVERWRITE");
+    // A normal nested destination still works after the unsafe link is removed.
+    #[cfg(unix)]
+    fs::remove_file(b.path().join("sub")).unwrap();
+    #[cfg(windows)]
+    fs::remove_dir(b.path().join("sub")).unwrap();
+    assert_eq!(copy(&l, &r, "sub").unwrap(), 2);
+    assert_eq!(fs::read_to_string(b.path().join("sub/new/deep.txt")).unwrap(), "new");
+}
+
+#[cfg(unix)]
+#[test]
+fn copying_a_symlink_cannot_escape_through_a_destination_parent() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    write(a.path(), &[("sub/file.txt", "source")]);
+    write(outside.path(), &[("link", "DO NOT REMOVE")]);
+    std::os::unix::fs::symlink("file.txt", a.path().join("sub/link")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), b.path().join("sub")).unwrap();
+    let (l, r) = pair(a.path(), b.path());
+    assert!(copy(&l, &r, "sub/link").is_err());
+    assert_eq!(fs::read_to_string(outside.path().join("link")).unwrap(), "DO NOT REMOVE");
+}

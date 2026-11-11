@@ -77,7 +77,8 @@ fn git(dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(dir).args(args).env("GIT_TERMINAL_PROMPT", "0");
     let command = args.first().copied().unwrap_or_default();
-    crate::process::run_bytes(&mut cmd, "git", &format!("git {command}"), Duration::from_secs(120))
+    let run = if command == "cat-file" { crate::process::run_blob } else { crate::process::run_bytes };
+    run(&mut cmd, "git", &format!("git {command}"), Duration::from_secs(120))
 }
 
 fn git_text(dir: &Path, args: &[&str]) -> Result<String> {

@@ -31,10 +31,6 @@
   let open = $state(false);
   let el = $state<HTMLDivElement>();
 
-  /** Opens the legend; also from the command palette. */
-  export function showLegend() {
-    open = true;
-  }
 </script>
 
 <svelte:window

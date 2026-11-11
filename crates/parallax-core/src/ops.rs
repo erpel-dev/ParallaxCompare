@@ -11,7 +11,7 @@ use rayon::prelude::*;
 use crate::compare::Filter;
 use crate::progress::Progress;
 use crate::source::Source;
-use crate::vfs::local::{make_symlink, replace_file, same_file};
+use crate::vfs::local::{replace_file_at, same_file};
 use crate::vfs::{Change, Data, Entry, EntryKind, check_rel, join};
 use crate::{Error, Result};
 
@@ -63,13 +63,11 @@ pub fn copy(from: &Source, to: &Source, paths: &[String], filter: &Filter, progr
                 target.display()
             )));
         }
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent).map_err(|e| Error::io(parent.display().to_string(), e))?;
-        }
+        let destination = destination(to)?;
         if entry.kind != EntryKind::Dir {
             progress.expect(1);
         }
-        let result = copy_entry(from, &plan, &target, progress);
+        let result = copy_entry(from, &plan, &destination, Path::new(rel), &target, progress);
         // Also after a partial copy: whatever was written is on disk now.
         to.vfs.changed(&to.path(rel));
         copied += result?;
@@ -102,10 +100,15 @@ pub fn copy_file_as(from: &Source, to: &Source, src: &str, dst: &str, progress: 
         progress.advance(1)?;
         return Ok(1);
     };
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent).map_err(|e| Error::io(parent.display().to_string(), e))?;
-    }
-    let result = copy_entry(from, &CopyEntry { path: src.to_string(), entry, children: Vec::new() }, &target, progress);
+    let destination = destination(to)?;
+    let result = copy_entry(
+        from,
+        &CopyEntry { path: src.to_string(), entry, children: Vec::new() },
+        &destination,
+        Path::new(dst),
+        &target,
+        progress,
+    );
     to.vfs.changed(&to.path(dst));
     result
 }
@@ -205,19 +208,45 @@ fn collect_changes(from: &Source, to: &Source, plan: CopyEntry, progress: &Progr
         .collect()
 }
 
-/// Copies one entry to `target`; the children of a folder in parallel.
-fn copy_entry(from: &Source, plan: &CopyEntry, target: &Path, progress: &Progress) -> Result<u64> {
+/// The selected destination folder is the authority for every descendant write.
+fn destination(to: &Source) -> Result<cap_std::fs::Dir> {
+    let root = to
+        .vfs
+        .local_path(&to.path(""))
+        .ok_or_else(|| Error::Unsupported("destination is not a local folder".into()))?;
+    cap_std::fs::Dir::open_ambient_dir(&root, cap_std::ambient_authority())
+        .map_err(|e| Error::io(root.display().to_string(), e))
+}
+
+/// Copies one entry; writes stay below `destination`, including through links.
+fn copy_entry(
+    from: &Source,
+    plan: &CopyEntry,
+    destination: &cap_std::fs::Dir,
+    at: &Path,
+    target: &Path,
+    progress: &Progress,
+) -> Result<u64> {
     let entry = &plan.entry;
     let rel = &plan.path;
     let io_err = |e| Error::io(target.display().to_string(), e);
     progress.check()?;
     if entry.kind == EntryKind::Dir {
-        fs::create_dir_all(target).map_err(io_err)?;
+        destination.create_dir_all(at).map_err(io_err)?;
         progress.expect(plan.children.iter().filter(|c| c.entry.kind != EntryKind::Dir).count() as u64);
         return plan
             .children
             .par_iter()
-            .map(|child| copy_entry(from, child, &target.join(&child.entry.name), progress))
+            .map(|child| {
+                copy_entry(
+                    from,
+                    child,
+                    destination,
+                    &at.join(&child.entry.name),
+                    &target.join(&child.entry.name),
+                    progress,
+                )
+            })
             .try_reduce(|| 0, |a, b| Ok(a + b));
     }
     let source_path = from.vfs.local_path(&from.path(rel));
@@ -230,17 +259,28 @@ fn copy_entry(from: &Source, plan: &CopyEntry, target: &Path, progress: &Progres
     let data = from.vfs.read(&from.path(rel))?;
     if entry.kind == EntryKind::Symlink {
         // The data of a symlink is its target path.
-        if fs::symlink_metadata(target).is_ok() {
-            fs::remove_file(target).map_err(io_err)?;
+        let parent = at.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        destination.create_dir_all(parent).map_err(io_err)?;
+        let dir = destination.open_dir(parent).map_err(io_err)?;
+        let name = at.file_name().ok_or_else(|| Error::InvalidSource(at.display().to_string()))?;
+        if dir.symlink_metadata(name).is_ok() {
+            dir.remove_file(name).map_err(io_err)?;
         }
         let link_to = String::from_utf8_lossy(&data).into_owned();
-        make_symlink(&link_to, target).map_err(io_err)?;
+        #[cfg(not(windows))]
+        dir.symlink_contents(&link_to, name).map_err(io_err)?;
+        #[cfg(windows)]
+        if source_path.as_deref().is_some_and(Path::is_dir) {
+            dir.symlink_dir(link_to.replace('/', "\\"), name).map_err(io_err)?;
+        } else {
+            dir.symlink_file(link_to.replace('/', "\\"), name).map_err(io_err)?;
+        }
     } else {
         // Written next to the target and renamed over it: a symlink there is replaced, not
         // followed, and the target is only replaced once the copy is complete. The file
         // keeps the source's permissions (the executable bit), when the source is on disk.
         let permissions = source_path.and_then(|p| fs::metadata(p).ok()).map(|m| m.permissions());
-        replace_file(target, &data, entry.mtime, permissions).map_err(io_err)?;
+        replace_file_at(destination, at, &data, entry.mtime, permissions).map_err(io_err)?;
     }
     progress.advance(1)?;
     Ok(1)

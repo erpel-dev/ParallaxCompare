@@ -814,6 +814,9 @@ impl SolidBlock {
             // A failed block cannot reuse its partial stream. Active readers
             // retain their own handles; all other cached bytes are released now.
             st.files.clear();
+            // No completed block may advertise files whose cache was discarded.
+            // A resource failure must permit a fresh decode even after completion.
+            st.finished = false;
             SOLID_MEMORY_USED.fetch_sub(st.memory, std::sync::atomic::Ordering::AcqRel);
             st.memory = 0;
             self.spool.lock().take();
@@ -1101,12 +1104,17 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert!(!block.state.lock().running);
+        // Exercise invalidation of a completed cache deterministically, rather
+        // than depending on whether the decoder finished or stopped while idle.
+        block.finish_decode(Ok(Ok(true)), None);
+        assert!(block.state.lock().finished);
         assert!(block.spool.lock().is_some());
         let error =
             block.spool.lock().as_ref().unwrap().context.error(std::io::Error::from(std::io::ErrorKind::StorageFull));
         block.finish_decode(Ok(Err(std::io::Error::other("write failed").into())), Some(error));
         assert!(block.spool.lock().is_none(), "the failed temporary file is released");
         assert!(block.state.lock().files.is_empty());
+        assert!(!block.state.lock().finished, "a discarded cache must be decoded again");
         // An already-open cursor still owns the data it was handed.
         let mut old = Vec::new();
         reader.read_to_end(&mut old).unwrap();

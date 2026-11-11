@@ -1701,7 +1701,7 @@
     {/if}
     <span class="sep"></span>
     <button class:on={findOpen} onclick={() => (findOpen ? closeFind() : openFind())} disabled={!info} title="Find in both files (Ctrl+F)">Find</button>
-    <button class:on={wrapDetail} aria-pressed={wrapDetail} onclick={() => (wrapDetail = !wrapDetail)} disabled={!info} title="Show the whole selected line, wrapped, in the pane under the rows">Wrap line</button>
+    <button class:on={wrapDetail} aria-pressed={wrapDetail} onclick={() => (wrapDetail = !wrapDetail)} disabled={!info} title="Wrap the displayed portion of the selected line in the pane under the rows">Wrap text</button>
     <span class="grow"></span>
     {#if anyDirty}<button class="primary" onclick={() => save()} disabled={!!busy} title="Save the changed sides (Ctrl+S)">Save</button>{/if}
     <Dropdown label="Options" title="Whitespace, case, diff algorithm, syntax highlighting" changed={optionsChanged}>
@@ -1956,7 +1956,7 @@
     {#each [["Left", selectedRow?.l], ["Right", selectedRow?.r]] as const as [label, line] (label)}
       <div class="dline">
         <span class="lbl">{label}</span>
-        {#if line}{#each segments(line) as seg, si (si)}<span class:mk={seg.mark} style:color={seg.color}>{seg.text}</span>{/each}{/if}
+        {#if line}{#if line.o}<span class="cut lead">{line.o.toLocaleString()} characters omitted before … </span>{/if}{#each segments(line) as seg, si (si)}<span class:mk={seg.mark} style:color={seg.color}>{seg.text}</span>{/each}{#if line.x}<span class="cut"> … {line.x.toLocaleString()} characters omitted after</span>{/if}{/if}
       </div>
     {/each}
   </div>
