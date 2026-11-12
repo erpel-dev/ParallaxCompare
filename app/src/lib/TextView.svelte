@@ -25,6 +25,9 @@
   import FilterBar, { type CountFilter } from "./FilterBar.svelte";
   import { RowProjection, type Fold, type RowFilter } from "./rowFilter";
   import { prefs, CONTEXTS } from "./prefs.svelte";
+  import PrBar from "./PrBar.svelte";
+  import ThreadPanel from "./ThreadPanel.svelte";
+  import { marksFor, prConversations } from "./prConversation.svelte";
   import Menu, { type MenuItem, type MenuContext } from "./Menu.svelte";
   import type { Command } from "./commands";
   import Dropdown from "./Dropdown.svelte";
@@ -155,6 +158,102 @@
     void prefs.theme;
     if (themeReady) tick().then(() => resetRows());
   });
+  // ---- Pull request comments ----
+  /** The pull request this comparison shows, with its comments, if it is one. */
+  const pr = $derived(prConversations.get(session.id));
+  const prMarks = $derived(pr?.data && info && info.view === "text" ? marksFor(pr.data, path) : null);
+  /** Markers per side and 0-based line: the kind and the thread to go to. */
+  const lineMarks = $derived.by(() => {
+    const maps: [Map<number, { kind: "c" | "f" | "w"; thread: number | null; title: string }>, Map<number, { kind: "c" | "f" | "w"; thread: number | null; title: string }>] = [new Map(), new Map()];
+    if (!prMarks) return maps;
+    for (const a of prMarks.annotations) {
+      maps[1].set(a.to, { kind: a.level === "failure" ? "f" : "w", thread: null, title: `${a.check}: ${a.title ? a.title + " · " : ""}${a.message}` });
+    }
+    for (const t of prMarks.threads) {
+      const first = t.thread.comments[0];
+      maps[t.side === "left" ? 0 : 1].set(t.to, {
+        kind: t.thread.severity === "Important" ? "f" : "c",
+        thread: t.index,
+        title: `${first?.author ?? "ghost"}: ${(first?.body ?? "").slice(0, 160)}${t.thread.resolved ? " (resolved)" : ""}`,
+      });
+    }
+    return maps;
+  });
+  let threadsShown = $state(true);
+  /** Rows of the placed threads and annotations, from the backend (lines move with edits). */
+  let threadRows = $state(new Map<number, number>());
+  let annotationRows = $state<{ row: number; kind: "f" | "w" }[]>([]);
+  $effect(() => {
+    const marks = prMarks;
+    const id = info?.id;
+    void info?.rows;
+    if (!marks || id === undefined) {
+      threadRows = new Map();
+      annotationRows = [];
+      return;
+    }
+    const left = marks.threads.filter((t) => t.side === "left");
+    const right = marks.threads.filter((t) => t.side === "right");
+    Promise.all([
+      left.length ? api.rowsOfLines(id, "left", left.map((t) => t.to)) : Promise.resolve([]),
+      right.length || marks.annotations.length ? api.rowsOfLines(id, "right", [...right.map((t) => t.to), ...marks.annotations.map((a) => a.to)]) : Promise.resolve([]),
+    ])
+      .then(([l, r]) => {
+        if (info?.id !== id) return;
+        const map = new Map<number, number>();
+        left.forEach((t, i) => map.set(t.index, l[i]));
+        right.forEach((t, i) => map.set(t.index, r[i]));
+        threadRows = map;
+        annotationRows = marks.annotations.map((a, i) => ({ row: r[right.length + i], kind: a.level === "failure" ? "f" : "w" }));
+      })
+      .catch(() => {});
+  });
+  /** The thread at the selected row. */
+  const currentThread = $derived.by(() => {
+    if (selected === null) return null;
+    for (const [index, row] of threadRows) if (row === selected) return index;
+    return null;
+  });
+  const threadMarks = $derived.by(() => {
+    if (!displayTotal) return [];
+    const out: { top: number; kind: "c" | "f" | "w" }[] = [];
+    for (const [index, row] of threadRows) {
+      const t = pr?.data?.threads[index];
+      if (t && !t.resolved) out.push({ top: projection.position(row) / displayTotal, kind: t.severity === "Important" ? "f" : "c" });
+    }
+    for (const a of annotationRows) out.push({ top: projection.position(a.row) / displayTotal, kind: a.kind });
+    return out;
+  });
+  /** Selects the row of a thread and brings it into view. */
+  function goToThread(index: number) {
+    const row = threadRows.get(index);
+    if (row === undefined) return;
+    if (!projection.contains(row)) showAllRows();
+    selected = row;
+    anchor = null;
+    threadsShown = true;
+    tick().then(() => {
+      reveal(row);
+      keepFocus();
+    });
+  }
+  /** The next (1) or previous (-1) unresolved thread from the selected row. */
+  function nextThread(dir: 1 | -1) {
+    const open = [...threadRows].filter(([i]) => !pr?.data?.threads[i]?.resolved).sort((a, b) => a[1] - b[1]);
+    if (!open.length) return;
+    const here = selected ?? (dir > 0 ? -1 : Infinity);
+    const target = dir > 0 ? (open.find(([, r]) => r > here) ?? open[0]) : ([...open].reverse().find(([, r]) => r < here) ?? open[open.length - 1]);
+    goToThread(target[0]);
+  }
+  // A thread picked in the folder view is shown once this file's rows are placed.
+  $effect(() => {
+    const f = prConversations.focus;
+    if (!f || f.session !== session.id || f.path !== path || !threadRows.size) return;
+    prConversations.focus = null;
+    threadsShown = true;
+    goToThread(f.thread);
+  });
+
   /** The view's width: narrow windows get short buttons and one filter menu. */
   let width = $state(1400);
   const compact = $derived(width < 1000);
@@ -1535,6 +1634,7 @@
       if (e.key.toLowerCase() === "z" && !e.shiftKey) undo();
       else redo();
     }
+    else if (e.key === "F9" && !e.defaultPrevented && !isField(e.target) && prMarks) nextThread(e.shiftKey ? -1 : 1);
     // F7/F8 also when the focus has left the scroll area (which handles them otherwise), but not in a field.
     else if ((e.key === "F7" || e.key === "F8") && !e.defaultPrevented && !isField(e.target))
       next(e.key === "F8" ? 1 : -1);
@@ -1807,6 +1907,10 @@
     {/if}
   </div>
 
+  {#if pr}
+    <PrBar session={session.id} {pr} panelOpen={threadsShown && !!prMarks} onPanel={prMarks ? () => (threadsShown = !threadsShown) : undefined}
+      onReopen={() => edit?.[1].openPullRequest(pr.info.url)} />
+  {/if}
   {#if info && info.view !== "image"}
     <FilterBar items={rowFilters} value={rowFilter} onSelect={(id) => setRowFilter(id as RowFilter)} disabled={loading || awaiting} legend={lineLegend} {compact}
       extra={rowFilter !== "all" && rowFilter !== "equal" ? contextControl : undefined} />
@@ -1946,6 +2050,9 @@
         {#each hitMarks as m (m)}
           <em style:top="{m * 100}%"></em>
         {/each}
+        {#each threadMarks as m, i (i)}
+          <u class={m.kind} style:top="{m.top * 100}%"></u>
+        {/each}
         <b style:top="{((vTop / ROW) / displayTotal) * 100}%" style:height="{Math.min(100, (viewHeight / ROW / displayTotal) * 100)}%"></b>
       {/if}
     </div>
@@ -2013,7 +2120,7 @@
                   {@render lineEditor(index, s, !line, line ? String(line.n + 1) : "+")}
                 {:else if line}
                   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                  <div class="ln" data-side={SIDE_NAMES[s]} onclick={() => (activeSide = s)}>{line.n + 1}</div>
+                  <div class="ln" data-side={SIDE_NAMES[s]} onclick={() => (activeSide = s)}>{#if lineMarks[s].get(line.n)}{@const m = lineMarks[s].get(line.n)!}<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions --><span class="cmk {m.kind}" title={m.title} onclick={(e) => { if (m.thread !== null) { e.stopPropagation(); selected = index; threadsShown = true; } }}>{m.kind === "c" ? "💬" : m.kind === "f" ? "●" : "▲"}</span>{/if}{line.n + 1}</div>
                   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
                   <div class="code" data-side={SIDE_NAMES[s]} class:editable={editable[s]} class:sel={anchor !== null && s === activeSide && lineRange && index >= lineRange[0] && index < lineRange[1]} onclick={(e) => clickCode(e, s, index)}><span class="text" style:transform="translateX({-hscroll}px)">{#if line.o}<span class="cut lead" title="The start of the line is left out, so its first change shows">{line.o.toLocaleString()} characters …</span>{/if}{#each segments(line, hitsAt.get(index * 2 + s)) as seg, si (si)}<span class:mk={seg.mark} class:hit={seg.hit} class:now={seg.now} style:color={seg.now ? null : seg.color}>{seg.text}</span>{/each}</span>{#if line.nn}<span class="cut" title="The other file ends with a line break">no line break at end</span>{/if}{#if line.x}<span class="cut" title="The line is cut for display">… {line.x.toLocaleString()} more characters</span>{/if}</div>
                 {:else if row}
@@ -2032,6 +2139,9 @@
         </div>
       </div>
     </div>
+    {#if pr?.data && prMarks && threadsShown && (prMarks.threads.length || prMarks.annotations.length || prMarks.unplaced.length)}
+      <ThreadPanel data={pr.data} {path} current={currentThread} onGo={goToThread} onClose={() => (threadsShown = false)} />
+    {/if}
   </div>
 
   {/if}
@@ -2063,7 +2173,7 @@
       {#if uncommitted}
         <span class="nudge">{uncommitted.name} has uncommitted changes. <button class="link" onclick={compareWithHead} title="Compare it with its last commit (Alt+H)">Compare with HEAD</button> <button class="link dim" onclick={() => { uncommitted = null; uncommittedDismissed = true; }} aria-label="Dismiss">×</button></span>
       {/if}
-      <span class="hint">{editable[0] || editable[1] ? "Click a line to edit · " : ""}F7 / F8: previous / next difference · <kbd>?</kbd> all keys</span>
+      <span class="hint">{editable[0] || editable[1] ? "Click a line to edit · " : ""}F7 / F8: previous / next difference · {#if prMarks?.threads.length}F9: next thread · {/if}<kbd>?</kbd> all keys</span>
     {/if}
   </div>
 </div>
@@ -2386,6 +2496,33 @@
   }
   .findbar .close {
     margin-left: auto;
+  }
+  .overview u {
+    position: absolute;
+    right: 0;
+    width: 5px;
+    height: 3px;
+    border-radius: 1px;
+    background: var(--accent);
+  }
+  .overview u.f {
+    background: var(--diff);
+  }
+  .overview u.w {
+    background: var(--similar);
+  }
+  .cmk {
+    float: left;
+    padding-left: 2px;
+    font-size: 10px;
+    cursor: pointer;
+    color: var(--accent);
+  }
+  .cmk.f {
+    color: var(--diff);
+  }
+  .cmk.w {
+    color: var(--similar);
   }
   .overview em {
     position: absolute;

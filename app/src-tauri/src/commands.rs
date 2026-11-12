@@ -297,6 +297,38 @@ pub async fn resolve_pull_request(url: String) -> CmdResult<parallax_core::pull_
     blocking(move || parallax_core::pull_request::resolve(&url).map_err(err)).await
 }
 
+/// The comments, reviews and CI findings of a pull request, for the head it was
+/// compared at. Read only when a pull request comparison asks for it.
+#[tauri::command]
+pub async fn pull_request_conversation(
+    url: String,
+    head: String,
+) -> CmdResult<parallax_core::pull_request::Conversation> {
+    blocking(move || parallax_core::pull_request::conversation(&url, &head).map_err(err)).await
+}
+
+/// Opens a link of a pull request's conversation in the browser: HTTPS links on
+/// the pull request's own host only, so text in a comment cannot open anything else.
+#[tauri::command]
+pub async fn open_pull_request_link(url: String, link: String) -> CmdResult<()> {
+    if !parallax_core::pull_request::link_allowed(&url, &link) {
+        return Err(format!("only links on the pull request's GitHub host are opened here: {link}"));
+    }
+    blocking(move || tauri_plugin_opener::open_url(&link, None::<&str>).map_err(err)).await
+}
+
+/// The rows that show the given 0-based lines of one side of a file comparison.
+#[tauri::command]
+pub async fn rows_of_lines(state: State<'_, AppState>, id: u64, side: Side, lines: Vec<u32>) -> CmdResult<Vec<u32>> {
+    let diff = state.diff(id)?;
+    blocking(move || {
+        let fd = diff.lock();
+        let len = fd.edit.doc(side).len();
+        Ok(lines.iter().map(|&l| fd.edit.row_of_line(side, (l as usize).min(len.saturating_sub(1)))).collect())
+    })
+    .await
+}
+
 /// The source of the entry at `rel` on one side of a comparison, so a file opened
 /// from a folder comparison can be compared on its own.
 #[tauri::command]

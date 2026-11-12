@@ -213,6 +213,342 @@ fn resolve_with(
     })
 }
 
+// ---------------------------------------------------------------------------
+// The conversation of a pull request: reviews, comments, review threads with
+// their lines, and the annotations CI left on the head commit.
+
+/// Everything said about a pull request, as far as `gh` may read it.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Conversation {
+    pub url: String,
+    pub number: u64,
+    pub title: String,
+    pub author: Option<String>,
+    /// `OPEN`, `MERGED` or `CLOSED`.
+    pub state: String,
+    /// The head the pull request has now; `pinned_head` is the one compared.
+    pub head: String,
+    pub pinned_head: String,
+    pub reviews: Vec<Review>,
+    /// Comments on the pull request as a whole.
+    pub comments: Vec<Note>,
+    pub threads: Vec<Thread>,
+    pub annotations: Vec<Annotation>,
+    pub checks: Checks,
+    /// Some reviews, comments or threads were left out (more than the app reads).
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Note {
+    pub author: Option<String>,
+    pub bot: bool,
+    /// Markdown, as written: shown without raw HTML.
+    pub body: String,
+    pub created: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Review {
+    pub author: Option<String>,
+    pub bot: bool,
+    /// `APPROVED`, `CHANGES_REQUESTED`, `COMMENTED` or `DISMISSED`.
+    pub state: String,
+    pub body: String,
+    pub submitted: Option<String>,
+    pub url: String,
+}
+
+/// A review thread: comments on one place of one file.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Thread {
+    pub path: String,
+    /// `left` (the merge base) or `right` (the head).
+    pub side: &'static str,
+    /// 1-based lines on the current head's diff; None when outdated or on the file.
+    pub line: Option<u32>,
+    pub start_line: Option<u32>,
+    /// Where it was made, for outdated threads.
+    pub original_line: Option<u32>,
+    pub resolved: bool,
+    pub outdated: bool,
+    /// On the file as a whole, not on lines.
+    pub file_level: bool,
+    /// "Important", "Nit" or "Pre-existing", from a marker a review bot puts first.
+    pub severity: Option<&'static str>,
+    pub comments: Vec<Note>,
+}
+
+/// A finding CI attached to a line of the head commit (lint, compiler, analyzers).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Annotation {
+    pub path: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    /// `failure`, `warning` or `notice`.
+    pub level: String,
+    pub title: Option<String>,
+    pub message: String,
+    /// The check that reported it.
+    pub check: String,
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Checks {
+    pub passed: u32,
+    pub failed: u32,
+    pub pending: u32,
+}
+
+/// GraphQL pages of 100 review threads read at most.
+const THREAD_PAGES: u32 = 20;
+/// Check runs whose annotations are read at most.
+const ANNOTATED_RUNS: usize = 30;
+
+const CONVERSATION_QUERY: &str = r#"query($owner: String!, $repo: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      number title state url headRefOid
+      author { login __typename }
+      reviews(first: 100) { pageInfo { hasNextPage } nodes { author { login __typename } state body submittedAt url } }
+      comments(first: 100) { pageInfo { hasNextPage } nodes { author { login __typename } body createdAt url } }
+      reviewThreads(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          path line startLine originalLine diffSide isResolved isOutdated subjectType
+          comments(first: 100) { pageInfo { hasNextPage } nodes { author { login __typename } body createdAt url } }
+        }
+      }
+    }
+  }
+}"#;
+
+/// The conversation of the pull request at `url`, whose comparison shows `pinned_head`.
+/// Read only on request; nothing is changed on the server.
+pub fn conversation(url: &str, pinned_head: &str) -> Result<Conversation> {
+    let pr = PullRequestUrl::parse(url)?;
+    commit_id(pinned_head)?;
+    let help = pr.access_help();
+    let number = pr.number.to_string();
+    let result = conversation_with(
+        &pr,
+        pinned_head,
+        &mut |after| {
+            let query = format!("query={CONVERSATION_QUERY}");
+            let (owner, repo, number) =
+                (format!("owner={}", pr.owner), format!("repo={}", pr.repo), format!("number={number}"));
+            let after = after.map(|a| format!("after={a}"));
+            let mut args =
+                vec!["api", "--hostname", &pr.host, "graphql", "-f", &query, "-f", &owner, "-f", &repo, "-F", &number];
+            if let Some(a) = &after {
+                args.extend(["-f", a.as_str()]);
+            }
+            let json = gh(&args).map_err(|e| bad(format!("cannot read the comments: {e}. {help}")))?;
+            serde_json::from_str(&json).map_err(|e| bad(format!("invalid API response: {e}")))
+        },
+        &mut |endpoint| {
+            let json = gh(&["api", "--hostname", &pr.host, "--method", "GET", endpoint])
+                .map_err(|e| bad(format!("cannot read {endpoint}: {e}")))?;
+            serde_json::from_str(&json).map_err(|e| bad(format!("invalid API response: {e}")))
+        },
+    );
+    result.map_err(|e| bad(format!("cannot read the conversation of {}: {e}", pr.url)))
+}
+
+fn conversation_with(
+    pr: &PullRequestUrl,
+    pinned_head: &str,
+    graphql: &mut dyn FnMut(Option<&str>) -> Result<serde_json::Value>,
+    rest: &mut dyn FnMut(&str) -> Result<serde_json::Value>,
+) -> Result<Conversation> {
+    use serde_json::Value;
+    let text = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+    let author = |v: &Value| -> (Option<String>, bool) {
+        let a = v.get("author").filter(|a| !a.is_null());
+        let login = a.and_then(|a| a.get("login")).and_then(Value::as_str).map(str::to_string);
+        let bot = a.and_then(|a| a.get("__typename")).and_then(Value::as_str) == Some("Bot")
+            || login.as_deref().is_some_and(|l| l.ends_with("[bot]"));
+        (login, bot)
+    };
+    let note = |v: &Value, created: &str| {
+        let (author, bot) = author(v);
+        Note { author, bot, body: text(v, "body"), created: text(v, created), url: text(v, "url") }
+    };
+    let nodes = |v: &Value| v.get("nodes").and_then(Value::as_array).cloned().unwrap_or_default();
+    let more = |v: &Value| v.pointer("/pageInfo/hasNextPage").and_then(Value::as_bool).unwrap_or(false);
+
+    let mut after: Option<String> = None;
+    let mut conv: Option<Conversation> = None;
+    let mut threads = Vec::new();
+    let mut truncated = false;
+    for page in 0..THREAD_PAGES {
+        let data = graphql(after.as_deref())?;
+        if let Some(errors) = data.get("errors").and_then(Value::as_array).filter(|e| !e.is_empty()) {
+            let message = errors.iter().filter_map(|e| e.get("message").and_then(Value::as_str)).collect::<Vec<_>>();
+            return Err(bad(message.join("; ")));
+        }
+        let pull = data
+            .pointer("/data/repository/pullRequest")
+            .filter(|p| !p.is_null())
+            .ok_or_else(|| bad("the pull request was not found"))?;
+        if conv.is_none() {
+            if pull.get("number").and_then(Value::as_u64) != Some(pr.number) {
+                return Err(bad("the server returned a different pull request"));
+            }
+            let head = text(pull, "headRefOid");
+            commit_id(&head)?;
+            let reviews = pull.get("reviews").cloned().unwrap_or_default();
+            let comments = pull.get("comments").cloned().unwrap_or_default();
+            truncated |= more(&reviews) || more(&comments);
+            conv = Some(Conversation {
+                url: pr.url.clone(),
+                number: pr.number,
+                title: text(pull, "title"),
+                author: author(pull).0,
+                state: text(pull, "state"),
+                head,
+                pinned_head: pinned_head.to_string(),
+                reviews: nodes(&reviews)
+                    .iter()
+                    .filter(|r| text(r, "state") != "PENDING")
+                    .map(|r| {
+                        let (author, bot) = author(r);
+                        let submitted = r.get("submittedAt").and_then(Value::as_str).map(str::to_string);
+                        Review {
+                            author,
+                            bot,
+                            state: text(r, "state"),
+                            body: text(r, "body"),
+                            submitted,
+                            url: text(r, "url"),
+                        }
+                    })
+                    .collect(),
+                comments: nodes(&comments).iter().map(|c| note(c, "createdAt")).collect(),
+                threads: Vec::new(),
+                annotations: Vec::new(),
+                checks: Checks::default(),
+                truncated: false,
+            });
+        }
+        let page_threads = pull.get("reviewThreads").cloned().unwrap_or_default();
+        for t in nodes(&page_threads) {
+            let line = |k: &str| t.get(k).and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok());
+            let comments = t.get("comments").cloned().unwrap_or_default();
+            truncated |= more(&comments);
+            let comments: Vec<Note> = nodes(&comments).iter().map(|c| note(c, "createdAt")).collect();
+            let severity = comments.first().and_then(|c| severity(&c.body));
+            let file_level = text(&t, "subjectType") == "FILE";
+            let outdated = t.get("isOutdated").and_then(Value::as_bool).unwrap_or(false);
+            threads.push(Thread {
+                path: text(&t, "path"),
+                side: if text(&t, "diffSide") == "LEFT" { "left" } else { "right" },
+                line: if outdated { None } else { line("line") },
+                start_line: if outdated { None } else { line("startLine") },
+                original_line: line("originalLine"),
+                resolved: t.get("isResolved").and_then(Value::as_bool).unwrap_or(false),
+                outdated,
+                file_level,
+                severity,
+                comments,
+            });
+        }
+        let next = page_threads.pointer("/pageInfo/endCursor").and_then(Value::as_str).map(str::to_string);
+        if !more(&page_threads) || next.is_none() {
+            break;
+        }
+        if page + 1 == THREAD_PAGES {
+            truncated = true;
+        }
+        after = next;
+    }
+    let mut conv = conv.ok_or_else(|| bad("no response"))?;
+    conv.threads = threads;
+
+    // Checks and their annotations, on the head that is compared. CI that cannot
+    // be read (no permission, no checks) leaves the rest of the conversation.
+    if let Ok(runs) = rest(&format!("{}/commits/{pinned_head}/check-runs?per_page=100", pr.endpoint())) {
+        let runs = runs.get("check_runs").and_then(Value::as_array).cloned().unwrap_or_default();
+        for run in &runs {
+            let status = text(run, "status");
+            match (status.as_str(), run.get("conclusion").and_then(Value::as_str)) {
+                ("completed", Some("success" | "neutral" | "skipped")) => conv.checks.passed += 1,
+                ("completed", _) => conv.checks.failed += 1,
+                _ => conv.checks.pending += 1,
+            }
+        }
+        let annotated =
+            runs.iter().filter(|r| r.pointer("/output/annotations_count").and_then(Value::as_u64).unwrap_or(0) > 0);
+        for run in annotated.take(ANNOTATED_RUNS) {
+            let Some(id) = run.get("id").and_then(Value::as_u64) else { continue };
+            let Ok(list) = rest(&format!("{}/check-runs/{id}/annotations?per_page=100", pr.endpoint())) else {
+                continue;
+            };
+            for a in list.as_array().into_iter().flatten() {
+                let line = |k: &str| a.get(k).and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok()).unwrap_or(0);
+                let path = text(a, "path");
+                if path.is_empty() || line("start_line") == 0 {
+                    continue;
+                }
+                conv.annotations.push(Annotation {
+                    path,
+                    start_line: line("start_line"),
+                    end_line: line("end_line").max(line("start_line")),
+                    level: text(a, "annotation_level"),
+                    title: a.get("title").and_then(Value::as_str).filter(|t| !t.is_empty()).map(str::to_string),
+                    message: text(a, "message"),
+                    check: text(run, "name"),
+                    url: run.get("html_url").and_then(Value::as_str).map(str::to_string),
+                });
+            }
+        }
+    }
+    conv.truncated = truncated;
+    Ok(conv)
+}
+
+/// The severity a review bot marks a finding with, at the start of its comment.
+fn severity(body: &str) -> Option<&'static str> {
+    let start = body.trim_start().trim_start_matches(['*', '_', '#', ' ', '>']);
+    let lower = start.chars().take(24).collect::<String>().to_lowercase();
+    if start.starts_with('🔴')
+        || start.starts_with('🟠')
+        || lower.starts_with("important")
+        || lower.starts_with("[p0]")
+        || lower.starts_with("[p1]")
+    {
+        Some("Important")
+    } else if start.starts_with('🟡')
+        || lower.starts_with("nit")
+        || lower.starts_with("[p2]")
+        || lower.starts_with("[p3]")
+    {
+        Some("Nit")
+    } else if start.starts_with('🟣') || lower.starts_with("pre-existing") {
+        Some("Pre-existing")
+    } else {
+        None
+    }
+}
+
+/// Whether `link` may be opened for the pull request at `url`: HTTPS on its host.
+pub fn link_allowed(url: &str, link: &str) -> bool {
+    let (Ok(pr), Ok(link)) = (PullRequestUrl::parse(url), Url::parse(link)) else { return false };
+    link.scheme() == "https"
+        && link.username().is_empty()
+        && link.password().is_none()
+        && link.host_str().is_some()
+        && link[url::Position::BeforeHost..url::Position::AfterPort] == pr.host
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,6 +574,104 @@ mod tests {
             assert_eq!(endpoint, format!("repos/team/project/compare/{TARGET}...{HEAD}?per_page=1"));
             Ok(json!({"merge_base_commit":{"sha":BASE}}))
         }
+    }
+
+    #[test]
+    fn conversation_with_threads_reviews_and_annotations() {
+        let who = |login: &str, kind: &str| json!({"login": login, "__typename": kind});
+        let thread = |path: &str, line: Value, side: &str, outdated: bool, body: &str, author: Value| {
+            json!({"path": path, "line": line, "startLine": null, "originalLine": 7, "diffSide": side,
+                   "isResolved": false, "isOutdated": outdated, "subjectType": "LINE",
+                   "comments": {"pageInfo": {"hasNextPage": false}, "nodes": [
+                       {"author": author, "body": body, "createdAt": "2026-11-12T10:00:00Z", "url": "https://github.company.example/c/1"}]}})
+        };
+        let page = |threads: Vec<Value>, next: Option<&str>| {
+            json!({"data": {"repository": {"pullRequest": {
+                "number": 42, "title": "Change calibration", "state": "OPEN", "url": "x", "headRefOid": HEAD,
+                "author": who("alice", "User"),
+                "reviews": {"pageInfo": {"hasNextPage": false}, "nodes": [
+                    {"author": who("bob", "User"), "state": "APPROVED", "body": "", "submittedAt": "2026-11-12T11:00:00Z", "url": "u"},
+                    {"author": who("carol", "User"), "state": "PENDING", "body": "", "submittedAt": null, "url": "u"}]},
+                "comments": {"pageInfo": {"hasNextPage": false}, "nodes": [
+                    {"author": null, "body": "Thanks!", "createdAt": "2026-11-12T09:00:00Z", "url": "u"}]},
+                "reviewThreads": {"pageInfo": {"hasNextPage": next.is_some(), "endCursor": next}, "nodes": threads}
+            }}}})
+        };
+        let mut pages = vec![
+            page(
+                vec![thread(
+                    "src/a.rs",
+                    json!(12),
+                    "RIGHT",
+                    false,
+                    "🔴 **Important**: unwrap_or(0) hides errors",
+                    who("claude", "Bot"),
+                )],
+                Some("c1"),
+            ),
+            page(vec![thread("src/b.rs", json!(null), "LEFT", true, "Old remark", who("bob", "User"))], None),
+        ]
+        .into_iter();
+        let mut afters = Vec::new();
+        let conv = conversation_with(
+            &pr(),
+            HEAD,
+            &mut |after| {
+                afters.push(after.map(str::to_string));
+                Ok(pages.next().unwrap())
+            },
+            &mut |endpoint| {
+                if endpoint.ends_with("/check-runs?per_page=100") {
+                    assert_eq!(endpoint, format!("repos/team/project/commits/{HEAD}/check-runs?per_page=100"));
+                    Ok(json!({"check_runs": [
+                        {"id": 7, "name": "clippy", "status": "completed", "conclusion": "failure", "html_url": "https://github.company.example/r/7", "output": {"annotations_count": 1}},
+                        {"id": 8, "name": "test", "status": "in_progress", "conclusion": null, "output": {"annotations_count": 0}}]}))
+                } else {
+                    assert_eq!(endpoint, "repos/team/project/check-runs/7/annotations?per_page=100");
+                    Ok(json!([{"path": "src/a.rs", "start_line": 20, "end_line": 20, "annotation_level": "warning",
+                               "title": "", "message": "too many arguments"}]))
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(afters, [None, Some("c1".to_string())]);
+        assert_eq!(
+            (conv.title.as_str(), conv.author.as_deref(), conv.head.as_str()),
+            ("Change calibration", Some("alice"), HEAD)
+        );
+        // Pending reviews are drafts of their author, not shown.
+        assert_eq!(conv.reviews.len(), 1);
+        assert_eq!(conv.reviews[0].state, "APPROVED");
+        assert_eq!(conv.comments[0].author, None);
+        assert_eq!(conv.threads.len(), 2);
+        let (a, b) = (&conv.threads[0], &conv.threads[1]);
+        assert_eq!((a.side, a.line, a.severity, a.comments[0].bot), ("right", Some(12), Some("Important"), true));
+        // Outdated threads keep where they were made, not a current line.
+        assert_eq!((b.side, b.line, b.original_line, b.outdated), ("left", None, Some(7), true));
+        assert_eq!(conv.checks, Checks { passed: 0, failed: 1, pending: 1 });
+        assert_eq!(conv.annotations.len(), 1);
+        assert_eq!((conv.annotations[0].check.as_str(), conv.annotations[0].title.as_deref()), ("clippy", None));
+        assert!(!conv.truncated);
+    }
+
+    #[test]
+    fn conversation_errors_and_links() {
+        let err = conversation_with(
+            &pr(),
+            HEAD,
+            &mut |_| Ok(json!({"errors": [{"message": "Could not resolve to a Repository"}]})),
+            &mut |_| unreachable!(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Could not resolve"), "{err}");
+        assert_eq!(severity("  **🟡 Nit:** naming"), Some("Nit"));
+        assert_eq!(severity("[P1] crash on empty input"), Some("Important"));
+        assert_eq!(severity("Looks good"), None);
+        let url = "https://github.company.example/team/project/pull/42";
+        assert!(link_allowed(url, "https://github.company.example/team/project/pull/42#discussion_r1"));
+        assert!(!link_allowed(url, "https://evil.example/x"));
+        assert!(!link_allowed(url, "http://github.company.example/x"));
+        assert!(!link_allowed(url, "https://user@github.company.example/x"));
     }
 
     #[test]

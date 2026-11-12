@@ -12,6 +12,66 @@ export interface PullRequestInfo {
   title: string;
 }
 
+/** Something said in a pull request; `body` is Markdown from anyone who can comment. */
+export interface PrNote {
+  author: string | null;
+  bot: boolean;
+  body: string;
+  created: string;
+  url: string;
+}
+
+export interface PrReview {
+  author: string | null;
+  bot: boolean;
+  state: "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED" | "DISMISSED" | string;
+  body: string;
+  submitted: string | null;
+  url: string;
+}
+
+/** Comments on one place of one file; lines are 1-based. */
+export interface PrThread {
+  path: string;
+  side: "left" | "right";
+  line: number | null;
+  startLine: number | null;
+  originalLine: number | null;
+  resolved: boolean;
+  outdated: boolean;
+  fileLevel: boolean;
+  severity: "Important" | "Nit" | "Pre-existing" | null;
+  comments: PrNote[];
+}
+
+/** A finding CI attached to lines of the compared head (1-based). */
+export interface PrAnnotation {
+  path: string;
+  startLine: number;
+  endLine: number;
+  level: "failure" | "warning" | "notice" | string;
+  title: string | null;
+  message: string;
+  check: string;
+  url: string | null;
+}
+
+export interface PrConversation {
+  url: string;
+  number: number;
+  title: string;
+  author: string | null;
+  state: string;
+  head: string;
+  pinnedHead: string;
+  reviews: PrReview[];
+  comments: PrNote[];
+  threads: PrThread[];
+  annotations: PrAnnotation[];
+  checks: { passed: number; failed: number; pending: number };
+  truncated: boolean;
+}
+
 export interface PullRequestComparison extends PullRequestInfo {
   left: SourceSpec;
   right: SourceSpec;
@@ -576,6 +636,9 @@ export const api = {
   parseSource: (text: string) => invoke<SourceSpec>("parse_source", { text }),
   previewSource: (text: string, spec: SourceSpec | null = null) => invoke<SourcePreview>("preview_source", { text, spec }),
   resolvePullRequest: (url: string) => invoke<PullRequestComparison>("resolve_pull_request", { url }),
+  pullRequestConversation: (url: string, head: string) => invoke<PrConversation>("pull_request_conversation", { url, head }),
+  openPullRequestLink: (url: string, link: string) => invoke<void>("open_pull_request_link", { url, link }),
+  rowsOfLines: (id: number, side: SideName, lines: number[]) => invoke<number[]>("rows_of_lines", { id, side, lines }),
   sideSource: (id: number, left: boolean, rel: string) => invoke<SourceSpec>("side_source", { id, left, rel }),
   completePath: (text: string) => invoke<Completion[]>("complete_path", { text }),
   sideVersions: (spec: SourceSpec) => invoke<Versions>("side_versions", { spec }),

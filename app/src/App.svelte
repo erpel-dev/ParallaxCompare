@@ -6,6 +6,7 @@
   import ConfirmDialog from "./lib/ConfirmDialog.svelte";
   import Shortcuts, { type ShortcutView } from "./lib/Shortcuts.svelte";
   import Preferences from "./lib/Preferences.svelte";
+  import { prConversations } from "./lib/prConversation.svelte";
   import { prefs } from "./lib/prefs.svelte";
   import ConflictsView from "./lib/ConflictsView.svelte";
   import FolderView from "./lib/FolderView.svelte";
@@ -172,6 +173,8 @@
     if (request.pullRequest) {
       session.left.rev = "Merge base";
       session.right.rev = `PR #${request.pullRequest.number} head`;
+      // Comments, reviews and CI findings load in the background, for this head.
+      if (request.right.type === "gitRev") prConversations.register(session.id, request.pullRequest, request.right.rev);
     }
     const title = request.pullRequest ? `PR #${request.pullRequest.number}: ${request.pullRequest.title}` : titleFor(session);
     const tab: SessionTab = session.isFile

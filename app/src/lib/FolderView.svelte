@@ -17,6 +17,9 @@
   import PathBar, { type SideEdit } from "./PathBar.svelte";
   import { scaledWheel, scrollScale, spacerHeight, windowOffset } from "./vscroll";
   import { formatSize, formatTime } from "./format";
+  import PrBar from "./PrBar.svelte";
+  import ThreadPanel from "./ThreadPanel.svelte";
+  import { countsByPath, prConversations } from "./prConversation.svelte";
   import {
     allFolders,
     countFiles,
@@ -153,10 +156,30 @@
     void version;
     return flat && result ? flatFiles(result.root, "all", moved, pairStatus) : [];
   });
+  /** The pull request this comparison shows, with its comments, if it is one. */
+  const pr = $derived(prConversations.get(session.id));
+  const prCounts = $derived(pr?.data ? countsByPath(pr.data) : null);
+  let prPanel = $state(false);
+  /** Only files (and their folders) with comments or findings. */
+  let onlyCommented = $state(false);
+  function toggleCommented() {
+    onlyCommented = !onlyCommented;
+    // Folders on the way to a comment open, so the files show.
+    if (onlyCommented && prCounts) expanded = new Set([...expanded, ...prCounts.keys()]);
+  }
+  /** Opens the file of a thread and shows the thread there. */
+  function goToThread(index: number) {
+    const thread = pr?.data?.threads[index];
+    if (!thread) return;
+    prConversations.focus = { session: session.id, path: thread.path, thread: index };
+    onOpenFile(thread.path);
+  }
+
   const rows = $derived.by(() => {
     void version;
     if (!result) return [];
-    return flat ? flatRows.filter((r) => r.pending || selfMatches(r.node, filter)) : flatten(result.root, expanded, filter);
+    const all = flat ? flatRows.filter((r) => r.pending || selfMatches(r.node, filter)) : flatten(result.root, expanded, filter);
+    return onlyCommented && prCounts ? all.filter((r) => prCounts.has(r.path)) : all;
   });
   const rowByPath = $derived(new Map(rows.map((r) => [r.path, r])));
 
@@ -1174,6 +1197,10 @@
   </div>
 {/snippet}
 
+{#snippet commentedToggle()}
+  <button class="small" class:on={onlyCommented} aria-pressed={onlyCommented} onclick={toggleCommented} title="Show only files with comments, findings or CI annotations">Only files with comments</button>
+{/snippet}
+
 {#snippet treeButtons()}
   <button onclick={() => setAll(true)} disabled={flat} title="Expand all folders">Expand</button>
   <button onclick={() => setAll(false)} disabled={flat} title="Collapse all folders">Collapse</button>
@@ -1316,6 +1343,13 @@
     </div>
   {/if}
 
+  {#if pr}
+    <PrBar session={session.id} {pr} panelOpen={prPanel} onPanel={() => (prPanel = !prPanel)}
+      onReopen={() => edit?.[1].openPullRequest(pr.info.url)} extra={prCounts?.size ? commentedToggle : undefined} />
+  {/if}
+
+  <div class="main">
+  <div class="col">
   <div class="pathbars">
     <PathBar bind:this={pathbars[0]} info={session.left} edit={edit?.[0]} title="Left" active={activeSide === "left"} />
     <PathBar bind:this={pathbars[1]} info={session.right} edit={edit?.[1]} title="Right" active={activeSide === "right"} />
@@ -1376,7 +1410,7 @@
                     {:else}
                       <span class="chev"></span>
                     {/if}
-                    <span class="icon">{icon(side)}</span>{#if row.folders?.[i]}<span class="dir">{row.folders[i]}/</span>{/if}{i === 1 && row.rightPath ? row.rightPath.split("/").pop() : row.node.name}{#if side.ignored && !row.inIgnored?.[i]}<span class="ignored-tag" title="Ignored by Git: a .gitignore rule matches it, and it is not tracked">ignored</span>{/if}{#if row.container && !row.expanded && !row.pending && !closedArchive(row.node) && (i === 0 || !row.node.left)}{@const c = inside(row.node)}{#if c.files > c.same}<span class="inside" title="Files in this folder that are not the same, by status">{#if c.different}<span class="different">{c.different.toLocaleString()} ≠</span>{/if}{#if c.similar}<span class="similar">{c.similar.toLocaleString()} ≈</span>{/if}{#if c.leftOnly}<span class="leftOnly">{c.leftOnly.toLocaleString()} ◀</span>{/if}{#if c.rightOnly}<span class="rightOnly">{c.rightOnly.toLocaleString()} ▶</span>{/if}{#if c.errors}<span class="error">{c.errors.toLocaleString()} !</span>{/if}</span>{/if}{/if}
+                    <span class="icon">{icon(side)}</span>{#if row.folders?.[i]}<span class="dir">{row.folders[i]}/</span>{/if}{i === 1 && row.rightPath ? row.rightPath.split("/").pop() : row.node.name}{#if side.ignored && !row.inIgnored?.[i]}<span class="ignored-tag" title="Ignored by Git: a .gitignore rule matches it, and it is not tracked">ignored</span>{/if}{#if prCounts && (i === 1 || !row.node.right) && (!row.container || !row.expanded)}{@const c = prCounts.get(row.path)}{#if c}<span class="prc" title="Pull request: {c.open} open threads, {c.findings} findings, {c.warnings} CI warnings, {c.resolved} resolved">{#if c.open}<span class="cm">💬 {c.open}</span>{/if}{#if c.findings}<span class="fd">● {c.findings}</span>{/if}{#if c.warnings}<span class="wn">▲ {c.warnings}</span>{/if}{#if !c.open && !c.findings && !c.warnings && c.resolved}<span class="rs">{c.resolved} resolved</span>{/if}</span>{/if}{/if}{#if row.container && !row.expanded && !row.pending && !closedArchive(row.node) && (i === 0 || !row.node.left)}{@const c = inside(row.node)}{#if c.files > c.same}<span class="inside" title="Files in this folder that are not the same, by status">{#if c.different}<span class="different">{c.different.toLocaleString()} ≠</span>{/if}{#if c.similar}<span class="similar">{c.similar.toLocaleString()} ≈</span>{/if}{#if c.leftOnly}<span class="leftOnly">{c.leftOnly.toLocaleString()} ◀</span>{/if}{#if c.rightOnly}<span class="rightOnly">{c.rightOnly.toLocaleString()} ▶</span>{/if}{#if c.errors}<span class="error">{c.errors.toLocaleString()} !</span>{/if}</span>{/if}{/if}
                   </span>
                   <span class="num">{side.kind === "dir" ? "" : formatSize(side.size)}</span>
                   {#if i === 1}<span class="num chg">{changeOf(row.node)}</span>{/if}
@@ -1391,6 +1425,11 @@
         {/each}
       </div>
     </div>
+  </div>
+  </div>
+  {#if pr?.data && prPanel}
+    <ThreadPanel data={pr.data} onGo={goToThread} onClose={() => (prPanel = false)} />
+  {/if}
   </div>
 
   {#if selection.size > 0 && result}
@@ -1450,6 +1489,15 @@
     height: 100%;
     min-height: 0;
   }
+  .main { flex: 1; display: flex; min-height: 0; }
+  .col { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .prc { display: inline-flex; gap: 6px; margin-left: 10px; font-size: 10.5px; }
+  .prc span { border: 1px solid currentColor; border-radius: 8px; padding: 0 5px; line-height: 14px; }
+  .prc .cm { color: var(--accent); }
+  .prc .fd { color: var(--diff); }
+  .prc .wn { color: var(--similar); }
+  .prc .rs { color: var(--faint); }
+  button.small.on { background: var(--sel); border-color: var(--accent); }
   .toolbar {
     display: flex;
     flex-wrap: wrap;
