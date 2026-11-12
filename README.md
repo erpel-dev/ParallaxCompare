@@ -298,7 +298,9 @@ Paste a **GitHub pull request URL** such as `https://github.com/owner/repo/pull/
 
 PRs need the installed **GitHub CLI (`gh`) and Git (`git`)** on the application's PATH. Authenticate beforehand with `gh auth login --hostname HOST`. The app uses `gh` for metadata and the merge base, and Git for file contents, respecting the host's `gh config` Git protocol (`https` or `ssh`). HTTPS fetches need a Git credential helper (for example `gh auth setup-git --hostname HOST`); SSH fetches use existing SSH credentials. Proxy and corporate certificate settings must work for both tools. Access failures are shown with the host/repository and authentication guidance; the app does not change your authentication configuration or check out a branch.
 
-Remote repository links are resolved on Compare; PR access is checked only on Resolve PR.
+Remote repository links are resolved on Compare; PR access is checked only on Resolve PR. Once a PR URL is entered, the line under it says whether `git` and `gh` start and who `gh` is signed in as on that host (✓ git 2.43.0 · gh 2.89.0 · signed in as …), or names what is wrong: a program that is missing, cannot load its libraries, or no sign-in. Nothing is sent to the host for this.
+
+`parallax-compare --self-test [REPO_URL]` checks the same without opening a window: `git`, `gh` and `xdg-open` start as the app starts them, and with a URL, `git ls-remote` reaches that repository over HTTPS. It prints one line per check and exits with 1 if one fails. For an AppImage, run it as `./ParallaxCompare-….AppImage --self-test https://github.com/octocat/Hello-World`.
 
 An opened PR is pinned to exact commit IDs, including when the target branch advances or the PR is force-pushed. Recent comparisons reopen that snapshot, and Refresh compares the same snapshot again. Paste the PR URL again (or edit its recent entry) to resolve the current PR. All normal file and archive views remain available. Git LFS files remain their Git pointer files and submodules remain commit references; their external contents are not downloaded.
 
@@ -356,7 +358,7 @@ npm run tauri dev                # desktop app with hot reload
 npm run tauri build              # installers: MSI/NSIS on Windows, deb/rpm/AppImage on Linux
 ```
 
-CI runs formatting, clippy, the Svelte type check and all tests on Ubuntu and Windows. Pushing a `v*` tag builds standalone Windows and Linux executables and publishes a GitHub release; `0.x` tags are prereleases.
+CI runs formatting, clippy, the Svelte type check and all tests on Ubuntu and Windows. Clippy forbids `std::process::Command::new` and the opener plugin's `open_url` / `open_path` outside tests: programs start through `parallax_core::process::command` and links open through `open_with_system`, which keep the AppImage's own libraries away from the system's `git`, `gh` and browser. Pull requests also build the AppImage and run its self-test on Ubuntu 22.04 and 24.04; a release does the same before publishing. Pushing a `v*` tag builds standalone Windows and Linux executables and publishes a GitHub release; `0.x` tags are prereleases.
 
 ## Architecture
 

@@ -1,0 +1,34 @@
+name: Build AppImage
+description: >
+  Builds the desktop app as an AppImage with a pinned linuxdeploy. Expects the
+  system packages, Rust and Node (with `npm ci` done in app/) to be set up.
+runs:
+  using: composite
+  steps:
+    # Tauri's own linuxdeploy ignores LINUXDEPLOY_EXCLUDED_LIBRARIES; it uses
+    # a copy already in its cache instead of downloading one.
+    - name: Install linuxdeploy
+      shell: bash
+      run: |
+        mkdir -p ~/.cache/tauri
+        curl -fsSL -o ~/.cache/tauri/linuxdeploy-x86_64.AppImage \
+          https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage
+        echo "c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d  $HOME/.cache/tauri/linuxdeploy-x86_64.AppImage" | sha256sum -c
+        chmod +x ~/.cache/tauri/linuxdeploy-x86_64.AppImage
+
+    - name: Build AppImage
+      shell: bash
+      working-directory: app
+      env:
+        # linuxdeploy is itself an AppImage; runners have no FUSE.
+        APPIMAGE_EXTRACT_AND_RUN: 1
+        # Use the host's Wayland libraries. Mesa built against a newer Wayland
+        # than the bundled one fails to load, and WebKit aborts with
+        # "Could not create default EGL display: EGL_BAD_PARAMETER" (#1).
+        LINUXDEPLOY_EXCLUDED_LIBRARIES: libwayland-*
+      run: npm run tauri build -- --bundles appimage
+
+    # git and gh must start without the AppImage's libraries.
+    - name: Self-test on the build host
+      shell: bash
+      run: scripts/appimage-self-test.sh target/release/bundle/appimage/*.AppImage

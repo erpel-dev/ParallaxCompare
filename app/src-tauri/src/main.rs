@@ -5,7 +5,14 @@ mod commands;
 mod merge;
 
 fn main() {
-    let startup = commands::StartupArgs::from_args(std::env::args().skip(1));
+    // `--self-test [REPO_URL]`: checks that git, gh (and xdg-open) start as the app
+    // starts them, then exits without opening a window. The release build runs it
+    // on the packaged AppImage.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--self-test") {
+        std::process::exit(self_test(args.get(1).map(String::as_str)));
+    }
+    let startup = commands::StartupArgs::from_args(args.into_iter());
     // Loading the grammars takes a few hundred milliseconds; do it before the first file opens.
     std::thread::spawn(parallax_core::highlight::view_syntax);
     tauri::Builder::default()
@@ -18,6 +25,7 @@ fn main() {
             commands::parse_source,
             commands::preview_source,
             commands::resolve_pull_request,
+            commands::pull_request_tools,
             commands::side_source,
             commands::complete_path,
             commands::side_versions,
@@ -88,4 +96,35 @@ fn main() {
                 std::process::exit(app.state::<commands::AppState>().exit_code());
             }
         });
+}
+
+/// Prints one line per check; the exit code is 0 when every required check passed.
+fn self_test(remote: Option<&str>) -> i32 {
+    println!("ParallaxCompare {} self-test", env!("CARGO_PKG_VERSION"));
+    match parallax_core::process::bundle_dir() {
+        Some(dir) => println!("AppImage: yes ({})", dir.to_string_lossy()),
+        None => println!("AppImage: no"),
+    }
+    let (checks, passed) = parallax_core::tools::self_test(remote);
+    for (check, required) in &checks {
+        let mark = match (check.ok(), required) {
+            (true, _) => "ok  ",
+            (false, true) => "FAIL",
+            (false, false) => "skip",
+        };
+        println!("{mark} {:<14} {}", check.name, check.detail);
+    }
+    if parallax_core::process::bundle_dir().is_some() {
+        // For comparison: git started with the environment the AppImage gives the app.
+        #[allow(clippy::disallowed_methods)] // deliberately without process::command
+        let plain = std::process::Command::new("git").arg("--version").output();
+        let note = match plain {
+            Ok(o) if o.status.success() => "starts too".to_string(),
+            Ok(o) => format!("fails: {}", String::from_utf8_lossy(&o.stderr).lines().next().unwrap_or("").trim()),
+            Err(e) => format!("could not be run: {e}"),
+        };
+        println!("note git with the AppImage's own environment {note}");
+    }
+    println!("{}", if passed { "self-test passed" } else { "self-test FAILED" });
+    if passed { 0 } else { 1 }
 }

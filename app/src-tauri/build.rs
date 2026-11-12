@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)] // starts programs directly, outside the app
 fn main() {
     // Source archives still build; a checkout also records its exact revision.
     let git = |args: &[&str]| {

@@ -24,13 +24,6 @@ env:
 jobs:
   linux:
     runs-on: ubuntu-22.04
-    env:
-      # linuxdeploy is itself an AppImage; runners have no FUSE.
-      APPIMAGE_EXTRACT_AND_RUN: 1
-      # Use the host's Wayland libraries. Mesa built against a newer Wayland
-      # than the bundled one fails to load, and WebKit aborts with
-      # "Could not create default EGL display: EGL_BAD_PARAMETER" (#1).
-      LINUXDEPLOY_EXCLUDED_LIBRARIES: libwayland-*
     steps:
       - uses: actions/checkout@v4
 
@@ -55,19 +48,8 @@ jobs:
       - name: Build CLI (static)
         run: cargo build --release --locked -p parallax-cli --target x86_64-unknown-linux-musl
 
-      # Tauri's own linuxdeploy ignores LINUXDEPLOY_EXCLUDED_LIBRARIES; it uses
-      # a copy already in its cache instead of downloading one.
-      - name: Install linuxdeploy
-        run: |
-          mkdir -p ~/.cache/tauri
-          curl -fsSL -o ~/.cache/tauri/linuxdeploy-x86_64.AppImage \
-            https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage
-          echo "c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d  $HOME/.cache/tauri/linuxdeploy-x86_64.AppImage" | sha256sum -c
-          chmod +x ~/.cache/tauri/linuxdeploy-x86_64.AppImage
-
-      - name: Build AppImage
-        working-directory: app
-        run: npm run tauri build -- --bundles appimage
+      # Builds the AppImage and runs its self-test on this host.
+      - uses: ./.github/actions/appimage
 
       - name: Stage files
         run: |
@@ -124,8 +106,26 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # The packaged AppImage on an older and a newer Ubuntu than it is built on:
+  # git and gh must start without its libraries, or pull requests cannot open.
+  appimage-self-test:
+    needs: linux
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux
+          path: dist
+      - name: Self-test
+        run: scripts/appimage-self-test.sh dist/ParallaxCompare-*.AppImage
+
   release:
-    needs: [linux, windows]
+    needs: [linux, windows, appimage-self-test]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

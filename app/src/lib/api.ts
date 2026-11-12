@@ -125,6 +125,21 @@ export interface PrConversation {
   files: Record<string, PrCommentable>;
 }
 
+/** Whether a program the app starts works (see parallax_core::tools). */
+export interface ToolCheck {
+  name: string;
+  state: "ok" | "missing" | "broken";
+  detail: string;
+}
+
+/** git and gh for a pull request's host, checked before it is resolved. */
+export interface PullRequestTools {
+  host: string;
+  git: ToolCheck;
+  gh: ToolCheck;
+  account: ToolCheck | null;
+}
+
 export interface PullRequestComparison extends PullRequestInfo {
   left: SourceSpec;
   right: SourceSpec;
@@ -688,6 +703,7 @@ export const api = {
   gitRefs: (repo: string) => invoke<RefList>("git_refs", { repo }),
   parseSource: (text: string) => invoke<SourceSpec>("parse_source", { text }),
   previewSource: (text: string, spec: SourceSpec | null = null) => invoke<SourcePreview>("preview_source", { text, spec }),
+  pullRequestTools: (url: string) => invoke<PullRequestTools>("pull_request_tools", { url }),
   resolvePullRequest: (url: string) => invoke<PullRequestComparison>("resolve_pull_request", { url }),
   pullRequestConversation: (url: string, head: string) => invoke<PrConversation>("pull_request_conversation", { url, head }),
   pullRequestWrite: (url: string, change: PrWrite) => invoke<void>("pull_request_write", { url, change }),

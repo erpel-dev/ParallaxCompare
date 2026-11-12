@@ -4,6 +4,8 @@
 //! exposed as a [`vfs::Vfs`] tree. The folder compare engine ([`compare`]), the
 //! text diff ([`textdiff`]) and the highlighter ([`highlight`]) only ever see
 //! those trees, so any source can be compared against any other source.
+// Tests start git and other programs directly; the app goes through process::command.
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
 
 pub mod activity;
 pub mod compare;
@@ -25,6 +27,7 @@ pub mod source_preview;
 pub mod syntax_merge;
 pub mod text;
 pub mod textdiff;
+pub mod tools;
 pub mod versions;
 pub mod vfs;
 pub mod watch;
