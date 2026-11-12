@@ -22,6 +22,7 @@ use crate::{Error, Result};
 /// program started with them loads libraries it was not built for and fails
 /// ("symbol lookup error", "no version information available"), so those
 /// entries are taken out of the program's environment. Elsewhere this is `Command::new`.
+#[allow(clippy::disallowed_methods)] // the one place system programs are created
 pub fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     let mut cmd = Command::new(program);
     if let Some(dir) = bundle_dir() {

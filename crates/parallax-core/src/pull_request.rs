@@ -137,6 +137,26 @@ fn gh(args: &[&str]) -> Result<String> {
     crate::process::run(&mut cmd, "gh", "gh request", Duration::from_secs(60))
 }
 
+/// Whether git and gh work for a pull request on its host, before it is resolved.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Tools {
+    pub host: String,
+    pub git: crate::tools::Check,
+    pub gh: crate::tools::Check,
+    /// Who gh is signed in as on the host; None while gh itself does not work.
+    pub account: Option<crate::tools::Check>,
+}
+
+/// Checks git and gh as the app starts them, and gh's sign-in for the URL's host.
+/// Nothing is sent to the host.
+pub fn tools(url: &str) -> Result<Tools> {
+    let pr = PullRequestUrl::parse(url)?;
+    let (git, gh) = (crate::tools::git(), crate::tools::gh());
+    let account = gh.ok().then(|| crate::tools::gh_account(&pr.host));
+    Ok(Tools { host: pr.host, git, gh, account })
+}
+
 /// Resolve only on explicit user action; no authentication or working-tree
 /// configuration is changed. Host selection is explicit on every gh invocation.
 pub fn resolve(input: &str) -> Result<PullRequestComparison> {

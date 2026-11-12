@@ -3,6 +3,7 @@
 //! error" or "error while loading shared libraries". One test per process, as
 //! it sets the environment.
 #![cfg(target_os = "linux")]
+#![allow(clippy::disallowed_methods)] // starts programs directly, outside the app
 
 use std::process::Command;
 

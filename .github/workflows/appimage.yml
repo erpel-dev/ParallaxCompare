@@ -1,0 +1,66 @@
+name: AppImage
+
+# Builds the AppImage as a release would and runs its self-test on older and
+# newer Ubuntu than the one it is built on: the bundled libraries must not
+# reach the system's git and gh, which fail to load with them otherwise
+# ("symbol lookup error" in git-remote-https).
+on:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+        working-directory: app
+
+      - uses: ./.github/actions/appimage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appimage
+          path: target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+
+  self-test:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: appimage
+          path: appimage
+      # As on any desktop: the graphics and toolkit libraries an AppImage leaves
+      # to the system (EGL, GL, Wayland …). The bundled ones still come first on
+      # LD_LIBRARY_PATH, which is what the self-test is about.
+      - name: Install desktop libraries
+        run: |
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y libgtk-3-0 libwebkit2gtk-4.1-0 libegl1 libgl1 libwayland-client0 libwayland-server0 libwayland-egl1 libwayland-cursor0
+
+      - name: Self-test
+        run: scripts/appimage-self-test.sh appimage/*.AppImage

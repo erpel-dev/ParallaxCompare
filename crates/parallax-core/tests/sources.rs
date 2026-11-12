@@ -1,4 +1,5 @@
 //! End-to-end tests: real folders, archives and Git repositories compared through the public API.
+#![allow(clippy::disallowed_methods)] // starts programs directly, outside the app
 
 use std::fs;
 use std::io::Write;

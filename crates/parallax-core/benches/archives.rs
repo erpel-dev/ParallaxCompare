@@ -5,6 +5,7 @@
 //! compares and the peak memory of the process running them (Linux); each case
 //! runs in a process of its own.
 //! `PARALLAX_BENCH_MB` sets the size of the content per archive (default 200).
+#![allow(clippy::disallowed_methods)] // starts programs directly, outside the app
 
 use std::fs;
 use std::io::Write;

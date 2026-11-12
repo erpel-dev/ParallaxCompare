@@ -1,0 +1,9 @@
+# Programs the app starts must not inherit the AppImage's own libraries
+# (LD_LIBRARY_PATH and friends), or the system's git, gh and browser fail to
+# load ("symbol lookup error"). parallax_core::process::command and the app's
+# open_with_system take them out; tests may start programs directly.
+disallowed-methods = [
+    { path = "std::process::Command::new", reason = "start programs with parallax_core::process::command, which keeps the AppImage's libraries away from them" },
+    { path = "tauri_plugin_opener::open_url", reason = "open links with open_with_system, which keeps the AppImage's libraries away from the browser" },
+    { path = "tauri_plugin_opener::open_path", reason = "open files with open_with_system, which keeps the AppImage's libraries away from the app it starts" },
+]

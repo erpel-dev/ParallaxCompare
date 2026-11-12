@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)] // starts programs directly, outside the app
 use std::fs;
 use std::process::Command;
 

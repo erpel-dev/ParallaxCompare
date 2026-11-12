@@ -297,6 +297,12 @@ pub async fn resolve_pull_request(url: String) -> CmdResult<parallax_core::pull_
     blocking(move || parallax_core::pull_request::resolve(&url).map_err(message)).await
 }
 
+/// Whether git and gh work for a pull request URL, shown before it is resolved.
+#[tauri::command]
+pub async fn pull_request_tools(url: String) -> CmdResult<parallax_core::pull_request::Tools> {
+    blocking(move || parallax_core::pull_request::tools(&url).map_err(message)).await
+}
+
 /// An error's message without the "not supported:" its kind adds.
 fn message(e: parallax_core::Error) -> String {
     match e {
@@ -308,6 +314,7 @@ fn message(e: parallax_core::Error) -> String {
 /// Opens a link or file with the system's default app. Inside an AppImage the
 /// opener is started without the app's own libraries, which would break the
 /// browser or file manager it starts (see `parallax_core::process::command`).
+#[allow(clippy::disallowed_methods)] // the one place links and files are opened
 fn open_with_system(target: &str, path: bool) -> CmdResult<()> {
     #[cfg(target_os = "linux")]
     if parallax_core::process::bundle_dir().is_some() {

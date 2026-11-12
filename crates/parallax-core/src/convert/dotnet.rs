@@ -333,9 +333,9 @@ impl<'a> Tables<'a> {
         let mut t =
             Tables { data: stream, rows: [0; 64], start: [0; 64], row_size: [0; 64], cols: vec![Vec::new(); 64] };
         let mut pos = 24;
-        for i in 0..64 {
+        for (i, rows) in t.rows.iter_mut().enumerate() {
             if valid & (1 << i) != 0 {
-                t.rows[i] = u32_at(stream, pos)?;
+                *rows = u32_at(stream, pos)?;
                 pos += 4;
             }
         }

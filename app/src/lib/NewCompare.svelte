@@ -18,6 +18,7 @@
     sourceText,
     type MergeRequest,
     type PullRequestComparison,
+    type PullRequestTools,
     type PullRequestInfo,
     type SourceOptions,
     type SourceSpec,
@@ -104,6 +105,36 @@
   );
   const resolved = $derived(prResult && resolvedFor === prUrl.trim() ? prResult : null);
   const prValid = $derived(isPullRequestUrl(prUrl));
+  // git and gh, checked as the app starts them once a pull request URL is entered,
+  // so a broken setup is named before Resolve PR instead of as a failed fetch.
+  let prTools = $state<PullRequestTools | null>(null);
+  // Not state: the effect below sets it, and must not run again because of that.
+  let toolsFor = "";
+  let toolsBusy = $state(false);
+  async function checkTools(url: string) {
+    toolsBusy = true;
+    try {
+      const tools = await api.pullRequestTools(url);
+      if (isPullRequestUrl(prUrl) && tools.host === prHost) prTools = tools;
+    } catch {
+      prTools = null;
+    } finally {
+      toolsBusy = false;
+    }
+  }
+  $effect(() => {
+    const host = prHost;
+    if (!prMode || !prValid || !host || host === toolsFor) return;
+    toolsFor = host;
+    prTools = null;
+    const url = prUrl;
+    const timer = setTimeout(() => void checkTools(url), 250);
+    return () => clearTimeout(timer);
+  });
+  const toolProblems = $derived(
+    prTools ? [prTools.git, prTools.gh, ...(prTools.account ? [prTools.account] : [])].filter((c) => c.state !== "ok") : [],
+  );
+  const short = (detail: string) => detail.replace(/^(git|gh) version (\S+).*$/, "$1 $2");
   const prHost = $derived.by(() => {
     try {
       return new URL(prUrl).hostname;
@@ -280,6 +311,8 @@
       }
     } catch (e) {
       error = String(e);
+      // The setup may be what failed: check git and gh again.
+      if (prMode && prValid) void checkTools(prUrl.trim());
     } finally {
       busy = null;
     }
@@ -355,7 +388,16 @@
           <span>{prHost === "github.com" ? "GitHub" : "GitHub Enterprise"}</span><span>{prHost}</span><span
             >Uses gh + git and your existing authentication</span
           >
+          {#if toolsBusy && !prTools}<span class="tools">Checking git and gh…</span>
+          {:else if prTools && !toolProblems.length}<span class="tools ok" title="git and gh start, and gh is signed in to {prTools.host}"
+              >✓ {short(prTools.git.detail)} · {short(prTools.gh.detail)}{prTools.account?.detail ? ` · signed in as ${prTools.account.detail}` : ""}</span
+            >{/if}
         </div>
+        {#if toolProblems.length}
+          <ul class="tool-problems" role="status">
+            {#each toolProblems as c (c.name)}<li><b>{c.name === "gh auth" ? "gh sign-in" : c.name}</b> {c.detail}</li>{/each}
+          </ul>
+        {/if}
         {#if !prValid}<p class="form-error" role="status">
             Enter an HTTPS GitHub or GitHub Enterprise pull request URL.
           </p>{/if}
@@ -723,6 +765,22 @@
   }
   .pr-meta span:first-child {
     color: var(--left-only);
+  }
+  .pr-meta .tools.ok {
+    color: #2d8a4e;
+  }
+  .tool-problems {
+    margin: 8px 0 0;
+    padding: 6px 10px 6px 26px;
+    border-left: 3px solid var(--error);
+    background: var(--panel-2);
+    font-size: 12px;
+    color: var(--error);
+    display: grid;
+    gap: 3px;
+  }
+  .tool-problems b {
+    font-weight: 600;
   }
   .pr-pair {
     display: grid;
