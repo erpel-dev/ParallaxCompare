@@ -119,14 +119,24 @@ fn self_test(remote: Option<&str>) -> i32 {
     }
     if parallax_core::process::bundle_dir().is_some() {
         // For comparison: git started with the environment the AppImage gives the app.
+        // With a URL it talks to the server, which loads libcurl (git-remote-https),
+        // where the bundled libraries break a newer system's git.
+        let args: Vec<&str> = match remote {
+            Some(url) => vec!["ls-remote", "--heads", "--", url],
+            None => vec!["--version"],
+        };
         #[allow(clippy::disallowed_methods)] // deliberately without process::command
-        let plain = std::process::Command::new("git").arg("--version").output();
+        let plain = std::process::Command::new("git").args(&args).env("GIT_TERMINAL_PROMPT", "0").output();
         let note = match plain {
             Ok(o) if o.status.success() => "starts too".to_string(),
-            Ok(o) => format!("fails: {}", String::from_utf8_lossy(&o.stderr).lines().next().unwrap_or("").trim()),
+            Ok(o) => {
+                let err = String::from_utf8_lossy(&o.stderr);
+                let line = err.lines().find(|l| l.contains("symbol lookup") || l.contains("error while loading"));
+                format!("fails: {}", line.or_else(|| err.lines().next()).unwrap_or("").trim())
+            }
             Err(e) => format!("could not be run: {e}"),
         };
-        println!("note git with the AppImage's own environment {note}");
+        println!("note git {} with the AppImage's own environment {note}", args[0]);
     }
     println!("{}", if passed { "self-test passed" } else { "self-test FAILED" });
     if passed { 0 } else { 1 }
