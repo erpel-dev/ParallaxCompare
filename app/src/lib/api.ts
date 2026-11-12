@@ -183,6 +183,14 @@ export interface Hit {
   end: number;
 }
 
+export interface AppInfo {
+  version: string;
+  revision: string;
+  os: string;
+  arch: string;
+  tempDir: string;
+}
+
 export interface SearchResult {
   hits: Hit[];
   truncated: boolean;
@@ -524,6 +532,7 @@ export const defaultCompareOptions = (): CompareOptions => ({
 export const defaultDiffOptions = (): DiffOptions => ({ whitespace: "exact", ignoreCase: false, histogram: false });
 
 export const api = {
+  appInfo: () => invoke<AppInfo>("app_info"),
   startupRequest: () => invoke<StartupRequest | null>("startup_request"),
   openMerge: (request: MergeRequest) => invoke<MergeInfo>("open_merge", { request }),
   closeMerge: (id: number) => invoke<void>("close_merge", { id }),
@@ -585,8 +594,8 @@ export const api = {
     invoke<(Node | null)[]>("refresh_paths", { id, paths, options }),
   openFileDiff: (id: number, path: string, options: DiffOptions, syntax: string | null, view: View | null, flatbufferSchemas: [string | null, string | null] | null = null) =>
     invoke<FileDiffInfo>("open_file_diff", { id, path, options, syntax, view, flatbufferSchemas }),
-  fileRows: (id: number, start: number, count: number, theme: "dark" | "light") =>
-    invoke<RowView[]>("file_rows", { id, start, count, theme }),
+  fileRows: (id: number, start: number, count: number, theme: "dark" | "light", focus: Hit | null = null) =>
+    invoke<RowView[]>("file_rows", { id, start, count, theme, focus }),
   searchDiff: (id: number, query: string, options: SearchOptions) =>
     invoke<SearchResult>("search_diff", { id, query, options }),
   closeFileDiff: (id: number) => invoke<void>("close_file_diff", { id }),

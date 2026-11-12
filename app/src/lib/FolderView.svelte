@@ -1,5 +1,6 @@
 <script lang="ts">
   import { summarizeErrors, exportErrors } from "./errorSummary";
+  import { selectionTargets } from "./selection";
   import { splitPatterns, joinPatterns } from "./patterns";
   import { onMount, tick } from "svelte";
   import { listen } from "@tauri-apps/api/event";
@@ -758,17 +759,21 @@
   const targets = $derived.by(() => {
     void version;
     const paths = rows.filter((r) => selection.has(r.path)).map((r) => r.path);
-    return paths.filter((p) => !paths.some((q) => p.startsWith(q + "/")));
+    return selectionTargets(paths);
   });
 
-  /** Paths of `targets` present on one side. */
-  function present(left: boolean): string[] {
-    if (!result) return [];
-    return targets.filter((p) => {
-      const node = flat ? rowByPath.get(p)?.node : findNode(result!.root, p);
-      return !!(left ? node?.left : node?.right);
-    });
-  }
+  /** Shared by action availability and operations; indexed in both tree and flat views. */
+  const presentTargets = $derived.by(() => {
+    void version;
+    const sides: [string[], string[]] = [[], []];
+    for (const path of targets) {
+      const node = rowByPath.get(path)?.node;
+      if (node?.left) sides[0].push(path);
+      if (node?.right) sides[1].push(path);
+    }
+    return sides;
+  });
+  const present = (left: boolean): string[] => presentTargets[left ? 0 : 1];
 
   function applyResult(paths: string[], r: OpResult) {
     if (!result) return;
@@ -807,7 +812,8 @@
     const all = present(toRight);
     // Files matched across folders are copied over their match.
     const pairs = all.map((p) => rowByPath.get(p)).filter((r): r is FlatRow & { rightPath: string } => !!r?.rightPath && !!r.node.left && !!r.node.right);
-    const paths = all.filter((p) => !pairs.some((r) => r.path === p));
+    const paired = new Set(pairs.map((r) => r.path));
+    const paths = all.filter((p) => !paired.has(p));
     if (pairs.length) {
       const side = toRight ? "right" : "left";
       const changed = pairs.filter((r) => r.node.status !== "same");
@@ -832,7 +838,7 @@
     const replaced: string[] = [];
     const newer: string[] = [];
     for (const p of paths) {
-      for (const f of copyFilesBelow(findNode(result.root, p)!, p, toRight)) {
+      for (const f of copyFilesBelow(rowByPath.get(p)!.node, p, toRight)) {
         const [src, dst] = toRight ? [f.node.left, f.node.right] : [f.node.right, f.node.left];
         if (src?.kind === "archive") archives.push(f.path);
         if (!src || !dst || (f.node.status === "same" && src.kind !== "archive")) continue;

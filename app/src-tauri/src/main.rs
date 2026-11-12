@@ -12,6 +12,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(commands::AppState::new(startup))
         .invoke_handler(tauri::generate_handler![
+            commands::app_info,
             commands::startup_request,
             commands::git_refs,
             commands::parse_source,

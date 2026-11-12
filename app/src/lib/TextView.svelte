@@ -141,6 +141,8 @@
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
   /** The current match should be scrolled into view sideways once its row is drawn. */
   let revealHitWanted = false;
+  /** The hit whose bounded line slice is being requested. */
+  let hitSlice: Hit | undefined;
 
   let rowFilter = $state<RowFilter>("all");
   const total = $derived(info?.rows ?? 0);
@@ -1434,11 +1436,39 @@
   $effect(() => {
     void cacheVersion;
     void first;
+    void currentHit;
+    revealHitLine();
     tick().then(() => {
       revealHitSideways();
       revealMarkSideways();
     });
   });
+
+  /** Keep the line-size limit, but move its window to a search hit outside it. */
+  async function revealHitLine() {
+    const h = currentHit;
+    if (!info || !h || hitSlice === h) return;
+    const row = cache.get(h.row);
+    const line = h.side === 0 ? row?.l : row?.r;
+    if (!line || (h.start >= (line.o ?? 0) && h.start < (line.o ?? 0) + line.t.length)) return;
+    const id = info.id;
+    const gen = generation;
+    hitSlice = h;
+    try {
+      const rows = await api.fileRows(id, h.row, 1, theme(), h);
+      if (info?.id !== id || generation !== gen || currentHit !== h || destroyed) return;
+      if (rows[0]) {
+        cache.set(h.row, rows[0]);
+        cacheVersion++;
+        revealHitWanted = true;
+        tick().then(revealHitSideways);
+      }
+    } catch (e) {
+      if (info?.id === id && generation === gen && currentHit === h) findError = String(e);
+    } finally {
+      if (hitSlice === h) hitSlice = undefined;
+    }
+  }
 
   function findKey(e: KeyboardEvent) {
     if (e.key === "Enter") nextHit(e.shiftKey ? -1 : 1);
@@ -1462,6 +1492,13 @@
     else if (mod && e.key.toLowerCase() === "g" && findOpen) nextHit(e.shiftKey ? -1 : 1);
     // Saving works from anywhere in the tab: the find field, the toolbar, the path bars.
     else if (mod && !e.altKey && e.key.toLowerCase() === "s" && !e.defaultPrevented) save();
+    // Toolbar buttons keep focus after copy/undo. Fields keep their native history.
+    else if (mod && !e.altKey && !e.defaultPrevented && !isField(e.target)
+      && (e.target === document.body || (e.target instanceof Node && root.contains(e.target)))
+      && ["z", "y"].includes(e.key.toLowerCase())) {
+      if (e.key.toLowerCase() === "z" && !e.shiftKey) undo();
+      else redo();
+    }
     // F7/F8 also when the focus has left the scroll area (which handles them otherwise), but not in a field.
     else if ((e.key === "F7" || e.key === "F8") && !e.defaultPrevented && !isField(e.target))
       next(e.key === "F8" ? 1 : -1);
@@ -1472,7 +1509,8 @@
   // ---- Keys, mouse ----
 
   const isField = (t: EventTarget | null) =>
-    t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement;
+    t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement
+    || (t instanceof HTMLElement && t.isContentEditable);
 
   /**
    * Keeps keyboard focus on the scroll area: a clicked row would take it, and lose

@@ -20,10 +20,31 @@ use parallax_core::vfs::git::{GitRepo, RefList};
 use parallax_core::vfs::{Change, Data, EntryKind, split_parent};
 use parallax_core::watch::{Watcher, WriteGuard};
 use parking_lot::{Mutex, RwLock};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 pub(crate) type CmdResult<T> = Result<T, String>;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppInfo {
+    version: &'static str,
+    revision: &'static str,
+    os: &'static str,
+    arch: &'static str,
+    temp_dir: String,
+}
+
+#[tauri::command]
+pub fn app_info() -> AppInfo {
+    AppInfo {
+        version: env!("CARGO_PKG_VERSION"),
+        revision: env!("PARALLAX_BUILD_REVISION"),
+        os: std::env::consts::OS,
+        arch: std::env::consts::ARCH,
+        temp_dir: std::env::temp_dir().to_string_lossy().into_owned(),
+    }
+}
 
 pub(crate) fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
@@ -1220,7 +1241,7 @@ pub struct LineView {
     /// Number of UTF-16 units cut from the end of a very long line.
     #[serde(skip_serializing_if = "Option::is_none")]
     x: Option<u32>,
-    /// Number of UTF-16 units cut from the start, so the first change shows.
+    /// Number of UTF-16 units cut from the start, to reveal a change or search hit.
     #[serde(skip_serializing_if = "Option::is_none")]
     o: Option<u32>,
     /// The file's last line, without the terminator the other file has.
@@ -1230,14 +1251,17 @@ pub struct LineView {
 
 impl LineView {
     pub(crate) fn new(n: u32, line: &str, spans: Vec<Span>, marks: Vec<(u32, u32)>) -> Self {
+        Self::window(n, line, spans, marks, None)
+    }
+
+    fn window(n: u32, line: &str, spans: Vec<Span>, marks: Vec<(u32, u32)>, focus: Option<u32>) -> Self {
         let total = text::utf16_len(line) as u32;
         if total <= MAX_SHOWN_LINE {
             return LineView { n, t: line.to_string(), s: spans, m: marks, x: None, o: None, nn: false };
         }
-        // The window shown: from the start, or from shortly before the first change
-        // when that lies beyond what the start would show.
-        let first_mark = marks.first().map_or(0, |m| m.0);
-        let from_units = if first_mark + 100 > MAX_SHOWN_LINE { first_mark.saturating_sub(200) } else { 0 };
+        // A requested search column takes precedence over the first change.
+        let column = focus.unwrap_or_else(|| marks.first().map_or(0, |m| m.0)).min(total);
+        let from_units = if column.saturating_add(100) > MAX_SHOWN_LINE { column.saturating_sub(200) } else { 0 };
         let byte_at = |target: u32| {
             let mut units = 0u32;
             line.char_indices()
@@ -1290,6 +1314,13 @@ fn line_range(rows: &[textdiff::Row], pick: impl Fn(&textdiff::Row) -> Option<u3
     Some((first, last + 1))
 }
 
+#[derive(Clone, Copy, Deserialize)]
+pub struct LineFocus {
+    row: u32,
+    side: u8,
+    start: u32,
+}
+
 #[tauri::command]
 pub async fn file_rows(
     state: State<'_, AppState>,
@@ -1297,6 +1328,7 @@ pub async fn file_rows(
     start: u32,
     count: u32,
     theme: ThemeKind,
+    focus: Option<LineFocus>,
 ) -> CmdResult<Vec<RowView>> {
     let diff = state.diff(id)?;
     blocking(move || {
@@ -1321,12 +1353,19 @@ pub async fn file_rows(
         let no_newline = |doc: &TextDoc, other: &TextDoc, n: u32| {
             n as usize + 1 == doc.len() && !doc.ends_with_newline() && other.ends_with_newline()
         };
-        let view = |doc: &TextDoc, n: u32, base: usize, all: &Vec<Vec<Span>>, marks: Vec<(u32, u32)>| {
-            LineView::new(n, doc.line(n as usize), all.get(n as usize - base).cloned().unwrap_or_default(), marks)
+        let view = |doc: &TextDoc, n: u32, base: usize, all: &Vec<Vec<Span>>, marks: Vec<(u32, u32)>, column| {
+            LineView::window(
+                n,
+                doc.line(n as usize),
+                all.get(n as usize - base).cloned().unwrap_or_default(),
+                marks,
+                column,
+            )
         };
         Ok(rows
             .iter()
-            .map(|row| {
+            .enumerate()
+            .map(|(index, row)| {
                 let (lm, rm) = match (row.kind, row.left, row.right) {
                     (RowKind::Changed, Some(l), Some(r)) => {
                         let (a, b) = textdiff::intraline(doc_left.line(l as usize), doc_right.line(r as usize));
@@ -1337,14 +1376,21 @@ pub async fn file_rows(
                     }
                     _ => (Vec::new(), Vec::new()),
                 };
-                let line = |doc: &TextDoc, other: &TextDoc, n: u32, base, spans, marks| LineView {
+                let line = |doc: &TextDoc, other: &TextDoc, n: u32, base, spans, marks, side| LineView {
                     nn: no_newline(doc, other, n),
-                    ..view(doc, n, base, spans, marks)
+                    ..view(
+                        doc,
+                        n,
+                        base,
+                        spans,
+                        marks,
+                        focus.filter(|f| f.row as usize == start as usize + index && f.side == side).map(|f| f.start),
+                    )
                 };
                 RowView {
                     k: row.kind,
-                    l: row.left.map(|n| line(doc_left, doc_right, n, left_base, &left_spans, lm)),
-                    r: row.right.map(|n| line(doc_right, doc_left, n, right_base, &right_spans, rm)),
+                    l: row.left.map(|n| line(doc_left, doc_right, n, left_base, &left_spans, lm, 0)),
+                    r: row.right.map(|n| line(doc_right, doc_left, n, right_base, &right_spans, rm, 1)),
                 }
             })
             .collect())
@@ -1703,6 +1749,50 @@ pub struct PathsChanged {
     /// The file comparison whose save this was.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin: Option<u64>,
+}
+
+#[cfg(test)]
+mod line_window_tests {
+    use super::*;
+
+    #[test]
+    fn distant_search_hits_override_the_first_difference_without_unbounding_rows() {
+        let line = format!("{}left{}needle", "a".repeat(300_000), "z".repeat(300_000));
+        let marks = vec![(300_000, 300_004)];
+        let initial = LineView::new(0, &line, Vec::new(), marks.clone());
+        assert!(initial.t.contains("left"));
+        assert!(!initial.t.contains("needle"));
+        let found = LineView::window(0, &line, vec![Span(600_004, 600_010, 0x123456)], marks, Some(600_004));
+        assert!(found.t.contains("needle"));
+        assert!(text::utf16_len(&found.t) <= MAX_SHOWN_LINE as usize);
+        assert_eq!(found.o, Some(599_804));
+        assert!(found.x.is_none());
+        assert_eq!(found.s.iter().map(|s| (s.0, s.1, s.2)).collect::<Vec<_>>(), [(200, 206, 0x123456)]);
+        assert!(found.m.is_empty());
+        let beginning = LineView::window(0, &line, Vec::new(), Vec::new(), Some(0));
+        assert!(beginning.o.is_none());
+        assert!(beginning.x.is_some());
+    }
+
+    #[test]
+    fn search_windows_keep_utf16_boundaries_and_clip_marks() {
+        let line = format!("{}needle{}", "😀".repeat(20_000), "😀".repeat(20_000));
+        let found = LineView::window(3, &line, Vec::new(), vec![(40_000, 40_006)], Some(40_000));
+        assert_eq!(found.o, Some(39_800));
+        assert_eq!(found.m, [(200, 206)]);
+        assert_eq!(
+            String::from_utf16(&found.t.encode_utf16().skip(200).take(6).collect::<Vec<_>>()).unwrap(),
+            "needle"
+        );
+        assert!(text::utf16_len(&found.t) <= MAX_SHOWN_LINE as usize);
+        assert_eq!(
+            found.o.unwrap() + text::utf16_len(&found.t) as u32 + found.x.unwrap(),
+            text::utf16_len(&line) as u32
+        );
+        let ordinary = LineView::window(0, "a😀b", Vec::new(), Vec::new(), Some(3));
+        assert_eq!(ordinary.t, "a😀b");
+        assert!(ordinary.o.is_none() && ordinary.x.is_none());
+    }
 }
 
 #[cfg(test)]
