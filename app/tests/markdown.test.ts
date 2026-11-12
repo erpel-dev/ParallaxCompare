@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { renderMarkdown } from '../src/lib/markdown.ts';
+import { commentHtml, renderMarkdown } from '../src/lib/markdown.ts';
 
 test('comment markdown never becomes raw HTML', () => {
   const r = renderMarkdown('<img src=x onerror=alert(1)> <script>bad()</script>\n\n**bold** and `<b>`');
@@ -29,4 +29,12 @@ test('suggestions, code, lists and quotes', () => {
   assert.ok(r.html.includes('<ul><li>one</li><li>two</li></ul>'), r.html);
   assert.ok(r.html.includes('<blockquote><p>quoted</p></blockquote>'), r.html);
   assert.ok(r.html.includes('<pre><code>fn a() {}</code></pre>'), r.html);
+});
+
+test('comment HTML shows suggestions as added lines, escaped', () => {
+  const html = commentHtml('Try:\n```suggestion\nif (a < b) <x>\n```');
+  assert.ok(html.includes('<div class="sugg">'), html);
+  assert.ok(html.includes('+ if (a &lt; b) &lt;x&gt;'), html);
+  assert.ok(html.includes('data-copy="if (a &lt; b) &lt;x&gt;"'), html);
+  assert.ok(!html.includes('<x>'), html);
 });

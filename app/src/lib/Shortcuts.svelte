@@ -25,6 +25,7 @@
       title: "File comparison",
       groups: [
         ["Move", [["Previous / next difference", "F7 · F8"], ["Find", "Ctrl+F"], ["Next / previous match", "F3 · Shift+F3"], ["Next / previous pull request thread", "F9 · Shift+F9"]]],
+        ["Pull request", [["Comment on the selected lines", "C"], ["Reply to the thread at the selection", "R"], ["Add to your review (in a comment)", "Ctrl+Enter"], ["Finish your review", "Ctrl+Shift+Enter"]]],
         ["Change", [["Copy to left / right", "Alt+← · Alt+→"], ["Edit the line", "F2 · Enter · typing"], ["Undo / redo", "Ctrl+Z · Ctrl+Y"], ["Save", "Ctrl+S"]]],
         ["Versions", [["Switch the version of a side", "Alt+V"], ["Compare with HEAD", "Alt+H"]]],
       ],

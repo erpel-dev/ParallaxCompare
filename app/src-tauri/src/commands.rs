@@ -307,6 +307,19 @@ pub async fn pull_request_conversation(
     blocking(move || parallax_core::pull_request::conversation(&url, &head).map_err(err)).await
 }
 
+/// Changes a pull request's conversation: a reply, a comment, resolving, editing or
+/// deleting a comment, or the viewer's pending review. Only on an explicit click.
+#[tauri::command]
+pub async fn pull_request_write(url: String, change: parallax_core::pull_request::Write) -> CmdResult<()> {
+    blocking(move || {
+        parallax_core::pull_request::write(&url, change).map_err(|e| match e {
+            parallax_core::Error::Unsupported(message) => message,
+            e => err(e),
+        })
+    })
+    .await
+}
+
 /// Opens a link of a pull request's conversation in the browser: HTTPS links on
 /// the pull request's own host only, so text in a comment cannot open anything else.
 #[tauri::command]

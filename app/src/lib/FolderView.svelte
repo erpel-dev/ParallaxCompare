@@ -1446,7 +1446,7 @@
   </div>
   </div>
   {#if pr?.data && prPanel}
-    <ThreadPanel data={pr.data} scope={prScope} onGo={goToThread} onAnnotation={goToAnnotation} onClearScope={() => (prScope = null)} onClose={() => { prPanel = false; prScope = null; }} />
+    <ThreadPanel data={pr.data} session={session.id} scope={prScope} onGo={goToThread} onAnnotation={goToAnnotation} onClearScope={() => (prScope = null)} onClose={() => { prPanel = false; prScope = null; }} />
   {/if}
   </div>
 

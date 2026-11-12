@@ -154,3 +154,12 @@ export function renderMarkdown(source: string): Rendered {
   flush();
   return { html: out.join(""), suggestions };
 }
+
+/** A comment as safe HTML, with its suggested changes shown as added lines and a Copy button. */
+export function commentHtml(text: string): string {
+  const r = renderMarkdown(text);
+  return r.html.replace(/<div class="md-suggestion" data-index="(\d+)"><\/div>/g, (_m, i) => {
+    const lines = r.suggestions[Number(i)].lines;
+    return `<div class="sugg"><div class="h">Suggested change <button class="copy" data-copy="${escapeHtml(lines.join("\n"))}">Copy</button></div>${lines.map((l) => `<div class="p">+ ${escapeHtml(l)}</div>`).join("") || '<div class="m">(remove the lines)</div>'}</div>`;
+  });
+}

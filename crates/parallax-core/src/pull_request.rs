@@ -1,7 +1,7 @@
 //! Read-only GitHub PRs: resolve a pinned merge-base/head pair through `gh`,
 //! then fetch Git objects into the existing bare cache without a checkout.
 
-use std::{process::Command, time::Duration};
+use std::{collections::BTreeMap, process::Command, time::Duration};
 
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -238,6 +238,38 @@ pub struct Conversation {
     pub checks: Checks,
     /// Some reviews, comments or threads were left out (more than the app reads).
     pub truncated: bool,
+    /// The pull request's GraphQL node ID, for starting a review.
+    pub id: String,
+    /// Who `gh` is signed in as.
+    pub viewer: Option<String>,
+    /// Whether the viewer may comment (signed in, and the conversation not locked to them).
+    pub can_comment: bool,
+    /// The viewer opened the pull request (GitHub refuses their approval).
+    pub own: bool,
+    /// The viewer's pending review, from the app or the browser.
+    pub review: Option<PendingReview>,
+    /// Lines GitHub accepts comments on, per changed file; read only while the
+    /// compared head is the current one. A file with no ranges takes file comments only.
+    pub files: BTreeMap<String, Commentable>,
+}
+
+/// The viewer's review that is not submitted yet: visible only to them.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingReview {
+    pub id: String,
+    pub body: String,
+    /// The commit it was started on.
+    pub commit: Option<String>,
+    pub comments: u32,
+}
+
+/// 1-based line ranges, inclusive, of the diff hunks GitHub shows for a file.
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Commentable {
+    pub left: Vec<[u32; 2]>,
+    pub right: Vec<[u32; 2]>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -249,6 +281,15 @@ pub struct Note {
     pub body: String,
     pub created: String,
     pub url: String,
+    /// GraphQL node ID and REST ID.
+    pub id: String,
+    pub database_id: Option<u64>,
+    pub can_update: bool,
+    pub can_delete: bool,
+    /// Written by the viewer.
+    pub own: bool,
+    /// Part of the viewer's pending review.
+    pub pending: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -282,6 +323,13 @@ pub struct Thread {
     /// "Important", "Nit" or "Pre-existing", from a marker a review bot puts first.
     pub severity: Option<&'static str>,
     pub comments: Vec<Note>,
+    /// GraphQL node ID; empty for a pending thread only REST reported.
+    pub id: String,
+    pub can_reply: bool,
+    pub can_resolve: bool,
+    pub can_unresolve: bool,
+    /// Every comment is in the viewer's pending review.
+    pub pending: bool,
 }
 
 /// A finding CI attached to a line of the head commit (lint, compiler, analyzers).
@@ -313,18 +361,30 @@ const THREAD_PAGES: u32 = 20;
 /// Check runs whose annotations are read at most.
 const ANNOTATED_RUNS: usize = 30;
 
+/// Pages of 100 changed files read for the commentable lines at most.
+const FILE_PAGES: u32 = 30;
+
 const CONVERSATION_QUERY: &str = r#"query($owner: String!, $repo: String!, $number: Int!, $after: String) {
+  viewer { login }
   repository(owner: $owner, name: $repo) {
+    viewerPermission
     pullRequest(number: $number) {
-      number title state url headRefOid
+      id number title state url headRefOid locked viewerDidAuthor
       author { login __typename }
+      pending: reviews(first: 1, states: [PENDING]) {
+        nodes { id databaseId body author { login } commit { oid } comments(first: 100) { totalCount nodes { id } } }
+      }
       reviews(first: 100) { pageInfo { hasNextPage } nodes { author { login __typename } state body submittedAt url } }
-      comments(first: 100) { pageInfo { hasNextPage } nodes { author { login __typename } body createdAt url } }
+      comments(first: 100) { pageInfo { hasNextPage } nodes { id databaseId author { login __typename } body createdAt url } }
       reviewThreads(first: 100, after: $after) {
         pageInfo { hasNextPage endCursor }
         nodes {
+          id viewerCanReply viewerCanResolve viewerCanUnresolve
           path line startLine originalLine diffSide isResolved isOutdated subjectType
-          comments(first: 100) { pageInfo { hasNextPage } nodes { author { login __typename } body createdAt url } }
+          comments(first: 100) {
+            pageInfo { hasNextPage }
+            nodes { id databaseId state viewerCanUpdate viewerCanDelete viewerDidAuthor author { login __typename } body createdAt url }
+          }
         }
       }
     }
@@ -378,9 +438,22 @@ fn conversation_with(
             || login.as_deref().is_some_and(|l| l.ends_with("[bot]"));
         (login, bot)
     };
+    let flag = |v: &Value, k: &str| v.get(k).and_then(Value::as_bool).unwrap_or(false);
     let note = |v: &Value, created: &str| {
         let (author, bot) = author(v);
-        Note { author, bot, body: text(v, "body"), created: text(v, created), url: text(v, "url") }
+        Note {
+            author,
+            bot,
+            body: text(v, "body"),
+            created: text(v, created),
+            url: text(v, "url"),
+            id: text(v, "id"),
+            database_id: v.get("databaseId").and_then(Value::as_u64),
+            can_update: flag(v, "viewerCanUpdate"),
+            can_delete: flag(v, "viewerCanDelete"),
+            own: flag(v, "viewerDidAuthor"),
+            pending: text(v, "state") == "PENDING",
+        }
     };
     let nodes = |v: &Value| v.get("nodes").and_then(Value::as_array).cloned().unwrap_or_default();
     let more = |v: &Value| v.pointer("/pageInfo/hasNextPage").and_then(Value::as_bool).unwrap_or(false);
@@ -389,6 +462,8 @@ fn conversation_with(
     let mut conv: Option<Conversation> = None;
     let mut threads = Vec::new();
     let mut truncated = false;
+    let mut pending_db: Option<u64> = None;
+    let mut pending_ids: Vec<String> = Vec::new();
     for page in 0..THREAD_PAGES {
         let data = graphql(after.as_deref())?;
         if let Some(errors) = data.get("errors").and_then(Value::as_array).filter(|e| !e.is_empty()) {
@@ -405,6 +480,32 @@ fn conversation_with(
             }
             let head = text(pull, "headRefOid");
             commit_id(&head)?;
+            let viewer = data.pointer("/data/viewer/login").and_then(Value::as_str).map(str::to_string);
+            let permission = data.pointer("/data/repository/viewerPermission").and_then(Value::as_str).unwrap_or("");
+            let can_comment =
+                viewer.is_some() && (!flag(pull, "locked") || matches!(permission, "ADMIN" | "MAINTAIN" | "WRITE"));
+            // GitHub shows a pending review to its author only; checked all the same.
+            let review = pull.pointer("/pending/nodes").and_then(Value::as_array).and_then(|n| {
+                n.iter().find(|r| {
+                    r.pointer("/author/login").and_then(Value::as_str) == viewer.as_deref() && viewer.is_some()
+                })
+            });
+            if let Some(r) = review {
+                pending_db = r.get("databaseId").and_then(Value::as_u64);
+                pending_ids = r
+                    .pointer("/comments/nodes")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .map(|c| text(c, "id"))
+                    .collect();
+            }
+            let review = review.map(|r| PendingReview {
+                id: text(r, "id"),
+                body: text(r, "body"),
+                commit: r.pointer("/commit/oid").and_then(Value::as_str).map(str::to_string),
+                comments: r.pointer("/comments/totalCount").and_then(Value::as_u64).unwrap_or(0) as u32,
+            });
             let reviews = pull.get("reviews").cloned().unwrap_or_default();
             let comments = pull.get("comments").cloned().unwrap_or_default();
             truncated |= more(&reviews) || more(&comments);
@@ -437,6 +538,12 @@ fn conversation_with(
                 annotations: Vec::new(),
                 checks: Checks::default(),
                 truncated: false,
+                id: text(pull, "id"),
+                viewer,
+                can_comment,
+                own: flag(pull, "viewerDidAuthor"),
+                review,
+                files: BTreeMap::new(),
             });
         }
         let page_threads = pull.get("reviewThreads").cloned().unwrap_or_default();
@@ -457,8 +564,13 @@ fn conversation_with(
                 resolved: t.get("isResolved").and_then(Value::as_bool).unwrap_or(false),
                 outdated,
                 file_level,
+                pending: !comments.is_empty() && comments.iter().all(|c| c.pending),
                 severity,
                 comments,
+                id: text(&t, "id"),
+                can_reply: flag(&t, "viewerCanReply"),
+                can_resolve: flag(&t, "viewerCanResolve"),
+                can_unresolve: flag(&t, "viewerCanUnresolve"),
             });
         }
         let next = page_threads.pointer("/pageInfo/endCursor").and_then(Value::as_str).map(str::to_string);
@@ -471,7 +583,71 @@ fn conversation_with(
         after = next;
     }
     let mut conv = conv.ok_or_else(|| bad("no response"))?;
+    // Comments of the pending review the threads did not carry: read where they are.
+    let listed: std::collections::HashSet<&str> =
+        threads.iter().flat_map(|t| t.comments.iter().map(|c| c.id.as_str())).collect();
+    if let Some(db) = pending_db.filter(|_| pending_ids.iter().any(|id| !listed.contains(id.as_str()))) {
+        let endpoint = format!("{}/pulls/{}/reviews/{db}/comments?per_page=100", pr.endpoint(), pr.number);
+        let known: std::collections::HashSet<String> = listed.iter().map(|s| s.to_string()).collect();
+        for c in rest(&endpoint).ok().and_then(|v| v.as_array().cloned()).unwrap_or_default() {
+            if known.contains(&text(&c, "node_id")) {
+                continue;
+            }
+            let line = |k: &str| c.get(k).and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok());
+            let login = c.pointer("/user/login").and_then(Value::as_str).map(str::to_string);
+            threads.push(Thread {
+                path: text(&c, "path"),
+                side: if text(&c, "side") == "LEFT" { "left" } else { "right" },
+                line: line("line"),
+                start_line: line("start_line"),
+                original_line: line("original_line"),
+                resolved: false,
+                outdated: false,
+                file_level: text(&c, "subject_type") == "file",
+                severity: None,
+                comments: vec![Note {
+                    bot: c.pointer("/user/type").and_then(Value::as_str) == Some("Bot"),
+                    author: login,
+                    body: text(&c, "body"),
+                    created: text(&c, "created_at"),
+                    url: text(&c, "html_url"),
+                    id: text(&c, "node_id"),
+                    database_id: c.get("id").and_then(Value::as_u64),
+                    can_update: true,
+                    can_delete: true,
+                    own: true,
+                    pending: true,
+                }],
+                id: String::new(),
+                can_reply: false,
+                can_resolve: false,
+                can_unresolve: false,
+                pending: true,
+            });
+        }
+    }
     conv.threads = threads;
+
+    // Where GitHub accepts comments: the hunks of the pull request's diff, which
+    // is the merge base against the current head; only useful while that is the one compared.
+    if conv.head == pinned_head {
+        'pages: for page in 1..=FILE_PAGES {
+            let Ok(list) = rest(&format!("{}/pulls/{}/files?per_page=100&page={page}", pr.endpoint(), pr.number))
+            else {
+                break;
+            };
+            let list = list.as_array().cloned().unwrap_or_default();
+            for f in &list {
+                let path = text(f, "filename");
+                if !path.is_empty() {
+                    conv.files.insert(path, hunks(f.get("patch").and_then(Value::as_str).unwrap_or("")));
+                }
+            }
+            if list.len() < 100 {
+                break 'pages;
+            }
+        }
+    }
 
     // Checks and their annotations, on the head that is compared. CI that cannot
     // be read (no permission, no checks) leaves the rest of the conversation.
@@ -537,6 +713,338 @@ fn severity(body: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// The line ranges of a unified diff's hunks, per side.
+fn hunks(patch: &str) -> Commentable {
+    let mut out = Commentable::default();
+    let range = |s: &str| -> Option<[u32; 2]> {
+        let (start, count) = s.split_once(',').unwrap_or((s, "1"));
+        let (start, count) = (start.parse::<u32>().ok()?, count.parse::<u32>().ok()?);
+        (count > 0 && start > 0).then(|| [start, start + count - 1])
+    };
+    for line in patch.lines() {
+        let Some(rest) = line.strip_prefix("@@ -") else { continue };
+        let Some((left, rest)) = rest.split_once(" +") else { continue };
+        let Some((right, _)) = rest.split_once(" @@") else { continue };
+        out.left.extend(range(left));
+        out.right.extend(range(right));
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Writing: replies, resolving, comments and the viewer's pending review.
+
+/// Where a new comment or reply goes: posted at once, or into the viewer's
+/// pending review (started on `head` if there is none).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntoReview {
+    /// The pending review, if the app knows one.
+    pub id: Option<String>,
+    /// The pull request's node ID, to start one.
+    pub pull: String,
+    pub head: String,
+}
+
+/// One change to a pull request's conversation, made only on explicit request.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum Write {
+    /// A reply to a thread: `comment` is the REST ID of one of its comments.
+    Reply {
+        thread: String,
+        comment: u64,
+        body: String,
+        review: Option<IntoReview>,
+    },
+    /// A comment on lines `start..=end` (1-based) of `side`, or on the file when `end` is 0.
+    Comment {
+        path: String,
+        side: String,
+        start: u32,
+        end: u32,
+        body: String,
+        head: String,
+        review: Option<IntoReview>,
+    },
+    Resolve {
+        thread: String,
+        resolved: bool,
+    },
+    Edit {
+        comment: String,
+        body: String,
+    },
+    Delete {
+        comment: String,
+    },
+    /// `event` is `COMMENT`, `APPROVE` or `REQUEST_CHANGES`; a review without
+    /// comments (only a decision and a summary) is started first.
+    Submit {
+        review: IntoReview,
+        event: String,
+        body: String,
+    },
+    Discard {
+        review: String,
+    },
+}
+
+/// A variable of a GraphQL request or a field of a REST request.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Field {
+    Text(String),
+    Number(u64),
+    Flag(bool),
+}
+
+fn field_args(fields: &[(&str, Field)]) -> Vec<String> {
+    let mut args = Vec::new();
+    for (k, v) in fields {
+        // `-f` is a raw string (never a file reference); `-F` turns numbers and flags into JSON.
+        let (flag, value) = match v {
+            Field::Text(t) => ("-f", t.clone()),
+            Field::Number(n) => ("-F", n.to_string()),
+            Field::Flag(b) => ("-F", b.to_string()),
+        };
+        args.push(flag.to_string());
+        args.push(format!("{k}={value}"));
+    }
+    args
+}
+
+/// Makes one change through `gh`; the conversation is read again afterwards.
+pub fn write(url: &str, change: Write) -> Result<()> {
+    let pr = PullRequestUrl::parse(url)?;
+    let host = pr.host.clone();
+    let help = pr.access_help();
+    let run = |args: Vec<String>| -> Result<serde_json::Value> {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let json = gh(&args).map_err(|e| bad(format!("{e}. {help}")))?;
+        if json.trim().is_empty() {
+            return Ok(serde_json::Value::Null);
+        }
+        serde_json::from_str(&json).map_err(|e| bad(format!("invalid API response: {e}")))
+    };
+    write_with(
+        &pr,
+        change,
+        &mut |query, fields| {
+            let mut args = vec!["api".into(), "--hostname".into(), host.clone(), "graphql".into()];
+            args.extend(field_args(&[("query", Field::Text(query.to_string()))]));
+            args.extend(field_args(fields));
+            run(args)
+        },
+        &mut |endpoint, fields| {
+            let mut args = vec!["api".into(), "--hostname".into(), host.clone(), "--method".into(), "POST".into()];
+            args.push(endpoint.to_string());
+            args.extend(field_args(fields));
+            run(args)
+        },
+    )
+    .map_err(|e| {
+        // One message, without the prefixes of the errors it went through.
+        let message = e.to_string();
+        let message = message.strip_prefix("not supported: ").unwrap_or(&message);
+        let message = message.strip_prefix("GitHub PR: ").unwrap_or(message);
+        bad(format!("GitHub did not take the change: {message}"))
+    })
+}
+
+const MAX_BODY: usize = 65_000;
+
+fn node_id(id: &str) -> Result<()> {
+    if !id.is_empty() && id.len() <= 200 && id.bytes().all(|c| c.is_ascii_alphanumeric() || b"_-=".contains(&c)) {
+        Ok(())
+    } else {
+        Err(bad("invalid GitHub ID"))
+    }
+}
+
+fn body_text(body: &str) -> Result<()> {
+    if body.trim().is_empty() {
+        Err(bad("the comment is empty"))
+    } else if body.len() > MAX_BODY {
+        Err(bad("the comment is too long for GitHub"))
+    } else {
+        Ok(())
+    }
+}
+
+fn graphql_ok(v: serde_json::Value) -> Result<serde_json::Value> {
+    use serde_json::Value;
+    if let Some(errors) = v.get("errors").and_then(Value::as_array).filter(|e| !e.is_empty()) {
+        let message = errors.iter().filter_map(|e| e.get("message").and_then(Value::as_str)).collect::<Vec<_>>();
+        return Err(bad(message.join("; ")));
+    }
+    Ok(v)
+}
+
+type GraphQl<'a> = dyn FnMut(&str, &[(&str, Field)]) -> Result<serde_json::Value> + 'a;
+type Post<'a> = dyn FnMut(&str, &[(&str, Field)]) -> Result<serde_json::Value> + 'a;
+
+/// The pending review to add to: the known one, or a new one on `head`. A review
+/// started meanwhile in the browser is used, since GitHub allows one per person.
+fn review_id(graphql: &mut GraphQl, into: &IntoReview) -> Result<String> {
+    use serde_json::Value;
+    if let Some(id) = &into.id {
+        node_id(id)?;
+        return Ok(id.clone());
+    }
+    node_id(&into.pull)?;
+    commit_id(&into.head)?;
+    let started = graphql(
+        "mutation($pull: ID!, $head: GitObjectID!) { addPullRequestReview(input: {pullRequestId: $pull, commitOID: $head}) { pullRequestReview { id } } }",
+        &[("pull", Field::Text(into.pull.clone())), ("head", Field::Text(into.head.clone()))],
+    )
+    .and_then(graphql_ok);
+    match started {
+        Ok(v) => v
+            .pointer("/data/addPullRequestReview/pullRequestReview/id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| bad("GitHub did not start the review")),
+        Err(error) => {
+            let existing = graphql(
+                "query($pull: ID!) { node(id: $pull) { ... on PullRequest { reviews(first: 1, states: [PENDING]) { nodes { id } } } } }",
+                &[("pull", Field::Text(into.pull.clone()))],
+            )
+            .and_then(graphql_ok)
+            .ok()
+            .and_then(|v| v.pointer("/data/node/reviews/nodes/0/id").and_then(Value::as_str).map(str::to_string));
+            existing.ok_or(error)
+        }
+    }
+}
+
+fn write_with(pr: &PullRequestUrl, change: Write, graphql: &mut GraphQl, post: &mut Post) -> Result<()> {
+    let text = |s: &str| Field::Text(s.to_string());
+    match change {
+        Write::Reply { thread, comment, body, review } => {
+            body_text(&body)?;
+            match review {
+                Some(into) => {
+                    node_id(&thread)?;
+                    let review = review_id(graphql, &into)?;
+                    graphql(
+                        "mutation($thread: ID!, $review: ID!, $body: String!) { addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: $thread, pullRequestReviewId: $review, body: $body}) { comment { id } } }",
+                        &[("thread", text(&thread)), ("review", Field::Text(review)), ("body", Field::Text(body))],
+                    )
+                    .and_then(graphql_ok)?;
+                }
+                None => {
+                    post(
+                        &format!("{}/pulls/{}/comments/{comment}/replies", pr.endpoint(), pr.number),
+                        &[("body", Field::Text(body))],
+                    )?;
+                }
+            }
+        }
+        Write::Comment { path, side, start, end, body, head, review } => {
+            body_text(&body)?;
+            commit_id(&head)?;
+            if path.is_empty() || path.chars().any(char::is_control) {
+                return Err(bad("invalid file path"));
+            }
+            let side = match side.as_str() {
+                "left" => "LEFT",
+                "right" => "RIGHT",
+                _ => return Err(bad("invalid side")),
+            };
+            let start = if start == 0 || start > end { end } else { start };
+            match review {
+                Some(into) => {
+                    let review = review_id(graphql, &into)?;
+                    let mut fields =
+                        vec![("review", Field::Text(review)), ("path", text(&path)), ("body", Field::Text(body))];
+                    if end == 0 {
+                        fields.push(("subject", text("FILE")));
+                    } else {
+                        fields.extend([
+                            ("subject", text("LINE")),
+                            ("line", Field::Number(end.into())),
+                            ("side", text(side)),
+                        ]);
+                        if start < end {
+                            fields.extend([("start", Field::Number(start.into())), ("startSide", text(side))]);
+                        }
+                    }
+                    graphql(
+                        "mutation($review: ID!, $path: String!, $body: String!, $subject: PullRequestReviewThreadSubjectType, $line: Int, $side: DiffSide, $start: Int, $startSide: DiffSide) { addPullRequestReviewThread(input: {pullRequestReviewId: $review, path: $path, body: $body, subjectType: $subject, line: $line, side: $side, startLine: $start, startSide: $startSide}) { thread { id } } }",
+                        &fields,
+                    )
+                    .and_then(graphql_ok)?;
+                }
+                None => {
+                    let mut fields =
+                        vec![("commit_id", Field::Text(head)), ("path", text(&path)), ("body", Field::Text(body))];
+                    if end == 0 {
+                        fields.push(("subject_type", text("file")));
+                    } else {
+                        fields.extend([("line", Field::Number(end.into())), ("side", text(side))]);
+                        if start < end {
+                            fields.extend([("start_line", Field::Number(start.into())), ("start_side", text(side))]);
+                        }
+                    }
+                    post(&format!("{}/pulls/{}/comments", pr.endpoint(), pr.number), &fields)?;
+                }
+            }
+        }
+        Write::Resolve { thread, resolved } => {
+            node_id(&thread)?;
+            let query = if resolved {
+                "mutation($thread: ID!) { resolveReviewThread(input: {threadId: $thread}) { thread { id } } }"
+            } else {
+                "mutation($thread: ID!) { unresolveReviewThread(input: {threadId: $thread}) { thread { id } } }"
+            };
+            graphql(query, &[("thread", Field::Text(thread))]).and_then(graphql_ok)?;
+        }
+        Write::Edit { comment, body } => {
+            node_id(&comment)?;
+            body_text(&body)?;
+            graphql(
+                "mutation($comment: ID!, $body: String!) { updatePullRequestReviewComment(input: {pullRequestReviewCommentId: $comment, body: $body}) { pullRequestReviewComment { id } } }",
+                &[("comment", Field::Text(comment)), ("body", Field::Text(body))],
+            )
+            .and_then(graphql_ok)?;
+        }
+        Write::Delete { comment } => {
+            node_id(&comment)?;
+            graphql(
+                "mutation($comment: ID!) { deletePullRequestReviewComment(input: {id: $comment}) { clientMutationId } }",
+                &[("comment", Field::Text(comment))],
+            )
+            .and_then(graphql_ok)?;
+        }
+        Write::Submit { review, event, body } => {
+            if !matches!(event.as_str(), "COMMENT" | "APPROVE" | "REQUEST_CHANGES") {
+                return Err(bad("invalid review decision"));
+            }
+            if event == "REQUEST_CHANGES" && body.trim().is_empty() {
+                return Err(bad("requesting changes needs a summary"));
+            }
+            if body.len() > MAX_BODY {
+                return Err(bad("the summary is too long for GitHub"));
+            }
+            let review = review_id(graphql, &review)?;
+            graphql(
+                "mutation($review: ID!, $event: PullRequestReviewEvent!, $body: String) { submitPullRequestReview(input: {pullRequestReviewId: $review, event: $event, body: $body}) { pullRequestReview { id } } }",
+                &[("review", Field::Text(review)), ("event", Field::Text(event)), ("body", Field::Text(body))],
+            )
+            .and_then(graphql_ok)?;
+        }
+        Write::Discard { review } => {
+            node_id(&review)?;
+            graphql(
+                "mutation($review: ID!) { deletePullRequestReview(input: {pullRequestReviewId: $review}) { pullRequestReview { id } } }",
+                &[("review", Field::Text(review))],
+            )
+            .and_then(graphql_ok)?;
+        }
+    }
+    Ok(())
 }
 
 /// The link to lines of a file on the pull request's *Files changed* page, where
@@ -642,6 +1150,8 @@ mod tests {
                     Ok(json!({"check_runs": [
                         {"id": 7, "name": "clippy", "status": "completed", "conclusion": "failure", "html_url": "https://github.company.example/r/7", "output": {"annotations_count": 1}},
                         {"id": 8, "name": "test", "status": "in_progress", "conclusion": null, "output": {"annotations_count": 0}}]}))
+                } else if endpoint.contains("/files?") {
+                    Ok(json!([]))
                 } else {
                     assert_eq!(endpoint, "repos/team/project/check-runs/7/annotations?per_page=100");
                     Ok(json!([{"path": "src/a.rs", "start_line": 20, "end_line": 20, "annotation_level": "warning",
@@ -668,6 +1178,198 @@ mod tests {
         assert_eq!(conv.annotations.len(), 1);
         assert_eq!((conv.annotations[0].check.as_str(), conv.annotations[0].title.as_deref()), ("clippy", None));
         assert!(!conv.truncated);
+    }
+
+    #[test]
+    fn conversation_reads_permissions_pending_review_and_commentable_lines() {
+        let comment = json!({"id": "C_1", "databaseId": 101, "state": "PENDING", "viewerCanUpdate": true,
+            "viewerCanDelete": true, "viewerDidAuthor": true, "author": {"login": "dave", "__typename": "User"},
+            "body": "Why?", "createdAt": "2026-11-12T10:00:00Z", "url": "u"});
+        let thread = json!({"id": "T_1", "viewerCanReply": true, "viewerCanResolve": false, "viewerCanUnresolve": false,
+            "path": "src/a.rs", "line": 4, "startLine": null, "originalLine": 4, "diffSide": "RIGHT",
+            "isResolved": false, "isOutdated": false, "subjectType": "LINE",
+            "comments": {"pageInfo": {"hasNextPage": false}, "nodes": [comment]}});
+        let pending = json!({"nodes": [{"id": "R_9", "databaseId": 9, "body": "", "author": {"login": "dave"},
+            "commit": {"oid": HEAD}, "comments": {"totalCount": 2, "nodes": [{"id": "C_1"}, {"id": "C_2"}]}}]});
+        let pull = json!({"id": "PR_42", "number": 42, "title": "T", "state": "OPEN", "url": "x", "headRefOid": HEAD,
+            "locked": false, "viewerDidAuthor": false, "author": {"login": "alice", "__typename": "User"},
+            "pending": pending,
+            "reviews": {"pageInfo": {"hasNextPage": false}, "nodes": []},
+            "comments": {"pageInfo": {"hasNextPage": false}, "nodes": []},
+            "reviewThreads": {"pageInfo": {"hasNextPage": false, "endCursor": null}, "nodes": [thread]}});
+        let page = json!({"data": {"viewer": {"login": "dave"}, "repository": {"viewerPermission": "READ", "pullRequest": pull}}});
+        let mut endpoints = Vec::new();
+        let conv = conversation_with(&pr(), HEAD, &mut |_| Ok(page.clone()), &mut |endpoint| {
+            endpoints.push(endpoint.to_string());
+            if endpoint.contains("/reviews/9/comments") {
+                Ok(json!([{"node_id": "C_2", "id": 102, "path": "src/b.rs", "line": null, "side": "RIGHT",
+                    "subject_type": "file", "body": "Split this file", "created_at": "t", "html_url": "u",
+                    "user": {"login": "dave", "type": "User"}}]))
+            } else if endpoint.contains("/files?") {
+                Ok(json!([{"filename": "src/a.rs", "patch": "@@ -1,3 +1,5 @@\n a\n+b"}, {"filename": "logo.png"}]))
+            } else {
+                Err(bad("no checks"))
+            }
+        })
+        .unwrap();
+        assert_eq!(
+            (conv.id.as_str(), conv.viewer.as_deref(), conv.can_comment, conv.own),
+            ("PR_42", Some("dave"), true, false)
+        );
+        let review = conv.review.as_ref().unwrap();
+        assert_eq!((review.id.as_str(), review.comments, review.commit.as_deref()), ("R_9", 2, Some(HEAD)));
+        let t = &conv.threads[0];
+        assert_eq!((t.id.as_str(), t.can_reply, t.can_resolve, t.pending), ("T_1", true, false, true));
+        let c = &t.comments[0];
+        assert_eq!(
+            (c.id.as_str(), c.database_id, c.own, c.can_delete, c.pending),
+            ("C_1", Some(101), true, true, true)
+        );
+        // The pending file comment the threads did not carry comes from REST.
+        let f = &conv.threads[1];
+        assert_eq!(
+            (f.path.as_str(), f.file_level, f.pending, f.comments[0].id.as_str()),
+            ("src/b.rs", true, true, "C_2")
+        );
+        assert_eq!(conv.files["src/a.rs"], Commentable { left: vec![[1, 3]], right: vec![[1, 5]] });
+        assert_eq!(conv.files["logo.png"], Commentable::default());
+        assert!(endpoints.iter().any(|e| e == "repos/team/project/pulls/42/files?per_page=100&page=1"));
+
+        // A newer head: lines of the compared one are not commentable, so not read.
+        let mut endpoints = Vec::new();
+        let conv = conversation_with(&pr(), TARGET, &mut |_| Ok(page.clone()), &mut |endpoint| {
+            endpoints.push(endpoint.to_string());
+            Ok(json!([]))
+        })
+        .unwrap();
+        assert!(conv.files.is_empty() && !endpoints.iter().any(|e| e.contains("/files?")));
+    }
+
+    #[test]
+    fn hunks_give_commentable_lines() {
+        let c = hunks("@@ -21,8 +21,19 @@ fn x()\n ctx\n@@ -50 +61,0 @@\n-gone\n@@ -0,0 +1,3 @@\n+new");
+        assert_eq!(c.left, [[21, 28], [50, 50]]);
+        assert_eq!(c.right, [[21, 39], [1, 3]]);
+        assert_eq!(hunks("Binary files differ"), Commentable::default());
+    }
+
+    #[test]
+    fn writes_go_into_the_pending_review_or_post_at_once() {
+        let text = |s: &str| Field::Text(s.to_string());
+        let mut calls: Vec<(String, Vec<(String, Field)>)> = Vec::new();
+        let into = IntoReview { id: None, pull: "PR_42".into(), head: HEAD.into() };
+        let change = Write::Comment {
+            path: "src/a.rs".into(),
+            side: "right".into(),
+            start: 3,
+            end: 5,
+            body: "Why?".into(),
+            head: HEAD.into(),
+            review: Some(into.clone()),
+        };
+        write_with(
+            &pr(),
+            change,
+            &mut |q, f| {
+                calls.push((q.to_string(), f.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()));
+                Ok(if q.contains("addPullRequestReview(") {
+                    json!({"data": {"addPullRequestReview": {"pullRequestReview": {"id": "R_1"}}}})
+                } else {
+                    json!({"data": {}})
+                })
+            },
+            &mut |_, _| unreachable!("nothing is posted at once"),
+        )
+        .unwrap();
+        assert_eq!(calls.len(), 2);
+        assert!(calls[0].0.contains("addPullRequestReview(") && calls[0].1.contains(&("head".into(), text(HEAD))));
+        let fields = &calls[1].1;
+        assert!(calls[1].0.contains("addPullRequestReviewThread("));
+        for f in
+            [("review", text("R_1")), ("line", Field::Number(5)), ("start", Field::Number(3)), ("side", text("RIGHT"))]
+        {
+            assert!(fields.contains(&(f.0.to_string(), f.1.clone())), "{f:?} in {fields:?}");
+        }
+
+        // A review started meanwhile in the browser is used.
+        let mut queries = Vec::new();
+        let reply = Write::Reply { thread: "T_1".into(), comment: 101, body: "Done".into(), review: Some(into) };
+        write_with(
+            &pr(),
+            reply,
+            &mut |q, _| {
+                queries.push(q.to_string());
+                if q.contains("addPullRequestReview(") {
+                    Ok(json!({"errors": [{"message": "User can only have one pending review per pull request"}]}))
+                } else if q.contains("reviews(first: 1") {
+                    Ok(json!({"data": {"node": {"reviews": {"nodes": [{"id": "R_7"}]}}}}))
+                } else {
+                    Ok(json!({"data": {}}))
+                }
+            },
+            &mut |_, _| unreachable!(),
+        )
+        .unwrap();
+        assert_eq!(queries.len(), 3);
+        assert!(queries[2].contains("addPullRequestReviewThreadReply"));
+
+        // Without a review: REST, at once, with the compared commit.
+        let mut posted = Vec::new();
+        let change = Write::Comment {
+            path: "src/a.rs".into(),
+            side: "left".into(),
+            start: 0,
+            end: 0,
+            body: "On the file".into(),
+            head: HEAD.into(),
+            review: None,
+        };
+        let mut no_graphql = |_: &str, _: &[(&str, Field)]| -> Result<Value> { unreachable!() };
+        let mut post = |e: &str, f: &[(&str, Field)]| {
+            posted.push((e.to_string(), f.iter().map(|(k, v)| (k.to_string(), v.clone())).collect::<Vec<_>>()));
+            Ok(Value::Null)
+        };
+        write_with(&pr(), change, &mut no_graphql, &mut post).unwrap();
+        let reply = Write::Reply { thread: "T_1".into(), comment: 101, body: "Thanks".into(), review: None };
+        write_with(&pr(), reply, &mut no_graphql, &mut post).unwrap();
+        assert_eq!(posted[0].0, "repos/team/project/pulls/42/comments");
+        assert!(posted[0].1.contains(&("subject_type".into(), text("file"))));
+        assert!(posted[0].1.contains(&("commit_id".into(), text(HEAD))));
+        assert_eq!(posted[1].0, "repos/team/project/pulls/42/comments/101/replies");
+
+        // Refused before anything is sent.
+        let known = IntoReview { id: Some("R_1".into()), pull: "PR_42".into(), head: HEAD.into() };
+        for bad_change in [
+            Write::Submit { review: known.clone(), event: "MERGE".into(), body: String::new() },
+            Write::Submit { review: known.clone(), event: "REQUEST_CHANGES".into(), body: " ".into() },
+            Write::Edit { comment: "C 1; drop".into(), body: "x".into() },
+            Write::Reply { thread: "T_1".into(), comment: 1, body: "  ".into(), review: None },
+            Write::Comment {
+                path: "a".into(),
+                side: "up".into(),
+                start: 1,
+                end: 1,
+                body: "x".into(),
+                head: HEAD.into(),
+                review: None,
+            },
+            Write::Comment {
+                path: "a".into(),
+                side: "left".into(),
+                start: 1,
+                end: 1,
+                body: "x".into(),
+                head: "main".into(),
+                review: None,
+            },
+        ] {
+            assert!(write_with(&pr(), bad_change, &mut no_graphql, &mut |_, _| unreachable!()).is_err());
+        }
+        // Arguments: raw strings with -f, numbers with -F, never a file reference.
+        assert_eq!(
+            field_args(&[("body", text("@/etc/passwd")), ("line", Field::Number(3))]),
+            ["-f", "body=@/etc/passwd", "-F", "line=3"]
+        );
     }
 
     #[test]

@@ -1,11 +1,14 @@
 <script lang="ts">
-  import { api, type PrAnnotation, type PrConversation, type PrNote, type PrThread } from "./api";
-  import { renderMarkdown, escapeHtml } from "./markdown";
-  import { ago, linesApply } from "./prConversation.svelte";
+  import { api, type PrAnnotation, type PrConversation, type PrNote, type PrThread, type PrWrite } from "./api";
+  import { commentHtml } from "./markdown";
+  import { ago, intoReview, linesApply, linesBlocked, prConversations } from "./prConversation.svelte";
   import { notify } from "./toast.svelte";
+  import { ask } from "./confirm.svelte";
+  import Composer, { type ComposerAction } from "./Composer.svelte";
 
   let {
     data,
+    session = null,
     path = null,
     scope = null,
     current = null,
@@ -15,6 +18,8 @@
     onClose,
   }: {
     data: PrConversation;
+    /** The comparison session, for writing; null shows the conversation read-only. */
+    session?: number | null;
     /** One file's threads; null for all files and the conversation. */
     path?: string | null;
     /** In the folder view: only what is in this file or folder (null: everything). */
@@ -67,12 +72,78 @@
   }
 
   /** A comment as safe HTML, with its suggested changes shown as added lines. */
-  function body(note: PrNote): string {
-    const r = renderMarkdown(note.body);
-    return r.html.replace(/<div class="md-suggestion" data-index="(\d+)"><\/div>/g, (_m, i) => {
-      const lines = r.suggestions[Number(i)].lines;
-      return `<div class="sugg"><div class="h">Suggested change <button class="copy" data-copy="${escapeHtml(lines.join("\n"))}">Copy</button></div>${lines.map((l) => `<div class="p">+ ${escapeHtml(l)}</div>`).join("") || '<div class="m">(remove the lines)</div>'}</div>`;
+  const body = (note: PrNote): string => commentHtml(note.body);
+
+  // ---- Writing ----
+  const writable = $derived(session !== null && !!data.viewer && data.canComment);
+  const busy = $derived(session !== null && !!prConversations.busy[session]);
+  const as = $derived(data.viewer ? ` as ${data.viewer}` : "");
+  /** The thread (index) with an open reply field, and the comment being edited (node ID). */
+  let replying = $state<number | null>(null);
+  let editing = $state<string | null>(null);
+  const write = (change: PrWrite) => (session === null ? Promise.resolve(false) : prConversations.write(session, change));
+
+  // R in the comparison: the reply field of the thread at the selected row.
+  $effect(() => {
+    const r = prConversations.replyTo;
+    if (!r || r.session !== session) return;
+    prConversations.replyTo = null;
+    const t = data.threads[r.thread];
+    if (t?.canReply && t.id) {
+      if (t.resolved) tab = "resolved";
+      replying = r.thread;
+    } else notify(t ? "You cannot reply to this thread" : "No thread at the selected line", "info");
+  });
+
+  /** The new comment being written in this panel's file. */
+  const target = $derived.by(() => {
+    const c = prConversations.composer;
+    return c && c.session === session && (path === null || c.path === path) ? c : null;
+  });
+
+  function lines(start: number, end: number) {
+    return end === 0 ? "the file" : start && start !== end ? `lines ${start}–${end}` : `line ${end}`;
+  }
+
+  function commentActions(): ComposerAction[] {
+    const t = target!;
+    const send = (review: boolean) => async (text: string) => {
+      const ok = await write({ kind: "comment", path: t.path, side: t.side, start: t.start, end: t.end, body: text, head: data.pinnedHead, review: review ? intoReview(data) : null });
+      if (ok) prConversations.composer = null;
+      return ok;
+    };
+    if (data.review)
+      return [{ label: "Add to review", primary: true, review: true, title: "Adds the comment to your pending review: only you see it until you submit", run: send(true) }];
+    return [
+      { label: "Comment now", title: `Posts this one comment now${as}; everyone subscribed is notified`, run: send(false) },
+      { label: "Start a review", primary: true, review: true, title: "Starts your pending review with this comment: only you see it until you submit", run: send(true) },
+    ];
+  }
+
+  function replyActions(index: number, t: PrThread): ComposerAction[] {
+    const comment = t.comments.find((c) => c.databaseId !== null)?.databaseId ?? 0;
+    const send = (review: boolean, resolve = false) => async (text: string) => {
+      let ok = await write({ kind: "reply", thread: t.id, comment, body: text, review: review ? intoReview(data) : null });
+      if (ok && resolve) ok = await write({ kind: "resolve", thread: t.id, resolved: true });
+      if (ok && replying === index) replying = null;
+      return ok;
+    };
+    if (data.review)
+      return [{ label: "Add to review", primary: true, review: true, title: "Adds the reply to your pending review: sent when you submit it", run: send(true) }];
+    return [
+      ...(t.canResolve && !t.resolved && comment ? [{ label: "Reply and resolve", title: `Posts the reply now${as} and resolves the thread`, run: send(false, true) }] : []),
+      { label: "Start a review", review: true, title: "Starts your pending review with this reply: only you see it until you submit", run: send(true) },
+      ...(comment ? [{ label: "Reply", primary: true, title: `Posts the reply now${as}`, run: send(false) }] : []),
+    ];
+  }
+
+  async function remove(n: PrNote) {
+    const ok = await ask(n.pending ? "Delete this comment from your pending review?" : "Delete this comment on GitHub? Everyone sees that it was deleted, and it cannot be undone.", {
+      title: "Delete comment",
+      kind: "warning",
+      okLabel: "Delete",
     });
+    if (ok) await write({ kind: "delete", comment: n.id });
   }
 
   async function click(e: MouseEvent) {
@@ -116,11 +187,30 @@
     ({ APPROVED: "approved", CHANGES_REQUESTED: "requested changes", COMMENTED: "reviewed", DISMISSED: "review dismissed" })[state] ?? state.toLowerCase();
 </script>
 
-{#snippet note(n: PrNote, reply = false)}
+{#snippet note(n: PrNote, reply = false, inPending = false)}
   <div class="cmt" class:reply>
-    <div class="who"><b>{n.author ?? "ghost"}</b>{#if n.bot}<span class="tag">bot</span>{/if} <span>{ago(n.created)}</span></div>
-    <!-- Rendered from escaped text: no HTML of the comment reaches the page. -->
-    <div class="body">{@html body(n)}</div>
+    <div class="who">
+      <b>{n.author ?? "ghost"}</b>{#if n.bot}<span class="tag">bot</span>{/if}
+      {#if n.pending && !inPending}<span class="pending" title="In your pending review: only you see it until you submit">Pending</span>{:else if !n.pending}<span>{ago(n.created)}</span>{/if}
+      {#if writable && editing !== n.id && (n.canUpdate || n.canDelete) && n.id}
+        <span class="own">
+          {#if n.canUpdate}<button class="link" onclick={(e) => { e.stopPropagation(); editing = n.id; }}>Edit</button>{/if}
+          {#if n.canDelete}<button class="link del" onclick={(e) => { e.stopPropagation(); void remove(n); }}>Delete</button>{/if}
+        </span>
+      {/if}
+    </div>
+    {#if editing === n.id && session !== null}
+      <Composer heading="Edit your comment" url={data.url} target="edit:{n.id}" initial={n.body} {busy}
+        actions={[{ label: "Save", primary: true, title: n.pending ? "Saves the comment in your pending review" : "Saves the change on GitHub; GitHub marks the comment as edited", run: async (text) => {
+          const ok = await write({ kind: "edit", comment: n.id, body: text });
+          if (ok) editing = null;
+          return ok;
+        } }]}
+        onCancel={() => (editing = null)} />
+    {:else}
+      <!-- Rendered from escaped text: no HTML of the comment reaches the page. -->
+      <div class="body">{@html body(n)}</div>
+    {/if}
   </div>
 {/snippet}
 
@@ -131,6 +221,12 @@
       <b title={path ?? data.title}>{path === null ? `#${data.number} ${data.title}` : (path.split("/").pop() ?? path)}</b>
       <button class="x" onclick={onClose} title="Hide the threads" aria-label="Hide the threads">✕</button>
     </div>
+    {#if path !== null && writable && data.files[path] && !target}
+      {@const blocked = linesBlocked(data)}
+      <div class="scope"><button class="link" disabled={!!blocked} title={blocked ?? "A comment on the file as a whole, not on lines"}
+        onclick={() => (prConversations.composer = { session: session!, path: path!, side: "right", start: 0, end: 0 })}>Comment on the file</button>
+        <span>· select lines and press C to comment on them</span></div>
+    {/if}
     {#if path === null && scope}
       <div class="scope">In <b>{scope}</b> <button class="link" onclick={onClearScope}>Show all files</button></div>
     {/if}
@@ -142,12 +238,19 @@
     </span>
   </header>
   <div class="list">
+    {#if target && writable}
+      <div class="thread new">
+        <Composer heading="New comment on {path === null ? `${target.path} · ` : ""}{target.end ? `${target.side} ` : ""}{lines(target.start, target.end)}" url={data.url}
+          target="new:{target.path}:{target.side}:{target.start}-{target.end}" suggestion={target.side === "right" && target.end ? (target.suggestion ?? null) : null}
+          {busy} actions={commentActions()} onCancel={() => (prConversations.composer = null)} />
+      </div>
+    {/if}
     {#if tab === "conversation"}
       {#each [...data.reviews.filter((r) => r.body.trim() || r.state !== "COMMENTED").map((r) => ({ kind: "review" as const, at: r.submitted ?? "", r })), ...data.comments.map((c) => ({ kind: "comment" as const, at: c.created, c }))].sort((a, b) => a.at.localeCompare(b.at)) as item, i (i)}
         <div class="thread">
           {#if item.kind === "review"}
             <div class="where"><span class="state {item.r.state}">{item.r.author ?? "ghost"} {reviewLabel(item.r.state)}</span><span>{ago(item.r.submitted)}</span></div>
-            {#if item.r.body.trim()}<div class="body">{@html body({ author: item.r.author, bot: item.r.bot, body: item.r.body, created: item.r.submitted ?? "", url: item.r.url })}</div>{/if}
+            {#if item.r.body.trim()}<div class="body">{@html commentHtml(item.r.body)}</div>{/if}
           {:else}
             {@render note(item.c)}
           {/if}
@@ -161,13 +264,25 @@
         <div class="thread" class:cur={index === current} class:dimmed={tab !== "open"} data-thread={index} onclick={() => onGo(index)}>
           <div class="where">
             <b>{where(thread)}</b>
+            {#if thread.pending}<span class="pending">Pending</span>{/if}
             {#if thread.severity}<span class="sev {thread.severity}">{thread.severity}</span>{/if}
             {#if thread.comments[0]?.url}
               <button class="gh" onclick={(e) => { e.stopPropagation(); openLink(thread.comments[thread.comments.length - 1].url); }}
-                title="Opens this thread on GitHub, where you can reply, resolve it or react">{thread.resolved || thread.outdated ? "Open on GitHub ↗" : "Reply on GitHub ↗"}</button>
+                title="Opens this thread on GitHub">{thread.resolved || thread.outdated || writable ? "Open on GitHub ↗" : "Reply on GitHub ↗"}</button>
             {/if}
           </div>
-          {#each thread.comments as c, i (i)}{@render note(c, i > 0)}{/each}
+          {#each thread.comments as c, i (i)}{@render note(c, i > 0, thread.pending)}{/each}
+          {#if writable && thread.id}
+            {#if replying === index}
+              <Composer heading="Reply{as}" url={data.url} target="reply:{thread.id}" {busy} rows={3} actions={replyActions(index, thread)} onCancel={() => (replying = null)} />
+            {:else if !thread.pending || thread.canResolve || thread.canUnresolve}
+              <div class="acts">
+                {#if thread.canReply}<button class="replybox" onclick={(e) => { e.stopPropagation(); replying = index; }} disabled={busy}>Reply…</button>{/if}
+                {#if thread.canResolve && !thread.resolved}<button class="sm" onclick={(e) => { e.stopPropagation(); void write({ kind: "resolve", thread: thread.id, resolved: true }); }} disabled={busy} title="Marks the conversation as resolved on GitHub">✓ Resolve</button>{/if}
+                {#if thread.canUnresolve && thread.resolved}<button class="sm" onclick={(e) => { e.stopPropagation(); void write({ kind: "resolve", thread: thread.id, resolved: false }); }} disabled={busy}>Unresolve</button>{/if}
+              </div>
+            {/if}
+          {/if}
         </div>
       {/each}
       {#if tab === "open"}
@@ -240,4 +355,12 @@
   .body :global(.sugg .m) { background: var(--row-changed); }
   .body :global(.copy) { font-size: 10.5px; padding: 0 6px; }
   .empty { margin: 0; padding: 12px 10px; color: var(--dim); }
+  .thread.new { background: var(--bg); }
+  .pending { font-size: 9.5px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--similar); border: 1px solid currentColor; border-radius: 3px; padding: 0 4px; margin-left: 4px; }
+  .own { float: right; }
+  .own .link { font-size: 11px; padding: 0 2px; }
+  .own .del { color: var(--diff); }
+  .acts { display: flex; gap: 6px; align-items: center; }
+  .replybox { flex: 1; text-align: left; color: var(--dim); background: var(--bg); font-size: 11.5px; padding: 2px 8px; cursor: text; }
+  .sm { font-size: 11px; padding: 1px 7px; white-space: nowrap; }
 </style>

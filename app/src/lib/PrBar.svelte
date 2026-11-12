@@ -1,6 +1,7 @@
 <script lang="ts">
   import { api } from "./api";
   import { prConversations, reviewSummary, linesApply, type PrState } from "./prConversation.svelte";
+  import ReviewDialog from "./ReviewDialog.svelte";
   import type { Snippet } from "svelte";
 
   let {
@@ -58,6 +59,14 @@
         💬 {open} {open === 1 ? "thread" : "threads"}{#if ci}{" "}· ▲ {ci} CI {ci === 1 ? "finding" : "findings"}{/if} ›
       </button>
     {/if}
+    {#if data.review}
+      <span class="review" title="Your pending review: only you see it until you submit; it is the same one GitHub shows in the browser">
+        Your review · {data.review.comments} pending
+      </span>
+      <button class="small primary" onclick={() => (prConversations.reviewing = session)} title="Submit or discard your review (Ctrl+Shift+Enter)">Finish review ›</button>
+    {:else if data.viewer && data.canComment}
+      <button class="small" onclick={() => (prConversations.reviewing = session)} title="Approve, request changes or comment on the pull request as a whole (Ctrl+Shift+Enter)">Review…</button>
+    {/if}
     {@render extra?.()}
   {:else if pr.loading}
     <span class="dim">Reading comments and reviews…</span>
@@ -70,8 +79,12 @@
     {#if onReopen}<button class="small" onclick={onReopen}>Open the new head</button>{/if}
   {/if}
   <button class="link" onclick={() => api.openPullRequestLink(pr.info.url, pr.info.url).catch(() => {})} title={pr.info.url}>Open on GitHub ↗</button>
+  {#if prConversations.busy[session]}<span class="dim">Sending…</span>{/if}
   <button class="small" onclick={() => prConversations.load(session)} disabled={pr.loading} title={pr.at ? `Read ${new Date(pr.at).toLocaleTimeString()}; read again` : "Read again"} aria-label="Read the comments again">⟳</button>
 </div>
+{#if data && prConversations.reviewing === session}
+  <ReviewDialog {data} {session} onClose={() => (prConversations.reviewing = null)} />
+{/if}
 
 <style>
   .prbar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 5px 10px; border-bottom: 1px solid var(--line); background: var(--panel-2); font-size: 12px; min-width: 0; }
@@ -85,6 +98,8 @@
   .pill.bad { color: var(--diff); border-color: currentColor; }
   button.small { font-size: 12px; padding: 1px 8px; }
   button.on { background: var(--sel); border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .review { color: var(--similar); font-weight: 600; white-space: nowrap; }
   .link { border: none; background: none; color: var(--accent); padding: 0 4px; cursor: pointer; font-size: 12px; }
   @media (prefers-color-scheme: dark) { :global(:root:not([data-theme="light"])) .pill.ok { color: #6fcf8f; } }
   :global(:root[data-theme="dark"]) .pill.ok { color: #6fcf8f; }

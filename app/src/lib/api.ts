@@ -19,6 +19,15 @@ export interface PrNote {
   body: string;
   created: string;
   url: string;
+  /** GraphQL node ID and REST ID. */
+  id: string;
+  databaseId: number | null;
+  canUpdate: boolean;
+  canDelete: boolean;
+  /** Written by the signed-in user. */
+  own: boolean;
+  /** Part of the signed-in user's pending review. */
+  pending: boolean;
 }
 
 export interface PrReview {
@@ -42,7 +51,43 @@ export interface PrThread {
   fileLevel: boolean;
   severity: "Important" | "Nit" | "Pre-existing" | null;
   comments: PrNote[];
+  /** GraphQL node ID; empty for a pending thread known only from REST. */
+  id: string;
+  canReply: boolean;
+  canResolve: boolean;
+  canUnresolve: boolean;
+  pending: boolean;
 }
+
+/** The signed-in user's review that is not submitted yet. */
+export interface PrPendingReview {
+  id: string;
+  body: string;
+  commit: string | null;
+  comments: number;
+}
+
+/** 1-based inclusive line ranges GitHub accepts comments on. */
+export interface PrCommentable {
+  left: [number, number][];
+  right: [number, number][];
+}
+
+/** Where a new comment or reply goes: into the pending review (started if `id` is null). */
+export interface PrIntoReview {
+  id: string | null;
+  pull: string;
+  head: string;
+}
+
+export type PrWrite =
+  | { kind: "reply"; thread: string; comment: number; body: string; review: PrIntoReview | null }
+  | { kind: "comment"; path: string; side: "left" | "right"; start: number; end: number; body: string; head: string; review: PrIntoReview | null }
+  | { kind: "resolve"; thread: string; resolved: boolean }
+  | { kind: "edit"; comment: string; body: string }
+  | { kind: "delete"; comment: string }
+  | { kind: "submit"; review: PrIntoReview; event: "COMMENT" | "APPROVE" | "REQUEST_CHANGES"; body: string }
+  | { kind: "discard"; review: string };
 
 /** A finding CI attached to lines of the compared head (1-based). */
 export interface PrAnnotation {
@@ -70,6 +115,14 @@ export interface PrConversation {
   annotations: PrAnnotation[];
   checks: { passed: number; failed: number; pending: number };
   truncated: boolean;
+  id: string;
+  viewer: string | null;
+  canComment: boolean;
+  /** The signed-in user opened the pull request. */
+  own: boolean;
+  review: PrPendingReview | null;
+  /** Changed files and their commentable lines; empty when the head moved. */
+  files: Record<string, PrCommentable>;
 }
 
 export interface PullRequestComparison extends PullRequestInfo {
@@ -637,6 +690,7 @@ export const api = {
   previewSource: (text: string, spec: SourceSpec | null = null) => invoke<SourcePreview>("preview_source", { text, spec }),
   resolvePullRequest: (url: string) => invoke<PullRequestComparison>("resolve_pull_request", { url }),
   pullRequestConversation: (url: string, head: string) => invoke<PrConversation>("pull_request_conversation", { url, head }),
+  pullRequestWrite: (url: string, change: PrWrite) => invoke<void>("pull_request_write", { url, change }),
   openPullRequestLink: (url: string, link: string) => invoke<void>("open_pull_request_link", { url, link }),
   /** Opens Files changed at lines of a file (1-based), where GitHub offers to comment on them. */
   openPullRequestLines: (url: string, path: string, side: SideName, start: number, end: number) =>

@@ -28,7 +28,7 @@
   import PrBar from "./PrBar.svelte";
   import { notify } from "./toast.svelte";
   import ThreadPanel from "./ThreadPanel.svelte";
-  import { marksFor, prConversations } from "./prConversation.svelte";
+  import { commentable, lineCommentable, linesBlocked, marksFor, prConversations } from "./prConversation.svelte";
   import Menu, { type MenuItem, type MenuContext } from "./Menu.svelte";
   import type { Command } from "./commands";
   import Dropdown from "./Dropdown.svelte";
@@ -266,6 +266,45 @@
     const lines = selectedLines(activeSide);
     return lines ? { side: activeSide, lines } : null;
   });
+  /** Whether comments can be written here: signed in, allowed, and the compared head is the current one. */
+  const canWrite = $derived(!!pr?.data && !linesBlocked(pr.data) && !!pr.data.files[path]);
+  /** The text of the selected lines of a side, for a suggested change; null if any is cut for display. */
+  function selectedText(side: 0 | 1): string[] | null {
+    const rows = lineRange ?? (selected !== null ? [selected, selected + 1] : null);
+    if (!rows) return null;
+    const out: string[] = [];
+    for (let r = rows[0]; r < rows[1]; r++) {
+      const line = side === 0 ? cache.get(r)?.l : cache.get(r)?.r;
+      if (!line) continue;
+      if (line.x || line.o) return null;
+      out.push(line.t);
+    }
+    return out.length ? out : null;
+  }
+  /** C: a new comment on the selected lines, written in the thread panel. */
+  function startComment(side: 0 | 1) {
+    const d = pr?.data;
+    if (!d) return;
+    const blocked = linesBlocked(d);
+    if (blocked) return notify(blocked, "info");
+    const lines = selectedLines(side);
+    if (!lines) return notify(`Select lines of the ${side === 0 ? "merge base (left)" : "head (right)"} to comment on`, "info");
+    const name = side === 0 ? "left" : "right";
+    const where = commentable(d, path, name, lines[0], lines[1]);
+    if (!where) return notify("The pull request does not change this file, so GitHub takes no comments on it", "info");
+    if (where === "file")
+      return notify(`GitHub takes comments only on lines of its diff (marked in the line numbers); ${lines[0] === lines[1] ? `line ${lines[0]} is` : `lines ${lines[0]}–${lines[1]} are`} outside it. Use "Comment on the file" in the panel instead.`, "info");
+    prConversations.composer = { session: session.id, path, side: name, start: lines[0], end: lines[1], suggestion: side === 1 ? selectedText(1) : null };
+    threadsShown = true;
+  }
+  /** R: the reply field of the thread at the selected row. */
+  function replyHere() {
+    if (!pr?.data) return;
+    if (currentThread === null) return notify("Select a line with a thread to reply to it", "info");
+    prConversations.replyTo = { session: session.id, thread: currentThread };
+    threadsShown = true;
+  }
+
   /** Opens Files changed on GitHub at the selected lines, to comment there. */
   function commentOnGitHub(side: 0 | 1, lines: [number, number]) {
     if (!pr) return;
@@ -1242,7 +1281,14 @@
     if (pr) {
       const lines = selectedLines(side);
       const moved = !!pr.data && pr.data.head !== pr.data.pinnedHead;
+      const blocked = pr.data ? linesBlocked(pr.data) : "Reading the pull request…";
+      const inDiff = !!lines && !!pr.data && commentable(pr.data, path, name === "left" ? "left" : "right", lines[0], lines[1]) === "lines";
       items.push("separator", {
+        label: "Comment on lines…", keys: "C",
+        detail: blocked ?? (!lines ? `No line on the ${name}` : !inDiff ? "Outside the lines GitHub's diff shows" : undefined),
+        disabled: !!blocked || !inDiff,
+        run: () => startComment(side),
+      }, {
         label: "Comment on GitHub ↗",
         detail: !lines ? `No line on the ${name}` : `Opens Files changed at ${lines[0] === lines[1] ? `line ${lines[0]}` : `lines ${lines[0]}–${lines[1]}`} of the ${side === 0 ? "merge base" : "head"}${moved ? "; the PR has a newer head, so the line may have moved" : ""}`,
         disabled: !lines,
@@ -1689,6 +1735,7 @@
       else redo();
     }
     else if (e.key === "F9" && !e.defaultPrevented && !isField(e.target) && prMarks) nextThread(e.shiftKey ? -1 : 1);
+    else if (e.key === "Enter" && mod && e.shiftKey && !e.defaultPrevented && pr?.data?.viewer && pr.data.canComment) prConversations.reviewing = session.id;
     // F7/F8 also when the focus has left the scroll area (which handles them otherwise), but not in a field.
     else if ((e.key === "F7" || e.key === "F8") && !e.defaultPrevented && !isField(e.target))
       next(e.key === "F8" ? 1 : -1);
@@ -1732,6 +1779,13 @@
         openEditor(side, 0, undefined, e.key.length === 1 ? e.key : "");
         return;
       }
+    }
+    // C and R comment on a pull request, where typing does not edit.
+    if (pr && !mod && !e.altKey && !editable[activeSide] && (e.key === "c" || e.key === "r")) {
+      e.preventDefault();
+      if (e.key === "c") startComment(activeSide);
+      else replyHere();
+      return;
     }
     // Typing on a selected line of an editable side edits it, from its end. "?"
     // opens the key list instead; Enter or F2 open the editor for it.
@@ -2023,9 +2077,14 @@
   {#snippet commentButton()}
   {#if commentLines}
     {@const l = commentLines.lines}
+    {#if canWrite && pr?.data && commentable(pr.data, path, commentLines.side === 0 ? "left" : "right", l[0], l[1]) === "lines"}
+      <button class="small" onclick={() => startComment(commentLines!.side)} title="Writes a comment on the selected {commentLines.side === 0 ? 'merge-base' : 'head'} lines in the panel (C)">
+        Comment on {l[0] === l[1] ? `line ${l[0]}` : `lines ${l[0]}–${l[1]}`}…
+      </button>
+    {/if}
     <button class="small" onclick={() => commentOnGitHub(commentLines!.side, l)}
       title="Opens the pull request's Files changed page at the selected {commentLines.side === 0 ? 'merge-base' : 'head'} lines, where GitHub offers to comment on them">
-      Comment on {l[0] === l[1] ? `line ${l[0]}` : `lines ${l[0]}–${l[1]}`} on GitHub ↗
+      {#if canWrite}On GitHub ↗{:else}Comment on {l[0] === l[1] ? `line ${l[0]}` : `lines ${l[0]}–${l[1]}`} on GitHub ↗{/if}
     </button>
   {/if}
 {/snippet}
@@ -2184,7 +2243,7 @@
                   {@render lineEditor(index, s, !line, line ? String(line.n + 1) : "+")}
                 {:else if line}
                   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                  <div class="ln" data-side={SIDE_NAMES[s]} onclick={() => (activeSide = s)}>{#if lineMarks[s].get(line.n)}{@const m = lineMarks[s].get(line.n)!}<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions --><span class="cmk {m.kind}" title={m.title} onclick={(e) => { if (m.thread !== null) { e.stopPropagation(); selected = index; threadsShown = true; } }}>{m.kind === "c" ? "💬" : m.kind === "f" ? "●" : "▲"}</span>{/if}{line.n + 1}</div>
+                  <div class="ln" class:can={canWrite && lineCommentable(pr!.data!, path, s === 0 ? "left" : "right", line.n + 1)} data-side={SIDE_NAMES[s]} onclick={() => (activeSide = s)}>{#if lineMarks[s].get(line.n)}{@const m = lineMarks[s].get(line.n)!}<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions --><span class="cmk {m.kind}" title={m.title} onclick={(e) => { if (m.thread !== null) { e.stopPropagation(); selected = index; threadsShown = true; } }}>{m.kind === "c" ? "💬" : m.kind === "f" ? "●" : "▲"}</span>{/if}{line.n + 1}</div>
                   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
                   <div class="code" data-side={SIDE_NAMES[s]} class:editable={editable[s]} class:sel={anchor !== null && s === activeSide && lineRange && index >= lineRange[0] && index < lineRange[1]} onclick={(e) => clickCode(e, s, index)}><span class="text" style:transform="translateX({-hscroll}px)">{#if line.o}<span class="cut lead" title="The start of the line is left out, so its first change shows">{line.o.toLocaleString()} characters …</span>{/if}{#each segments(line, hitsAt.get(index * 2 + s)) as seg, si (si)}<span class:mk={seg.mark} class:hit={seg.hit} class:now={seg.now} style:color={seg.now ? null : seg.color}>{seg.text}</span>{/each}</span>{#if line.nn}<span class="cut" title="The other file ends with a line break">no line break at end</span>{/if}{#if line.x}<span class="cut" title="The line is cut for display">… {line.x.toLocaleString()} more characters</span>{/if}</div>
                 {:else if row}
@@ -2203,8 +2262,8 @@
         </div>
       </div>
     </div>
-    {#if pr?.data && prMarks && threadsShown && (prMarks.threads.length || prMarks.annotations.length || prMarks.unplaced.length)}
-      <ThreadPanel data={pr.data} {path} current={currentThread} onGo={goToThread} onAnnotation={(a) => goToHeadLine(a.startLine)} onClose={() => (threadsShown = false)} />
+    {#if pr?.data && prMarks && threadsShown && (prMarks.threads.length || prMarks.annotations.length || prMarks.unplaced.length || (prConversations.composer?.session === session.id && prConversations.composer.path === path))}
+      <ThreadPanel data={pr.data} session={session.id} {path} current={currentThread} onGo={goToThread} onAnnotation={(a) => goToHeadLine(a.startLine)} onClose={() => (threadsShown = false)} />
     {/if}
   </div>
 
@@ -2237,7 +2296,7 @@
       {#if uncommitted}
         <span class="nudge">{uncommitted.name} has uncommitted changes. <button class="link" onclick={compareWithHead} title="Compare it with its last commit (Alt+H)">Compare with HEAD</button> <button class="link dim" onclick={() => { uncommitted = null; uncommittedDismissed = true; }} aria-label="Dismiss">×</button></span>
       {/if}
-      <span class="hint">{editable[0] || editable[1] ? "Click a line to edit · " : ""}F7 / F8: previous / next difference · {#if prMarks?.threads.length}F9: next thread · {/if}<kbd>?</kbd> all keys</span>
+      <span class="hint">{editable[0] || editable[1] ? "Click a line to edit · " : ""}F7 / F8: previous / next difference · {#if prMarks?.threads.length}F9: next thread · {/if}{#if canWrite}C: comment · R: reply · {/if}<kbd>?</kbd> all keys</span>
     {/if}
   </div>
 </div>
@@ -2431,6 +2490,10 @@
     padding-right: 8px;
     background: var(--panel-2);
     user-select: none;
+  }
+  /* Lines GitHub accepts comments on: inside a hunk of the pull request's diff. */
+  .ln.can {
+    box-shadow: inset -2px 0 0 color-mix(in srgb, var(--accent) 55%, transparent);
   }
   .code {
     overflow: hidden;

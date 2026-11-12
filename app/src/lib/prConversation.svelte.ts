@@ -3,7 +3,8 @@
  * session: read once in the background when the comparison opens, kept for
  * the folder view and every file opened from it, read again on request.
  */
-import { api, type PrAnnotation, type PrConversation, type PrThread, type PullRequestInfo } from "./api";
+import { api, type PrAnnotation, type PrConversation, type PrIntoReview, type PrThread, type PrWrite, type PullRequestInfo } from "./api";
+import { notify } from "./toast.svelte";
 
 export interface PrState {
   info: PullRequestInfo;
@@ -13,6 +14,17 @@ export interface PrState {
   data: PrConversation | null;
   error: string | null;
   at: number | null;
+}
+
+/** A new comment being written: on lines `start..end` (1-based) of a side, or on the file (`end` 0). */
+export interface ComposerTarget {
+  session: number;
+  path: string;
+  side: "left" | "right";
+  start: number;
+  end: number;
+  /** The selected lines of the head, offered as a suggested change. */
+  suggestion?: string[] | null;
 }
 
 /** Open threads, findings and CI annotations of one file or folder. */
@@ -27,6 +39,34 @@ class PrConversations {
   bySession = $state<Record<number, PrState>>({});
   /** What a file tab should show once it has opened: a thread (index in `threads`), or a line of the head. */
   focus = $state<{ session: number; path: string; thread?: number; line?: number } | null>(null);
+  /** The new comment the thread panel shows a composer for. */
+  composer = $state<ComposerTarget | null>(null);
+  /** The thread (index) whose reply field should take the focus. */
+  replyTo = $state<{ session: number; thread: number } | null>(null);
+  /** The session whose Finish review dialog is open. */
+  reviewing = $state<number | null>(null);
+  /** A write is on its way, per session. */
+  busy = $state<Record<number, boolean>>({});
+
+  /**
+   * Makes one change on GitHub, then reads the conversation again. Returns
+   * whether it was made; GitHub's message is shown when not.
+   */
+  async write(session: number, change: PrWrite): Promise<boolean> {
+    const s = this.bySession[session];
+    if (!s || this.busy[session]) return false;
+    this.busy[session] = true;
+    try {
+      await api.pullRequestWrite(s.info.url, change);
+      return true;
+    } catch (e) {
+      notify(String(e));
+      return false;
+    } finally {
+      this.busy[session] = false;
+      await this.load(session);
+    }
+  }
 
   register(session: number, info: PullRequestInfo, head: string) {
     if (this.bySession[session]?.head === head) return;
@@ -138,3 +178,51 @@ export function ago(iso: string | null): string {
   if (s < 30 * 86400) return `${Math.round(s / 86400)} days ago`;
   return new Date(t).toLocaleDateString();
 }
+
+/** Where a new comment goes when it is added to the review: the pending one, or a new one on the compared head. */
+export const intoReview = (c: PrConversation): PrIntoReview => ({ id: c.review?.id ?? null, pull: c.id, head: c.pinnedHead });
+
+/** Why new comments on lines cannot be written here, or null if they can. */
+export function linesBlocked(c: PrConversation): string | null {
+  if (!c.viewer) return "Sign in with gh to comment";
+  if (!c.canComment) return "You can read this pull request but not comment on it";
+  if (!linesApply(c)) return "The pull request has a newer head: open it to comment on lines";
+  if (c.review?.commit && c.review.commit !== c.pinnedHead) return "Your pending review is on another commit: finish or discard it first";
+  return null;
+}
+
+/**
+ * Whether GitHub takes a comment on lines `from..to` (1-based) of a file's side:
+ * "lines" inside one hunk of its diff, "file" for a changed file otherwise, or
+ * null for a file the pull request does not change.
+ */
+export function commentable(c: PrConversation, path: string, side: "left" | "right", from: number, to: number): "lines" | "file" | null {
+  const f = c.files[path];
+  if (!f) return null;
+  return f[side].some(([a, b]) => from >= a && to <= b) ? "lines" : "file";
+}
+
+/** Whether one line (1-based) is inside a hunk of the file's diff on that side. */
+export function lineCommentable(c: PrConversation, path: string, side: "left" | "right", line: number): boolean {
+  return c.files[path]?.[side].some(([a, b]) => line >= a && line <= b) ?? false;
+}
+
+/** Text being written, kept on this computer until it is sent, so a crash does not lose it. */
+export const unsent = {
+  key: (url: string, target: string) => `parallax.prText:${url}:${target}`,
+  get(url: string, target: string): string {
+    try {
+      return localStorage.getItem(this.key(url, target)) ?? "";
+    } catch {
+      return "";
+    }
+  },
+  set(url: string, target: string, text: string) {
+    try {
+      if (text.trim()) localStorage.setItem(this.key(url, target), text);
+      else localStorage.removeItem(this.key(url, target));
+    } catch {
+      // Not kept: the text stays in the field.
+    }
+  },
+};
