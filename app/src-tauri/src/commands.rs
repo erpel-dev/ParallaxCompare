@@ -1113,6 +1113,7 @@ pub async fn open_file_diff(
         } else if right_data.is_none() {
             right = TextDoc::empty_like(&left);
         }
+        let options = DiffOptions { keyed: convert::keyed_view(chosen), ..options };
         let edit = EditSession::new(left, right, options);
         let diff = edit.diff();
         let (left, right) = (edit.doc(Side::Left), edit.doc(Side::Right));

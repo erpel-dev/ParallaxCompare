@@ -354,6 +354,7 @@ fn compare_files(cli: &Cli, left: &Source, right: &Source, paint: &Paint) -> Res
         },
         ignore_case: cli.ignore_case,
         histogram: cli.histogram,
+        keyed: convert::keyed_view(view),
     };
     let diff = textdiff::diff_docs(&a, &b, &opts);
     if cli.json {

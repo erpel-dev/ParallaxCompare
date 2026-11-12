@@ -792,6 +792,12 @@ pub fn can_write_back(view: View) -> bool {
     view == View::EcucValues
 }
 
+/// Whether the view's text is a tree whose lines are matched by name rather
+/// than by text (see [`crate::textdiff::DiffOptions::keyed`]).
+pub fn keyed_view(view: View) -> bool {
+    view == View::EcucValues
+}
+
 /// The bytes of `original` with the edited text of `view` applied, in the
 /// file's encoding. `other` is the file on the other side, which tells how to
 /// write what `original` does not have yet.

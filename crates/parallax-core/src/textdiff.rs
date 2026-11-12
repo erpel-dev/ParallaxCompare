@@ -30,11 +30,18 @@ pub struct DiffOptions {
     /// sharply on files with many repeated lines (A2L, generated XML); Myers, the
     /// algorithm Git uses by default, does not.
     pub histogram: bool,
+    /// Lines are matched by their place in a JSON-like tree (the names of the
+    /// objects around them and their own name) instead of by their text, so
+    /// members on the same level pair up by name: a renamed container is one
+    /// block removed and one added, and a changed value is one changed line.
+    /// Set by views whose text is such a tree (ECUC values), not by the user.
+    #[serde(skip)]
+    pub keyed: bool,
 }
 
 impl Default for DiffOptions {
     fn default() -> Self {
-        DiffOptions { whitespace: WhitespaceMode::Exact, ignore_case: false, histogram: false }
+        DiffOptions { whitespace: WhitespaceMode::Exact, ignore_case: false, histogram: false, keyed: false }
     }
 }
 
@@ -133,8 +140,15 @@ fn normalize_line<'a>(line: &'a str, opts: &DiffOptions) -> Cow<'a, str> {
 
 pub fn diff_docs(left: &TextDoc, right: &TextDoc, opts: &DiffOptions) -> TextDiff {
     let mut interner = Interner::new(left.len() + right.len());
-    let before = (0..left.len()).map(|i| interner.intern(Key(normalize_line(left.line(i), opts)))).collect();
-    let after = (0..right.len()).map(|i| interner.intern(Key(normalize_line(right.line(i), opts)))).collect();
+    let (before, after) = if opts.keyed {
+        let mut keys =
+            |doc: &TextDoc| tree_keys(doc).into_iter().map(|k| interner.intern(Key(Cow::Owned(k)))).collect();
+        (keys(left), keys(right))
+    } else {
+        let before = (0..left.len()).map(|i| interner.intern(Key(normalize_line(left.line(i), opts)))).collect();
+        let after = (0..right.len()).map(|i| interner.intern(Key(normalize_line(right.line(i), opts)))).collect();
+        (before, after)
+    };
     let input = InternedInput { before, after, interner };
     let algorithm = if opts.histogram { Algorithm::Histogram } else { Algorithm::Myers };
     let mut diff = Diff::compute(algorithm, &input);
@@ -145,11 +159,16 @@ pub fn diff_docs(left: &TextDoc, right: &TextDoc, opts: &DiffOptions) -> TextDif
     let (mut l, mut r) = (0u32, 0u32);
     let push_equal = |rows: &mut Vec<Row>, stats: &mut DiffStats, until_l: u32, l: &mut u32, r: &mut u32| {
         while *l < until_l {
-            let kind = if left.line(*l as usize) == right.line(*r as usize) {
+            let (a, b) = (left.line(*l as usize), right.line(*r as usize));
+            let kind = if a == b {
                 RowKind::Equal
-            } else {
+            } else if !opts.keyed || same_member(a, b, opts) {
                 stats.minor += 1;
                 RowKind::Minor
+            } else {
+                // Keyed: the same member with another value.
+                stats.changed += 1;
+                RowKind::Changed
             };
             rows.push(Row { left: Some(*l), right: Some(*r), kind });
             *l += 1;
@@ -159,7 +178,8 @@ pub fn diff_docs(left: &TextDoc, right: &TextDoc, opts: &DiffOptions) -> TextDif
     for hunk in diff.hunks() {
         push_equal(&mut rows, &mut stats, hunk.before.start, &mut l, &mut r);
         let (n, m) = (hunk.before.len() as u32, hunk.after.len() as u32);
-        let paired = n.min(m);
+        // Keyed lines pair only by their key: what is left is on one side only.
+        let paired = if opts.keyed { 0 } else { n.min(m) };
         for i in 0..paired {
             rows.push(Row { left: Some(l + i), right: Some(r + i), kind: RowKind::Changed });
         }
@@ -205,6 +225,69 @@ pub fn diff_docs(left: &TextDoc, right: &TextDoc, opts: &DiffOptions) -> TextDif
         sections.push(Section { start, end: rows.len() as u32 });
     }
     TextDiff { rows, sections, stats }
+}
+
+/// A key per line of a JSON-like tree, as written by the ECUC values view: the
+/// path of object names down to the line, then the line's own member name.
+/// `"Can": {`, its members and its closing brace get `Can{`, `Can/…` and `Can}`;
+/// an array element is keyed by its value. Lines that do not parse keep their
+/// text, under their path, so hand-edited text still diffs sensibly. A key
+/// that repeats gets a counter.
+pub fn tree_keys(doc: &TextDoc) -> Vec<String> {
+    // Open objects and arrays: their name and whether it is an array.
+    let mut stack: Vec<(String, bool)> = Vec::new();
+    let mut seen: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    let mut keys = Vec::with_capacity(doc.len());
+    for i in 0..doc.len() {
+        let line = doc.line(i).trim();
+        let t = line.strip_suffix(',').unwrap_or(line).trim_end();
+        let path = stack.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join("/");
+        let in_array = stack.last().is_some_and(|(_, array)| *array);
+        let key = if t == "}" || t == "]" {
+            stack.pop();
+            format!("{path}{t}")
+        } else if t == "{" || t == "[" {
+            stack.push((String::new(), t == "["));
+            format!("{path}/{t}")
+        } else if in_array {
+            format!("{path}/[{t}]")
+        } else if let Some((name, value)) = member(t) {
+            match value {
+                "{" | "[" => {
+                    stack.push((name.to_string(), value == "["));
+                    format!("{path}/{name}{value}")
+                }
+                _ => format!("{path}/{name}"),
+            }
+        } else {
+            format!("{path}/?{t}")
+        };
+        let n = seen.entry(key.clone()).or_insert(0);
+        *n += 1;
+        keys.push(if *n == 1 { key } else { format!("{key}#{n}") });
+    }
+    keys
+}
+
+/// Two lines of the same member that differ only under the rules or in the
+/// trailing comma, which a tree view writes after all but the last member.
+fn same_member(a: &str, b: &str, opts: &DiffOptions) -> bool {
+    let (a, b) = (normalize_line(a, opts), normalize_line(b, opts));
+    let bare = |s: &str| s.trim_end().strip_suffix(',').unwrap_or(s.trim_end()).to_string();
+    a == b || bare(&a) == bare(&b)
+}
+
+/// `"name": value` as the name (without its quotes) and the value text.
+fn member(t: &str) -> Option<(&str, &str)> {
+    let rest = t.strip_prefix('"')?;
+    let mut escaped = false;
+    let end = rest.char_indices().find_map(|(i, c)| {
+        let close = c == '"' && !escaped;
+        escaped = c == '\\' && !escaped;
+        close.then_some(i)
+    })?;
+    let value = rest[end + 1..].trim_start().strip_prefix(':')?.trim();
+    Some((&rest[..end], value))
 }
 
 /// Lines longer than this are highlighted as a whole instead of per token.
@@ -379,6 +462,104 @@ mod tests {
         assert_eq!(kinds(&diff), vec![Equal, Changed, Equal, Added, Added, Equal]);
         assert_eq!(diff.sections.len(), 2);
         assert_eq!((diff.stats.changed, diff.stats.added), (1, 2));
+    }
+
+    /// Tree views (ECUC values) pair members by name, never by text: a renamed
+    /// container is removed and added as a whole, not one changed line with
+    /// the contents of another container shown as equal.
+    #[test]
+    fn keyed_rows_match_members_by_name() {
+        let left = decode(
+            r#"{
+  "Can": {
+    "Ctrl_Body": {
+      "Id": 0,
+      "BaudRate": 500
+    },
+    "Ctrl_Chassis": {
+      "Id": 1,
+      "BaudRate": 500
+    },
+    "Ctrl_Powertrain": {
+      "Id": 2,
+      "BaudRate": 500,
+      "Wakeups": [
+        "→ EcuM/Can1",
+        "→ EcuM/Can2"
+      ]
+    }
+  }
+}
+"#
+            .as_bytes(),
+        );
+        let right = decode(
+            r#"{
+  "Can": {
+    "Ctrl_Body": {
+      "Id": 0,
+      "BaudRate": 500
+    },
+    "Ctrl_Comfort": {
+      "Id": 1,
+      "BaudRate": 500
+    },
+    "Ctrl_Powertrain": {
+      "Id": 2,
+      "BaudRate": 250,
+      "Wakeups": [
+        "→ EcuM/Can2",
+        "→ EcuM/Can3"
+      ]
+    }
+  }
+}
+"#
+            .as_bytes(),
+        );
+        use RowKind::*;
+        // By text, Chassis and Comfort pair up as one changed line.
+        let plain = diff_docs(&left, &right, &DiffOptions::default());
+        assert!(plain.rows.iter().any(|r| r.kind == Changed && r.left == Some(6) && r.right == Some(6)));
+        let keyed = diff_docs(&left, &right, &DiffOptions { keyed: true, ..Default::default() });
+        let at =
+            |l: Option<u32>, r: Option<u32>| keyed.rows.iter().find(|x| x.left == l && x.right == r).map(|x| x.kind);
+        // Ctrl_Chassis (lines 6..9) only on the left, Ctrl_Comfort only on the right.
+        for line in 6..=9 {
+            assert_eq!(at(Some(line), None), Some(Removed), "left line {line}");
+            assert_eq!(at(None, Some(line)), Some(Added), "right line {line}");
+        }
+        // The same member with another value is one changed row.
+        assert_eq!(at(Some(12), Some(12)), Some(Changed));
+        // Array elements are matched by value: Can1 removed, Can2 kept (only its
+        // comma differs), Can3 added.
+        assert_eq!(at(Some(14), None), Some(Removed));
+        assert_eq!(at(Some(15), Some(14)), Some(Minor));
+        assert_eq!(at(None, Some(15)), Some(Added));
+        assert_eq!((keyed.stats.changed, keyed.stats.removed, keyed.stats.added), (1, 5, 5));
+    }
+
+    /// A removed last member leaves the one before without its comma: the same
+    /// member, similar, not a difference.
+    #[test]
+    fn keyed_rows_ignore_trailing_commas() {
+        let left = decode(b"{\n  \"A\": {\n    \"x\": 1\n  },\n  \"B\": {\n    \"x\": 2\n  }\n}\n");
+        let right = decode(b"{\n  \"A\": {\n    \"x\": 1\n  }\n}\n");
+        let diff = diff_docs(&left, &right, &DiffOptions { keyed: true, ..Default::default() });
+        use RowKind::*;
+        assert_eq!(kinds(&diff), vec![Equal, Equal, Equal, Minor, Removed, Removed, Removed, Equal]);
+        assert_eq!(diff.stats.changed, 0);
+    }
+
+    #[test]
+    fn tree_keys_follow_the_names() {
+        let doc = decode(
+            b"{\n  \"Can\": {\n    \"say \\\"hi\\\"\": 1,\n    \"L\": [\n      2\n    ],\n    odd line\n  }\n}\n",
+        );
+        assert_eq!(
+            tree_keys(&doc),
+            ["/{", "/Can{", "/Can/say \\\"hi\\\"", "/Can/L[", "/Can/L/[2]", "/Can/L]", "/Can/?odd line", "/Can}", "}"]
+        );
     }
 
     #[test]

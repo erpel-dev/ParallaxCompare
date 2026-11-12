@@ -96,7 +96,8 @@ impl EditSession {
 
     /// Diffs again with other whitespace and case rules, keeping the edits.
     pub fn set_options(&mut self, options: DiffOptions) {
-        self.options = options;
+        // Matching by key belongs to the view, not to the rules the user picks.
+        self.options = DiffOptions { keyed: self.options.keyed, ..options };
         self.rediff();
     }
 
