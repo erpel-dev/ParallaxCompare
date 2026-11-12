@@ -34,6 +34,12 @@ pub fn render(xml: &str) -> Result<String, String> {
     Ok(to_json(&doc.model()))
 }
 
+/// The edited text (simplified JSON) as the view writes it: sorted, normalized,
+/// one way of writing each configuration.
+pub fn canonical(edited: &str) -> Result<String, String> {
+    Ok(to_json(&from_json(edited)?))
+}
+
 /// The file with the configuration of `edited` (simplified JSON) applied to
 /// `original` (ARXML). `donor` is the file on the other side, which tells how
 /// to write parameters and containers that `original` does not have yet.

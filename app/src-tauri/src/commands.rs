@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use parallax_core::compare::{self, CompareOptions, CompareResult, Control, Excludes, Node};
-use parallax_core::convert::{self, View};
+use parallax_core::convert::{self, View, syntax};
 use parallax_core::edit::{EditSession, Edited, Pos, Side};
 use parallax_core::highlight::{self, DocHighlighter, Span, ThemeKind};
 use parallax_core::ops::Removal;
@@ -180,9 +180,24 @@ struct FileDiff {
     on_disk: [Option<u64>; 2],
     /// Per side: the file's size as it was read or last saved.
     sizes: [u64; 2],
+    /// Per side: the format the edited text has to keep (XML, JSON …), and
+    /// whether the text was well-formed as read or last saved. Only edits that
+    /// break a well-formed file are reported.
+    checks: [Option<syntax::Format>; 2],
+    well_formed: [bool; 2],
 }
 
 impl FileDiff {
+    /// What the edits made of a side that was well-formed, if it no longer is.
+    fn problem(&self, side: Side) -> Option<syntax::Problem> {
+        let i = side as usize;
+        let format = self.checks[i]?;
+        let text = &self.edit.doc(side).text;
+        if !self.well_formed[i] || !self.edit.is_dirty(side) || text.len() > syntax::MAX_CHECKED {
+            return None;
+        }
+        syntax::check(format, text)
+    }
     fn source(&self, side: Side) -> &Source {
         match side {
             Side::Left => &self.session.left,
@@ -1136,6 +1151,15 @@ pub async fn open_file_diff(
         }
         let options = DiffOptions { keyed: convert::keyed_view(chosen), ..options };
         let edit = EditSession::new(left, right, options);
+        // A side that does not exist yet has nothing to break.
+        let checks = SIDES.map(|s| convert::syntax::format_of(chosen, &name, &edit.doc(s).text));
+        let well_formed = SIDES.map(|s| {
+            let text = &edit.doc(s).text;
+            let exists = if s == Side::Left { left_data.is_some() } else { right_data.is_some() };
+            !exists
+                || text.len() > convert::syntax::MAX_CHECKED
+                || checks[s as usize].is_none_or(|f| convert::syntax::check(f, text).is_none())
+        });
         let diff = edit.diff();
         let (left, right) = (edit.doc(Side::Left), edit.doc(Side::Right));
 
@@ -1217,6 +1241,8 @@ pub async fn open_file_diff(
                 data: if convert::can_write_back(chosen) { [left_data, right_data] } else { [None, None] },
                 on_disk,
                 sizes,
+                checks,
+                well_formed,
             },
         ))
     })
@@ -1434,6 +1460,15 @@ pub async fn syntax_names() -> CmdResult<Vec<String>> {
     blocking(|| Ok(highlight::syntax_names())).await
 }
 
+/// Why an edited side would not be a well-formed file, and where.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProblemAt {
+    message: String,
+    /// The row of the line the problem is on, to bring it into view.
+    row: Option<u32>,
+}
+
 /// The state of a file comparison after an edit, undo or save.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1454,6 +1489,8 @@ pub struct EditInfo {
     focus_row: Option<u32>,
     /// Where typing continues after an edit from the line editor.
     caret: Option<Caret>,
+    /// Per side: why the edited text would not be a well-formed file of its kind.
+    problems: [Option<ProblemAt>; 2],
     /// The size of each file as it was read or last saved.
     sizes: [u64; 2],
     /// A save found the file changed on disk since it was read, and wrote nothing.
@@ -1496,6 +1533,12 @@ fn edit_info(fd: &FileDiff, focus: Option<Edited>, caret: Option<(Side, usize)>)
         caret,
         sizes: fd.sizes,
         stale: false,
+        problems: SIDES.map(|s| {
+            fd.problem(s).map(|p| ProblemAt {
+                message: p.message,
+                row: p.line.map(|l| e.row_of_line(s, (l as usize).min(e.doc(s).len().saturating_sub(1)))),
+            })
+        }),
     }
 }
 
@@ -1712,6 +1755,10 @@ pub async fn save_side(
         }
         fd.edit.mark_saved(side);
         fd.exists[side as usize] = true;
+        // Saved as it is: from now on, only new breakage is reported.
+        let text = &fd.edit.doc(side).text;
+        fd.well_formed[side as usize] = text.len() > syntax::MAX_CHECKED
+            || fd.checks[side as usize].is_none_or(|f| syntax::check(f, text).is_none());
         Ok((None, None))
     })
     .await?;

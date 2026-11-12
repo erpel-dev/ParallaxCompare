@@ -340,6 +340,15 @@ export interface EditInfo {
   sizes: [number, number];
   /** A save found the file changed on disk since it was read, and wrote nothing. */
   stale: boolean;
+  /** Per side: why the edited text would no longer be a well-formed file (XML, JSON …). */
+  problems: [EditProblem | null, EditProblem | null];
+}
+
+export interface EditProblem {
+  /** "not valid XML: line 12, column 5: </B> closes <A>" */
+  message: string;
+  /** The row of the line the problem is on. */
+  row: number | null;
 }
 
 export interface OpResult {

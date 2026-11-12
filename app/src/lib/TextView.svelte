@@ -10,6 +10,7 @@
     END,
     theme,
     type EditInfo,
+    type EditProblem,
     type FileDiffInfo,
     type Hit,
     type LineView,
@@ -113,6 +114,8 @@
   let caretWanted: { side: 0 | 1; line: number; col: number; hint: number } | null = null;
   /** File changed on disk while it has unsaved edits. */
   let changedOnDisk = $state(false);
+  /** Per side: why the edits would make the file malformed (XML, JSON …). */
+  let problems = $state<[EditProblem | null, EditProblem | null]>([null, null]);
   // Edits run one after another, in the order they were made.
   let queue: Promise<unknown> = Promise.resolve();
   let applied: Promise<void> = Promise.resolve();
@@ -412,6 +415,7 @@
     loading = true;
     error = "";
     changedOnDisk = false;
+    problems = [null, null];
     const top = viewport?.scrollTop ?? 0;
     try {
       const opened = await api.openFileDiff(session.id, path, $state.snapshot(options), syntaxOverride || null, view, $state.snapshot(flatbufferSchemas));
@@ -694,6 +698,7 @@
     };
     anchor = null;
     dirty = e.dirty;
+    problems = e.problems;
     canUndo = e.canUndo;
     canRedo = e.canRedo;
     error = "";
@@ -1192,6 +1197,23 @@
     await queue;
     for (const side of sides) {
       if (!dirty[side]) continue;
+      const problem = problems[side];
+      if (problem) {
+        const name = side === 0 ? "left" : "right";
+        // A generated view cannot write what it cannot read; saving reports why.
+        if (info.view !== "text") {
+          error = `The ${name} side cannot be saved: it is ${problem.message}`;
+          return;
+        }
+        const go = await ask(
+          `Your changes make the ${name} file ${problem.message}\n\nOther programs may no longer be able to read it.`,
+          { title: "Save a malformed file?", kind: "warning", okLabel: "Save anyway", cancelLabel: "Keep editing" },
+        );
+        if (!go) {
+          if (problem.row !== null) goToProblem(side);
+          continue;
+        }
+      }
       busy = "Saving…";
       try {
         let saved = await api.saveSide(id, SIDE_NAMES[side], false);
@@ -1218,6 +1240,20 @@
         busy = "";
       }
     }
+  }
+
+  /** Selects and shows the line a side's problem is on. */
+  function goToProblem(side: 0 | 1) {
+    const row = problems[side]?.row;
+    if (row === null || row === undefined) return;
+    showAllRows();
+    activeSide = side;
+    selected = row;
+    anchor = null;
+    tick().then(() => {
+      reveal(row);
+      keepFocus();
+    });
   }
 
   /** Whitespace, case and grammar changes keep the edits. */
@@ -1864,6 +1900,16 @@
     </div>
   {/snippet}
 
+  {#each [0, 1] as const as side (side)}
+    {@const problem = problems[side]}
+    {#if problem}
+      <div class="banner warn" role="alert">
+        <b>{side === 0 ? "Left" : "Right"}:</b> your changes make the file {problem.message}.
+        {#if problem.row !== null}<button class="bannerlink" onclick={() => goToProblem(side)}>Go to line</button>{/if}
+        <span class="dim">{info?.view === "text" ? "Saving asks first." : "It cannot be saved until this is fixed."}</span>
+      </div>
+    {/if}
+  {/each}
   {#if changedOnDisk}
     <div class="banner warn">
       The file changed on disk. <button onclick={reloadFromDisk}>Reload</button> discards your unsaved edits.
@@ -2125,6 +2171,10 @@
   }
   .banner.warn {
     color: var(--similar);
+  }
+  .banner .dim {
+    color: var(--dim);
+    margin-left: 6px;
   }
   .body {
     flex: 1;

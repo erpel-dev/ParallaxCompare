@@ -47,6 +47,7 @@ mod rust;
 mod safetensors;
 mod score;
 mod sqlite;
+pub mod syntax;
 mod table;
 mod visio;
 mod vsd;
@@ -790,6 +791,15 @@ pub fn similar_view(name: &str, left: &[u8], right: &[u8], views: &[View]) -> Op
 /// Views whose edited text can be saved back into the file it was made from.
 pub fn can_write_back(view: View) -> bool {
     view == View::EcucValues
+}
+
+/// The edited text of a view that is saved back into its file, written the way
+/// the view writes it, so two texts of the same configuration are equal.
+pub fn canonical_text(view: View, edited: &str) -> std::result::Result<String, String> {
+    match view {
+        View::EcucValues => ecuc::canonical(edited),
+        _ => Ok(edited.to_string()),
+    }
 }
 
 /// Whether the view's text is a tree whose lines are matched by name rather
