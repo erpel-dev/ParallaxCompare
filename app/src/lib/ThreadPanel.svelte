@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api, type PrConversation, type PrNote, type PrThread } from "./api";
+  import { api, type PrAnnotation, type PrConversation, type PrNote, type PrThread } from "./api";
   import { renderMarkdown, escapeHtml } from "./markdown";
   import { ago, linesApply } from "./prConversation.svelte";
   import { notify } from "./toast.svelte";
@@ -7,25 +7,38 @@
   let {
     data,
     path = null,
+    scope = null,
     current = null,
     onGo,
+    onAnnotation,
+    onClearScope,
     onClose,
   }: {
     data: PrConversation;
     /** One file's threads; null for all files and the conversation. */
     path?: string | null;
+    /** In the folder view: only what is in this file or folder (null: everything). */
+    scope?: string | null;
     /** The thread (index in `data.threads`) at the selected row. */
     current?: number | null;
     /** Goes to a thread: selects its row, or opens its file. */
     onGo: (thread: number) => void;
+    /** Goes to a CI finding: its line in this file, or its file. */
+    onAnnotation?: (annotation: PrAnnotation) => void;
+    onClearScope?: () => void;
     onClose: () => void;
   } = $props();
 
   type Tab = "open" | "resolved" | "outdated" | "conversation";
   let tab = $state<Tab>("open");
+  // A file or folder of its own has no conversation tab.
+  $effect(() => {
+    if (scope && tab === "conversation") tab = "open";
+  });
   let el = $state<HTMLElement>();
 
-  const inFile = (t: PrThread) => path === null || t.path === path;
+  const within = (p: string) => scope === null || scope === "" || p === scope || p.startsWith(scope + "/");
+  const inFile = (t: PrThread) => (path === null ? within(t.path) : t.path === path);
   const placed = (t: PrThread) => linesApply(data) && !t.outdated && !t.fileLevel && t.line !== null;
   const threads = $derived(data.threads.map((thread, index) => ({ thread, index })).filter(({ thread }) => inFile(thread)));
   const lists = $derived({
@@ -33,7 +46,7 @@
     resolved: threads.filter(({ thread }) => thread.resolved),
     outdated: threads.filter(({ thread }) => thread.outdated && !thread.resolved),
   });
-  const annotations = $derived(data.annotations.filter((a) => path === null || a.path === path));
+  const annotations = $derived(data.annotations.filter((a) => (path === null ? within(a.path) : a.path === path)));
   const sorted = (list: { thread: PrThread; index: number }[]) =>
     [...list].sort((a, b) => a.thread.path.localeCompare(b.thread.path) || (a.thread.line ?? a.thread.originalLine ?? 0) - (b.thread.line ?? b.thread.originalLine ?? 0));
 
@@ -113,11 +126,14 @@
       <b title={path ?? data.title}>{path === null ? `#${data.number} ${data.title}` : (path.split("/").pop() ?? path)}</b>
       <button class="x" onclick={onClose} title="Hide the threads" aria-label="Hide the threads">✕</button>
     </div>
+    {#if path === null && scope}
+      <div class="scope">In <b>{scope}</b> <button class="link" onclick={onClearScope}>Show all files</button></div>
+    {/if}
     <span class="seg" role="tablist">
       <button role="tab" class:on={tab === "open"} onclick={() => (tab = "open")}>Open {lists.open.length + annotations.length}</button>
       <button role="tab" class:on={tab === "resolved"} onclick={() => (tab = "resolved")}>Resolved {lists.resolved.length}</button>
       <button role="tab" class:on={tab === "outdated"} onclick={() => (tab = "outdated")}>Outdated {lists.outdated.length}</button>
-      {#if path === null}<button role="tab" class:on={tab === "conversation"} onclick={() => (tab = "conversation")}>Conversation {data.reviews.filter((r) => r.body.trim()).length + data.comments.length}</button>{/if}
+      {#if path === null && !scope}<button role="tab" class:on={tab === "conversation"} onclick={() => (tab = "conversation")}>Conversation {data.reviews.filter((r) => r.body.trim()).length + data.comments.length}</button>{/if}
     </span>
   </header>
   <div class="list">
@@ -147,8 +163,9 @@
       {/each}
       {#if tab === "open"}
         {#each annotations as a, i (i)}
-          <div class="thread annotation">
-            <div class="where"><b>{path === null ? `${a.path} · ` : ""}right {a.startLine}{a.endLine !== a.startLine ? `–${a.endLine}` : ""}</b><span class="sev {a.level}">{a.level === "failure" ? "Failure" : a.level === "warning" ? "Warning" : "Notice"}</span><span>{a.check}</span></div>
+          <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+          <div class="thread annotation" class:go={!!onAnnotation} onclick={() => onAnnotation?.(a)} title={onAnnotation ? "Show the line" : undefined}>
+            <div class="where"><b>{#if a.path === ".github" || a.path === ""}{a.path || "repository"} · workflow{:else}{path === null ? `${a.path} · ` : ""}right {a.startLine}{a.endLine !== a.startLine ? `–${a.endLine}` : ""}{/if}</b><span class="sev {a.level}">{a.level === "failure" ? "Failure" : a.level === "warning" ? "Warning" : "Notice"}</span><span>{a.check}</span></div>
             <div class="body">{#if a.title}<b>{a.title}</b> · {/if}{a.message}</div>
           </div>
         {/each}
@@ -174,7 +191,10 @@
   .x { border: none; background: none; color: var(--dim); padding: 0 2px; }
   .list { overflow-y: auto; min-height: 0; flex: 1; }
   .thread { display: grid; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); cursor: default; }
-  .thread[data-thread] { cursor: pointer; }
+  .thread[data-thread], .thread.go { cursor: pointer; }
+  .scope { font-size: 11.5px; color: var(--dim); }
+  .scope b { color: var(--text); font-family: var(--mono); font-weight: 500; }
+  .link { border: none; background: none; color: var(--accent); padding: 0 4px; cursor: pointer; font-size: 11.5px; }
   .thread.cur { background: var(--bg); box-shadow: inset 3px 0 0 var(--accent); }
   .thread.dimmed { opacity: 0.8; }
   .where { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; color: var(--dim); font-size: 11px; }

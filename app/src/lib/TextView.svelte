@@ -245,13 +245,30 @@
     const target = dir > 0 ? (open.find(([, r]) => r > here) ?? open[0]) : ([...open].reverse().find(([, r]) => r < here) ?? open[open.length - 1]);
     goToThread(target[0]);
   }
-  // A thread picked in the folder view is shown once this file's rows are placed.
+  /** Selects the row of a line of the head (1-based), such as a CI finding's. */
+  async function goToHeadLine(line: number) {
+    if (!info) return;
+    const id = info.id;
+    const [row] = await api.rowsOfLines(id, "right", [Math.max(0, line - 1)]).catch(() => []);
+    if (row === undefined || info?.id !== id) return;
+    if (!projection.contains(row)) showAllRows();
+    selected = row;
+    anchor = null;
+    threadsShown = true;
+    tick().then(() => {
+      reveal(row);
+      keepFocus();
+    });
+  }
+  // A thread or CI finding picked in the folder view is shown once this file is loaded.
   $effect(() => {
     const f = prConversations.focus;
-    if (!f || f.session !== session.id || f.path !== path || !threadRows.size) return;
+    if (!f || f.session !== session.id || f.path !== path || !info || loading) return;
+    if (f.thread !== undefined && !threadRows.size) return;
     prConversations.focus = null;
     threadsShown = true;
-    goToThread(f.thread);
+    if (f.thread !== undefined) goToThread(f.thread);
+    else if (f.line !== undefined) goToHeadLine(f.line);
   });
 
   /** The view's width: narrow windows get short buttons and one filter menu. */
@@ -2140,7 +2157,7 @@
       </div>
     </div>
     {#if pr?.data && prMarks && threadsShown && (prMarks.threads.length || prMarks.annotations.length || prMarks.unplaced.length)}
-      <ThreadPanel data={pr.data} {path} current={currentThread} onGo={goToThread} onClose={() => (threadsShown = false)} />
+      <ThreadPanel data={pr.data} {path} current={currentThread} onGo={goToThread} onAnnotation={(a) => goToHeadLine(a.startLine)} onClose={() => (threadsShown = false)} />
     {/if}
   </div>
 

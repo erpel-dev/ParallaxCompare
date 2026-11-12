@@ -25,8 +25,8 @@ export interface PrCounts {
 
 class PrConversations {
   bySession = $state<Record<number, PrState>>({});
-  /** A thread a file tab should show once it has opened: session → path → index in `threads`. */
-  focus = $state<{ session: number; path: string; thread: number } | null>(null);
+  /** What a file tab should show once it has opened: a thread (index in `threads`), or a line of the head. */
+  focus = $state<{ session: number; path: string; thread?: number; line?: number } | null>(null);
 
   register(session: number, info: PullRequestInfo, head: string) {
     if (this.bySession[session]?.head === head) return;

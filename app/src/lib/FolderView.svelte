@@ -5,7 +5,7 @@
   import { onMount, tick } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { ask } from "./confirm.svelte";
-  import { api, defaultCompareOptions, sourceText, type CompareResult, type Node, type OpResult, type PathsChanged, type SessionInfo, type Side, type SourceSpec, type Version, type Versions } from "./api";
+  import { api, defaultCompareOptions, sourceText, type CompareResult, type Node, type OpResult, type PathsChanged, type PrAnnotation, type SessionInfo, type Side, type SourceSpec, type Version, type Versions } from "./api";
   import type { Command } from "./commands";
   import Dropdown from "./Dropdown.svelte";
   import FilterBar, { type CountFilter } from "./FilterBar.svelte";
@@ -32,6 +32,7 @@
     copyFilesBelow,
     findNode,
     closedArchive,
+    isContainer,
     flatFiles,
     flatten,
     joinPath,
@@ -160,6 +161,23 @@
   const pr = $derived(prConversations.get(session.id));
   const prCounts = $derived(pr?.data ? countsByPath(pr.data) : null);
   let prPanel = $state(false);
+  /** The file or folder whose details the panel shows; null for all. */
+  let prScope = $state<string | null>(null);
+  /** Shows the details of a file or folder's comments and findings. */
+  function showPrDetails(path: string) {
+    prScope = path;
+    prPanel = true;
+  }
+  /** A CI finding on a file opens it at the line; one on a folder stays in the panel. */
+  function goToAnnotation(a: PrAnnotation) {
+    const node = result ? findNode(result.root, a.path) : undefined;
+    if (!node || isContainer(node)) {
+      showPrDetails(a.path);
+      return;
+    }
+    prConversations.focus = { session: session.id, path: a.path, line: a.startLine };
+    onOpenFile(a.path);
+  }
   /** Only files (and their folders) with comments or findings. */
   let onlyCommented = $state(false);
   function toggleCommented() {
@@ -1344,7 +1362,7 @@
   {/if}
 
   {#if pr}
-    <PrBar session={session.id} {pr} panelOpen={prPanel} onPanel={() => (prPanel = !prPanel)}
+    <PrBar session={session.id} {pr} panelOpen={prPanel && prScope === null} onPanel={() => { prPanel = !(prPanel && prScope === null); prScope = null; }}
       onReopen={() => edit?.[1].openPullRequest(pr.info.url)} extra={prCounts?.size ? commentedToggle : undefined} />
   {/if}
 
@@ -1410,7 +1428,7 @@
                     {:else}
                       <span class="chev"></span>
                     {/if}
-                    <span class="icon">{icon(side)}</span>{#if row.folders?.[i]}<span class="dir">{row.folders[i]}/</span>{/if}{i === 1 && row.rightPath ? row.rightPath.split("/").pop() : row.node.name}{#if side.ignored && !row.inIgnored?.[i]}<span class="ignored-tag" title="Ignored by Git: a .gitignore rule matches it, and it is not tracked">ignored</span>{/if}{#if prCounts && (i === 1 || !row.node.right) && (!row.container || !row.expanded)}{@const c = prCounts.get(row.path)}{#if c}<span class="prc" title="Pull request: {c.open} open threads, {c.findings} findings, {c.warnings} CI warnings, {c.resolved} resolved">{#if c.open}<span class="cm">💬 {c.open}</span>{/if}{#if c.findings}<span class="fd">● {c.findings}</span>{/if}{#if c.warnings}<span class="wn">▲ {c.warnings}</span>{/if}{#if !c.open && !c.findings && !c.warnings && c.resolved}<span class="rs">{c.resolved} resolved</span>{/if}</span>{/if}{/if}{#if row.container && !row.expanded && !row.pending && !closedArchive(row.node) && (i === 0 || !row.node.left)}{@const c = inside(row.node)}{#if c.files > c.same}<span class="inside" title="Files in this folder that are not the same, by status">{#if c.different}<span class="different">{c.different.toLocaleString()} ≠</span>{/if}{#if c.similar}<span class="similar">{c.similar.toLocaleString()} ≈</span>{/if}{#if c.leftOnly}<span class="leftOnly">{c.leftOnly.toLocaleString()} ◀</span>{/if}{#if c.rightOnly}<span class="rightOnly">{c.rightOnly.toLocaleString()} ▶</span>{/if}{#if c.errors}<span class="error">{c.errors.toLocaleString()} !</span>{/if}</span>{/if}{/if}
+                    <span class="icon">{icon(side)}</span>{#if row.folders?.[i]}<span class="dir">{row.folders[i]}/</span>{/if}{i === 1 && row.rightPath ? row.rightPath.split("/").pop() : row.node.name}{#if side.ignored && !row.inIgnored?.[i]}<span class="ignored-tag" title="Ignored by Git: a .gitignore rule matches it, and it is not tracked">ignored</span>{/if}{#if prCounts && (i === 1 || !row.node.right) && (!row.container || !row.expanded)}{@const c = prCounts.get(row.path)}{#if c}<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions --><span class="prc" title="Pull request: {c.open} open threads, {c.findings} findings, {c.warnings} CI warnings, {c.resolved} resolved. Click for the details." onclick={(e) => { e.stopPropagation(); showPrDetails(row.path); }}>{#if c.open}<span class="cm">💬 {c.open}</span>{/if}{#if c.findings}<span class="fd">● {c.findings}</span>{/if}{#if c.warnings}<span class="wn">▲ {c.warnings}</span>{/if}{#if !c.open && !c.findings && !c.warnings && c.resolved}<span class="rs">{c.resolved} resolved</span>{/if}</span>{/if}{/if}{#if row.container && !row.expanded && !row.pending && !closedArchive(row.node) && (i === 0 || !row.node.left)}{@const c = inside(row.node)}{#if c.files > c.same}<span class="inside" title="Files in this folder that are not the same, by status">{#if c.different}<span class="different">{c.different.toLocaleString()} ≠</span>{/if}{#if c.similar}<span class="similar">{c.similar.toLocaleString()} ≈</span>{/if}{#if c.leftOnly}<span class="leftOnly">{c.leftOnly.toLocaleString()} ◀</span>{/if}{#if c.rightOnly}<span class="rightOnly">{c.rightOnly.toLocaleString()} ▶</span>{/if}{#if c.errors}<span class="error">{c.errors.toLocaleString()} !</span>{/if}</span>{/if}{/if}
                   </span>
                   <span class="num">{side.kind === "dir" ? "" : formatSize(side.size)}</span>
                   {#if i === 1}<span class="num chg">{changeOf(row.node)}</span>{/if}
@@ -1428,7 +1446,7 @@
   </div>
   </div>
   {#if pr?.data && prPanel}
-    <ThreadPanel data={pr.data} onGo={goToThread} onClose={() => (prPanel = false)} />
+    <ThreadPanel data={pr.data} scope={prScope} onGo={goToThread} onAnnotation={goToAnnotation} onClearScope={() => (prScope = null)} onClose={() => { prPanel = false; prScope = null; }} />
   {/if}
   </div>
 
@@ -1491,7 +1509,8 @@
   }
   .main { flex: 1; display: flex; min-height: 0; }
   .col { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-  .prc { display: inline-flex; gap: 6px; margin-left: 10px; font-size: 10.5px; }
+  .prc { display: inline-flex; gap: 6px; margin-left: 10px; font-size: 10.5px; cursor: pointer; }
+  .prc:hover span { background: var(--panel); }
   .prc span { border: 1px solid currentColor; border-radius: 8px; padding: 0 5px; line-height: 14px; }
   .prc .cm { color: var(--accent); }
   .prc .fd { color: var(--diff); }

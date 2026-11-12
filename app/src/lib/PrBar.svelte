@@ -25,6 +25,7 @@
   const people = $derived(reviews.filter((r) => !r.bot && (r.state === "APPROVED" || r.state === "CHANGES_REQUESTED")));
   const bots = $derived(new Set([...(data?.threads ?? []).flatMap((t) => t.comments.filter((c) => c.bot).map((c) => c.author)), ...reviews.filter((r) => r.bot).map((r) => r.author)]).size);
   const open = $derived(data ? data.threads.filter((t) => !t.resolved).length : 0);
+  const ci = $derived(data?.annotations.length ?? 0);
   const checks = $derived(data?.checks);
   const totalChecks = $derived(checks ? checks.passed + checks.failed + checks.pending : 0);
   const host = $derived.by(() => {
@@ -53,7 +54,9 @@
       </span>
     {/if}
     {#if onPanel}
-      <button class="small" class:on={panelOpen} onclick={onPanel} title="Reviews, comments and threads of this pull request">💬 {open} open {open === 1 ? "thread" : "threads"}</button>
+      <button class="small" class:on={panelOpen} onclick={onPanel} title="Show the threads, review findings, CI findings and the conversation of this pull request">
+        💬 {open} {open === 1 ? "thread" : "threads"}{#if ci}{" "}· ▲ {ci} CI {ci === 1 ? "finding" : "findings"}{/if} ›
+      </button>
     {/if}
     {@render extra?.()}
   {:else if pr.loading}
