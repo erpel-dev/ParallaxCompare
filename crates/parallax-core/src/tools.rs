@@ -58,7 +58,10 @@ fn run_text(name: &str, program: &str, args: &[&str], limit: Duration) -> (Check
         Ok((status, out, err)) => {
             let (out, err) = (String::from_utf8_lossy(&out), String::from_utf8_lossy(&err));
             let text = format!("{out}\n{err}");
-            let c = if status.success() {
+            // Through flatpak-spawn, a program the host lacks is a failed start, not a spawn error.
+            let c = if !status.success() && process::in_flatpak() && err.contains("Failed to execute child process") {
+                check(State::Missing, format!("{program} is not installed on the host, or not on its PATH"))
+            } else if status.success() {
                 check(
                     State::Ok,
                     out.lines().chain(err.lines()).find(|l| !l.trim().is_empty()).unwrap_or("").trim().into(),
@@ -144,7 +147,8 @@ pub fn self_test(remote: Option<&str>) -> (Vec<(Check, bool)>, bool) {
     if let Some(url) = remote {
         checks.push((git_remote(url), true));
     }
-    if cfg!(target_os = "linux") {
+    // In a Flatpak, links open through the desktop's portal, not a program of the host.
+    if cfg!(target_os = "linux") && !process::in_flatpak() {
         // Only desktops need it; a missing one is reported, not failed.
         let open = opener();
         let required = open.state != State::Missing;

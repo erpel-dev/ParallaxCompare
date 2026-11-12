@@ -196,7 +196,7 @@ impl Mergiraf {
         labels: [&str; 3],
         timeout: Duration,
     ) -> Result<SyntaxMerge> {
-        let dir = tempfile::tempdir().map_err(|e| Error::io("temporary folder", e))?;
+        let dir = crate::process::shared_temp_dir("parallax-merge-").map_err(|e| Error::io("temporary folder", e))?;
         // The inputs keep the file's extension, so the language is found from either.
         let file_name = Path::new(name).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let ext = Path::new(&file_name).extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();

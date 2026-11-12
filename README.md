@@ -164,6 +164,16 @@ Folder compares use every core: with 4 threads they run 3.5–3.8× faster, at a
 
 ## Usage
 
+### Installing on Linux
+
+Each release has an AppImage, a Flatpak bundle and the static `parallax` command-line tool. The Flatpak brings its own desktop libraries (GNOME runtime) and runs the system's `git`, `gh`, `mergiraf` and `flatc` on the host through `flatpak-spawn`, so your Git settings, SSH keys, credential helpers and `gh` sign-in work as without it; those programs must be installed on the system. It has access to your files (`--filesystem=host`), as a compare tool needs.
+
+```bash
+flatpak install --user ParallaxCompare-v0.0.19-x86_64.flatpak   # needs the Flathub remote for the runtime
+flatpak run dev.erpel.parallaxcompare
+flatpak run --command=parallax-compare dev.erpel.parallaxcompare --self-test https://github.com/octocat/Hello-World
+```
+
 ### Desktop app
 
 Start `parallax-compare` and paste or browse for the two sources in the *New comparison* dialog. Files, folders, archives and Git revision syntax are detected automatically. A repository folder starts with its files on disk; **Choose revision…** selects a branch, tag or commit, with an optional file or subfolder. A bare revision such as `main` asks for its repository. Access errors stay beside the input, and known file/folder mismatches are blocked before comparing. You can also pass both sides on the command line:
@@ -358,7 +368,7 @@ npm run tauri dev                # desktop app with hot reload
 npm run tauri build              # installers: MSI/NSIS on Windows, deb/rpm/AppImage on Linux
 ```
 
-CI runs formatting, clippy, the Svelte type check and all tests on Ubuntu and Windows. Clippy forbids `std::process::Command::new` and the opener plugin's `open_url` / `open_path` outside tests: programs start through `parallax_core::process::command` and links open through `open_with_system`, which keep the AppImage's own libraries away from the system's `git`, `gh` and browser. Pull requests also build the AppImage and run its self-test on Ubuntu 22.04 and 24.04; a release does the same before publishing. Pushing a `v*` tag builds standalone Windows and Linux executables and publishes a GitHub release; `0.x` tags are prereleases.
+CI runs formatting, clippy, the Svelte type check and all tests on Ubuntu and Windows. Clippy forbids `std::process::Command::new` and the opener plugin's `open_url` / `open_path` outside tests: programs start through `parallax_core::process::command` and links open through `open_with_system`, which keep the AppImage's own libraries away from the system's `git`, `gh` and browser. Pull requests also build the AppImage and run its self-test on Ubuntu 22.04 and 24.04; a release does the same before publishing. They also build the Flatpak (`flatpak/dev.erpel.parallaxcompare.yml`) and run its self-test, which checks that `git` and `gh` run on the host; releases attach the bundle. Pushing a `v*` tag builds standalone Windows and Linux executables and publishes a GitHub release; `0.x` tags are prereleases.
 
 ## Architecture
 

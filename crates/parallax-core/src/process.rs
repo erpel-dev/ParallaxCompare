@@ -36,6 +36,60 @@ pub fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     cmd
 }
 
+/// Whether the app runs in a Flatpak sandbox. The system's programs (git, gh,
+/// mergiraf, flatc) are not inside it, and neither are the user's sign-ins and
+/// Git settings: they run on the host through `flatpak-spawn --host`, which the
+/// app's `org.freedesktop.Flatpak` permission allows.
+pub fn in_flatpak() -> bool {
+    static FLATPAK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLATPAK.get_or_init(|| std::path::Path::new("/.flatpak-info").exists())
+}
+
+/// `cmd` as `flatpak-spawn --host`: the same program and arguments on the host,
+/// with its working folder and the variables it sets. Variables it removes stay
+/// as the host's session has them. Paths mean the same on both sides for the
+/// user's files and the app's cache; the sandbox's /tmp is its own (see
+/// [`shared_temp_dir`]).
+fn on_host(cmd: &Command) -> Command {
+    #[allow(clippy::disallowed_methods)] // runs the program given, on the host
+    let mut host = Command::new("flatpak-spawn");
+    // --watch-bus: the program ends when the app does.
+    host.args(["--host", "--watch-bus"]);
+    if let Some(dir) = cmd.get_current_dir() {
+        let mut arg = std::ffi::OsString::from("--directory=");
+        arg.push(dir);
+        host.arg(arg);
+    }
+    for (key, value) in cmd.get_envs() {
+        if let Some(value) = value {
+            let mut arg = std::ffi::OsString::from("--env=");
+            arg.push(key);
+            arg.push("=");
+            arg.push(value);
+            host.arg(arg);
+        }
+    }
+    host.arg(cmd.get_program()).args(cmd.get_args());
+    host
+}
+
+/// A temporary folder for files a system program reads or writes (mergiraf's
+/// inputs, flatc's schemas). In a Flatpak those programs run on the host, which
+/// does not see the sandbox's /tmp, so the folder is made in the app's cache,
+/// whose path is the same on both sides. Elsewhere it is an ordinary temporary folder.
+pub fn shared_temp_dir(prefix: &str) -> std::io::Result<tempfile::TempDir> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(prefix);
+    match std::env::var_os("XDG_CACHE_HOME").filter(|_| in_flatpak()) {
+        Some(cache) => {
+            let dir = std::path::PathBuf::from(cache).join("tmp");
+            std::fs::create_dir_all(&dir)?;
+            builder.tempdir_in(dir)
+        }
+        None => builder.tempdir(),
+    }
+}
+
 /// The folder an AppImage runs from, while the app runs as one.
 pub fn bundle_dir() -> Option<std::ffi::OsString> {
     std::env::var_os("APPIMAGE")?;
@@ -230,6 +284,13 @@ fn run_status_with_budget(
     limit: Duration,
     budget: usize,
 ) -> Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
+    let mut hosted;
+    let cmd = if in_flatpak() {
+        hosted = on_host(cmd);
+        &mut hosted
+    } else {
+        cmd
+    };
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(windows)]
     {
@@ -278,6 +339,28 @@ fn run_status_with_budget(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn flatpak_runs_programs_on_the_host_with_their_folder_and_variables() {
+        let mut cmd = command("git");
+        cmd.args(["-C", "/home/u/repo", "fetch"]).current_dir("/home/u").env("GIT_TERMINAL_PROMPT", "0");
+        let host = on_host(&cmd);
+        assert_eq!(host.get_program(), "flatpak-spawn");
+        let args: Vec<_> = host.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(
+            args,
+            [
+                "--host",
+                "--watch-bus",
+                "--directory=/home/u",
+                "--env=GIT_TERMINAL_PROMPT=0",
+                "git",
+                "-C",
+                "/home/u/repo",
+                "fetch"
+            ]
+        );
+    }
+
     #[test]
     fn programs_outside_an_appimage_get_the_systems_libraries() {
         use std::ffi::OsString;

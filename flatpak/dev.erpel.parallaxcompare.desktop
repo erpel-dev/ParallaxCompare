@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=ParallaxCompare
+Comment=Compare folders, archives and Git revisions side by side
+Exec=parallax-compare %F
+Icon=dev.erpel.parallaxcompare
+Terminal=false
+Categories=Development;Utility;
+Keywords=diff;compare;merge;folder;git;
+StartupWMClass=parallax-compare

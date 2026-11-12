@@ -105,6 +105,9 @@ fn self_test(remote: Option<&str>) -> i32 {
         Some(dir) => println!("AppImage: yes ({})", dir.to_string_lossy()),
         None => println!("AppImage: no"),
     }
+    if parallax_core::process::in_flatpak() {
+        println!("Flatpak: yes; git and gh run on the host through flatpak-spawn");
+    }
     let (checks, passed) = parallax_core::tools::self_test(remote);
     for (check, required) in &checks {
         let mark = match (check.ok(), required) {
