@@ -204,9 +204,7 @@ fn prepare(bundle: &Bundle<'_>, root: &str) -> Result<Arc<Schema>> {
     let compiled = if root.ends_with(".bfbs") {
         bundle.files[root].clone()
     } else {
-        let temp = tempfile::Builder::new()
-            .prefix("parallax-flatbuffers-")
-            .tempdir()
+        let temp = crate::process::shared_temp_dir("parallax-flatbuffers-")
             .map_err(|e| Error::io("temporary schema directory", e))?;
         for (name, bytes) in &bundle.files {
             std::fs::write(temp.path().join(name), bytes).map_err(|e| Error::io(name.clone(), e))?;
