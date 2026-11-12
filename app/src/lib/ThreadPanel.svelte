@@ -107,6 +107,11 @@
     }
   }
 
+  /** Opens a link of this pull request in the browser (its own host only). */
+  function openLink(link: string) {
+    api.openPullRequestLink(data.url, link).catch((e) => notify(String(e)));
+  }
+
   const reviewLabel = (state: string) =>
     ({ APPROVED: "approved", CHANGES_REQUESTED: "requested changes", COMMENTED: "reviewed", DISMISSED: "review dismissed" })[state] ?? state.toLowerCase();
 </script>
@@ -157,6 +162,10 @@
           <div class="where">
             <b>{where(thread)}</b>
             {#if thread.severity}<span class="sev {thread.severity}">{thread.severity}</span>{/if}
+            {#if thread.comments[0]?.url}
+              <button class="gh" onclick={(e) => { e.stopPropagation(); openLink(thread.comments[thread.comments.length - 1].url); }}
+                title="Opens this thread on GitHub, where you can reply, resolve it or react">{thread.resolved || thread.outdated ? "Open on GitHub ↗" : "Reply on GitHub ↗"}</button>
+            {/if}
           </div>
           {#each thread.comments as c, i (i)}{@render note(c, i > 0)}{/each}
         </div>
@@ -165,7 +174,7 @@
         {#each annotations as a, i (i)}
           <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
           <div class="thread annotation" class:go={!!onAnnotation} onclick={() => onAnnotation?.(a)} title={onAnnotation ? "Show the line" : undefined}>
-            <div class="where"><b>{#if a.path === ".github" || a.path === ""}{a.path || "repository"} · workflow{:else}{path === null ? `${a.path} · ` : ""}right {a.startLine}{a.endLine !== a.startLine ? `–${a.endLine}` : ""}{/if}</b><span class="sev {a.level}">{a.level === "failure" ? "Failure" : a.level === "warning" ? "Warning" : "Notice"}</span><span>{a.check}</span></div>
+            <div class="where"><b>{#if a.path === ".github" || a.path === ""}{a.path || "repository"} · workflow{:else}{path === null ? `${a.path} · ` : ""}right {a.startLine}{a.endLine !== a.startLine ? `–${a.endLine}` : ""}{/if}</b><span class="sev {a.level}">{a.level === "failure" ? "Failure" : a.level === "warning" ? "Warning" : "Notice"}</span><span>{a.check}</span>{#if a.url}<button class="gh" onclick={(e) => { e.stopPropagation(); openLink(a.url!); }} title="Opens the check run on GitHub">Open check ↗</button>{/if}</div>
             <div class="body">{#if a.title}<b>{a.title}</b> · {/if}{a.message}</div>
           </div>
         {/each}
@@ -192,6 +201,8 @@
   .list { overflow-y: auto; min-height: 0; flex: 1; }
   .thread { display: grid; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); cursor: default; }
   .thread[data-thread], .thread.go { cursor: pointer; }
+  .gh { margin-left: auto; border: none; background: none; color: var(--accent); padding: 0 2px; font-size: 11px; cursor: pointer; white-space: nowrap; }
+  .gh:hover { text-decoration: underline; }
   .scope { font-size: 11.5px; color: var(--dim); }
   .scope b { color: var(--text); font-family: var(--mono); font-weight: 500; }
   .link { border: none; background: none; color: var(--accent); padding: 0 4px; cursor: pointer; font-size: 11.5px; }

@@ -539,6 +539,22 @@ fn severity(body: &str) -> Option<&'static str> {
     }
 }
 
+/// The link to lines of a file on the pull request's *Files changed* page, where
+/// GitHub offers to comment on them: `…/pull/N/files#diff-<sha256 of path>R12-R14`.
+/// `side` is `left` (the merge base, `L`) or `right` (the head, `R`); lines are 1-based.
+pub fn line_link(url: &str, path: &str, side: &str, start: u32, end: u32) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let pr = PullRequestUrl::parse(url)?;
+    if path.is_empty() || start == 0 {
+        return Err(bad("a line link needs a file and a line"));
+    }
+    let hash: String = Sha256::digest(path.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
+    let s = if side == "left" { 'L' } else { 'R' };
+    let (start, end) = (start.min(end.max(start)), end.max(start));
+    let lines = if end > start { format!("{s}{start}-{s}{end}") } else { format!("{s}{start}") };
+    Ok(format!("{}/files#diff-{hash}{lines}", pr.url))
+}
+
 /// Whether `link` may be opened for the pull request at `url`: HTTPS on its host.
 pub fn link_allowed(url: &str, link: &str) -> bool {
     let (Ok(pr), Ok(link)) = (PullRequestUrl::parse(url), Url::parse(link)) else { return false };
@@ -672,6 +688,13 @@ mod tests {
         assert!(!link_allowed(url, "https://evil.example/x"));
         assert!(!link_allowed(url, "http://github.company.example/x"));
         assert!(!link_allowed(url, "https://user@github.company.example/x"));
+        // GitHub's anchor: the SHA-256 of the path, then the side and lines.
+        assert_eq!(
+            line_link("https://github.com/o/r/pull/7/files", "README.md", "right", 12, 14).unwrap(),
+            "https://github.com/o/r/pull/7/files#diff-b335630551682c19a781afebcf4d07bf978fb1f8ac04c6bf87428ed5106870f5R12-R14"
+        );
+        assert!(line_link(url, "a.rs", "left", 3, 3).unwrap().ends_with("L3"));
+        assert!(line_link(url, "", "left", 3, 3).is_err());
     }
 
     #[test]

@@ -26,6 +26,7 @@
   import { RowProjection, type Fold, type RowFilter } from "./rowFilter";
   import { prefs, CONTEXTS } from "./prefs.svelte";
   import PrBar from "./PrBar.svelte";
+  import { notify } from "./toast.svelte";
   import ThreadPanel from "./ThreadPanel.svelte";
   import { marksFor, prConversations } from "./prConversation.svelte";
   import Menu, { type MenuItem, type MenuContext } from "./Menu.svelte";
@@ -245,6 +246,32 @@
     const target = dir > 0 ? (open.find(([, r]) => r > here) ?? open[0]) : ([...open].reverse().find(([, r]) => r < here) ?? open[open.length - 1]);
     goToThread(target[0]);
   }
+  /** The lines (1-based) of `side` in the selected rows, for commenting on GitHub. */
+  function selectedLines(side: 0 | 1): [number, number] | null {
+    const rows = lineRange ?? (selected !== null ? [selected, selected + 1] : null);
+    if (!rows) return null;
+    let lo = Infinity, hi = -Infinity;
+    for (let r = rows[0]; r < rows[1]; r++) {
+      const n = (side === 0 ? cache.get(r)?.l : cache.get(r)?.r)?.n;
+      if (n !== undefined) {
+        lo = Math.min(lo, n + 1);
+        hi = Math.max(hi, n + 1);
+      }
+    }
+    return lo === Infinity ? null : [lo, hi];
+  }
+  const commentLines = $derived.by(() => {
+    void cacheVersion;
+    if (!pr) return null;
+    const lines = selectedLines(activeSide);
+    return lines ? { side: activeSide, lines } : null;
+  });
+  /** Opens Files changed on GitHub at the selected lines, to comment there. */
+  function commentOnGitHub(side: 0 | 1, lines: [number, number]) {
+    if (!pr) return;
+    api.openPullRequestLines(pr.info.url, path, SIDE_NAMES[side], lines[0], lines[1]).catch((e) => notify(String(e)));
+  }
+
   /** Selects the row of a line of the head (1-based), such as a CI finding's. */
   async function goToHeadLine(line: number) {
     if (!info) return;
@@ -1212,6 +1239,16 @@
       run: run(() => replaceLines("", true)),
     });
     if (dirty[side] && editable[side]) items.push({ label: `Save ${name} file`, run: run(() => save([side])) });
+    if (pr) {
+      const lines = selectedLines(side);
+      const moved = !!pr.data && pr.data.head !== pr.data.pinnedHead;
+      items.push("separator", {
+        label: "Comment on GitHub ↗",
+        detail: !lines ? `No line on the ${name}` : `Opens Files changed at ${lines[0] === lines[1] ? `line ${lines[0]}` : `lines ${lines[0]}–${lines[1]}`} of the ${side === 0 ? "merge base" : "head"}${moved ? "; the PR has a newer head, so the line may have moved" : ""}`,
+        disabled: !lines,
+        run: () => lines && commentOnGitHub(side, lines),
+      });
+    }
     items.push("separator", { label: "Copy file path", run: () => copyFilePath(side) }, { label: "Find in both files…", keys: "Ctrl+F", run: openFind });
     const atLine = line ? `Line ${line.n + 1}` : `No line on the ${name}`;
     const where = many ? `${atLine} · ${range[1] - range[0]} comparison rows selected` : atLine;
@@ -1926,7 +1963,7 @@
 
   {#if pr}
     <PrBar session={session.id} {pr} panelOpen={threadsShown && !!prMarks} onPanel={prMarks ? () => (threadsShown = !threadsShown) : undefined}
-      onReopen={() => edit?.[1].openPullRequest(pr.info.url)} />
+      onReopen={() => edit?.[1].openPullRequest(pr.info.url)} extra={commentButton} />
   {/if}
   {#if info && info.view !== "image"}
     <FilterBar items={rowFilters} value={rowFilter} onSelect={(id) => setRowFilter(id as RowFilter)} disabled={loading || awaiting} legend={lineLegend} {compact}
@@ -1983,7 +2020,17 @@
       {#if eolFix.right}<button onclick={() => setLineEndings(1, eolFix.right!)}>Use {eolFix.right} on the right</button>{/if}
     </div>
   {/if}
-  {#snippet contextControl()}
+  {#snippet commentButton()}
+  {#if commentLines}
+    {@const l = commentLines.lines}
+    <button class="small" onclick={() => commentOnGitHub(commentLines!.side, l)}
+      title="Opens the pull request's Files changed page at the selected {commentLines.side === 0 ? 'merge-base' : 'head'} lines, where GitHub offers to comment on them">
+      Comment on {l[0] === l[1] ? `line ${l[0]}` : `lines ${l[0]}–${l[1]}`} on GitHub ↗
+    </button>
+  {/if}
+{/snippet}
+
+{#snippet contextControl()}
   <label class="ctx" title="Unchanged lines shown around each difference. Editing and range selections show all rows.">
     Context
     <select bind:value={context} onchange={() => { opened = []; }}>

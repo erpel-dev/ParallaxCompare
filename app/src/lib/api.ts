@@ -638,6 +638,9 @@ export const api = {
   resolvePullRequest: (url: string) => invoke<PullRequestComparison>("resolve_pull_request", { url }),
   pullRequestConversation: (url: string, head: string) => invoke<PrConversation>("pull_request_conversation", { url, head }),
   openPullRequestLink: (url: string, link: string) => invoke<void>("open_pull_request_link", { url, link }),
+  /** Opens Files changed at lines of a file (1-based), where GitHub offers to comment on them. */
+  openPullRequestLines: (url: string, path: string, side: SideName, start: number, end: number) =>
+    invoke<void>("open_pull_request_lines", { url, path, side, start, end }),
   rowsOfLines: (id: number, side: SideName, lines: number[]) => invoke<number[]>("rows_of_lines", { id, side, lines }),
   sideSource: (id: number, left: boolean, rel: string) => invoke<SourceSpec>("side_source", { id, left, rel }),
   completePath: (text: string) => invoke<Completion[]>("complete_path", { text }),

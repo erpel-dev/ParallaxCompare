@@ -317,6 +317,14 @@ pub async fn open_pull_request_link(url: String, link: String) -> CmdResult<()> 
     blocking(move || tauri_plugin_opener::open_url(&link, None::<&str>).map_err(err)).await
 }
 
+/// Opens the pull request's *Files changed* page at lines of a file, where GitHub
+/// offers to comment on them. Lines are 1-based; `side` is `left` or `right`.
+#[tauri::command]
+pub async fn open_pull_request_lines(url: String, path: String, side: String, start: u32, end: u32) -> CmdResult<()> {
+    let link = parallax_core::pull_request::line_link(&url, &path, &side, start, end).map_err(err)?;
+    blocking(move || tauri_plugin_opener::open_url(&link, None::<&str>).map_err(err)).await
+}
+
 /// The rows that show the given 0-based lines of one side of a file comparison.
 #[tauri::command]
 pub async fn rows_of_lines(state: State<'_, AppState>, id: u64, side: Side, lines: Vec<u32>) -> CmdResult<Vec<u32>> {
