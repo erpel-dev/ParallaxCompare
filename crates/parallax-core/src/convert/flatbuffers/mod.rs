@@ -7,7 +7,6 @@ mod schema;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -212,7 +211,7 @@ fn prepare(bundle: &Bundle<'_>, root: &str) -> Result<Arc<Schema>> {
         for (name, bytes) in &bundle.files {
             std::fs::write(temp.path().join(name), bytes).map_err(|e| Error::io(name.clone(), e))?;
         }
-        let mut cmd = Command::new("flatc");
+        let mut cmd = crate::process::command("flatc");
         cmd.current_dir(temp.path()).args(["--binary", "--schema", "-o", ".", root]);
         crate::process::run(&mut cmd, "flatc", "flatc schema compilation", Duration::from_secs(30))?;
         let output = temp.path().join(root.replace(".fbs", ".bfbs"));
@@ -353,7 +352,7 @@ mod tests {
             .open(SourceOptions::default())
             .unwrap();
         let result = data(&source, "", ORIGINAL, Some(fixture.join("config.fbs").to_str().unwrap()));
-        if Command::new("flatc").arg("--version").output().is_ok_and(|o| o.status.success()) {
+        if std::process::Command::new("flatc").arg("--version").output().is_ok_and(|o| o.status.success()) {
             let expected = result.unwrap();
             assert_eq!(
                 expected,

@@ -10,7 +10,6 @@
 //! Bitbucket and Gitea/Codeberg are understood (`…/blob/main/src/lib.rs`).
 
 use std::path::PathBuf;
-use std::process::Command;
 
 use parking_lot::Mutex;
 
@@ -303,7 +302,7 @@ fn git(args: &[&str], dir: Option<&std::path::Path>) -> Result<String> {
         "fetch" => 600,
         _ => 120,
     });
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::process::command("git");
     if let Some(dir) = dir {
         cmd.arg("-C").arg(dir);
     }
@@ -444,7 +443,13 @@ mod tests {
         let origin = tempfile::tempdir().unwrap();
         let cache = tempfile::tempdir().unwrap();
         let run = |args: &[&str]| {
-            let ok = Command::new("git").args(args).current_dir(origin.path()).output().unwrap().status.success();
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(origin.path())
+                .output()
+                .unwrap()
+                .status
+                .success();
             assert!(ok, "git {args:?}");
         };
         run(&["init", "-q", "-b", "main"]);

@@ -10,7 +10,6 @@
 //!   node and also solves changes to different arguments on one line.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 use crate::{Error, Result};
@@ -173,7 +172,7 @@ impl Mergiraf {
         // meaning there.
         let path = std::path::absolute(&path).map_err(|e| Error::io(path.display().to_string(), e))?;
         let out = crate::process::run(
-            Command::new(&path).arg("--version"),
+            crate::process::command(&path).arg("--version"),
             "mergiraf",
             "mergiraf --version",
             Duration::from_secs(10),
@@ -205,7 +204,7 @@ impl Mergiraf {
         for (path, data) in paths.iter().zip([base, local, remote]) {
             std::fs::write(path, data).map_err(|e| Error::io(path.display().to_string(), e))?;
         }
-        let mut cmd = Command::new(&self.path);
+        let mut cmd = crate::process::command(&self.path);
         cmd.arg("merge")
             .args([&paths[0], &paths[1], &paths[2]])
             .arg("-o")

@@ -15,6 +15,65 @@ use parking_lot::Mutex;
 
 use crate::{Error, Result};
 
+/// A command for a program of the system (git, gh, flatc, mergiraf, xdg-open).
+///
+/// Inside an AppImage the app runs with its own libraries first on
+/// `LD_LIBRARY_PATH` (and its folders on `PATH`, `XDG_DATA_DIRS` …). A system
+/// program started with them loads libraries it was not built for and fails
+/// ("symbol lookup error", "no version information available"), so those
+/// entries are taken out of the program's environment. Elsewhere this is `Command::new`.
+pub fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut cmd = Command::new(program);
+    if let Some(dir) = bundle_dir() {
+        for (key, value) in outside_bundle(std::env::vars_os(), &dir) {
+            match value {
+                Some(value) => cmd.env(key, value),
+                None => cmd.env_remove(key),
+            };
+        }
+    }
+    cmd
+}
+
+/// The folder an AppImage runs from, while the app runs as one.
+pub fn bundle_dir() -> Option<std::ffi::OsString> {
+    std::env::var_os("APPIMAGE")?;
+    let dir = std::env::var_os("APPDIR")?;
+    (std::path::Path::new(&dir).is_absolute() && dir.len() > 1).then_some(dir)
+}
+
+/// The variables to change for a program outside the bundle at `dir`: lists of
+/// paths without the bundle's entries (None: the variable goes, as nothing is left),
+/// and single paths into the bundle removed.
+fn outside_bundle(
+    vars: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+    dir: &std::ffi::OsStr,
+) -> Vec<(std::ffi::OsString, Option<std::ffi::OsString>)> {
+    let Some(dir) = dir.to_str().map(|d| d.trim_end_matches('/').to_string()) else { return Vec::new() };
+    let inside = |p: &str| p == dir || p.starts_with(&format!("{dir}/"));
+    let mut out = Vec::new();
+    for (key, value) in vars {
+        let Some(text) = value.to_str() else { continue };
+        if !text.contains(&dir) {
+            continue;
+        }
+        let kept: Vec<&str> = text.split(':').filter(|p| !inside(p)).collect();
+        if kept.len() == text.split(':').count() {
+            continue;
+        }
+        let kept = kept.join(":");
+        out.push((key, (!kept.trim_matches(':').is_empty()).then(|| kept.into())));
+    }
+    out
+}
+
+/// Whether a program's error output says it could not load its libraries.
+pub(crate) fn library_failure(stderr: &str) -> bool {
+    ["symbol lookup error", "error while loading shared libraries", "no version information available"]
+        .iter()
+        .any(|m| stderr.contains(m))
+}
+
 /// How long output from a helper that outlives the command may still arrive.
 /// Every command finishes within its limit; only this grace may follow.
 const DRAIN_GRACE: Duration = Duration::from_secs(1);
@@ -129,6 +188,16 @@ fn run_with_budget(
     } else {
         let detail = String::from_utf8_lossy(&err);
         let detail = detail.trim();
+        if library_failure(detail) {
+            // Not the request's fault: say so first, then the loader's own words.
+            return Err(Error::Unsupported(format!(
+                "{operation}: {program} could not start because it loaded libraries that do not fit it; this is not a sign-in or access problem. {}",
+                detail
+                    .lines()
+                    .find(|l| l.contains("symbol lookup error") || l.contains("error while loading"))
+                    .unwrap_or(detail)
+            )));
+        }
         Err(Error::Unsupported(format!(
             "{operation}: {}",
             if detail.is_empty() { status.to_string() } else { detail.to_string() }
@@ -208,6 +277,30 @@ fn run_status_with_budget(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn programs_outside_an_appimage_get_the_systems_libraries() {
+        use std::ffi::OsString;
+        let vars = [
+            ("LD_LIBRARY_PATH", "/tmp/.mount_Px/usr/lib:/tmp/.mount_Px/usr/lib/x86_64-linux-gnu"),
+            ("PATH", "/tmp/.mount_Px/usr/bin:/usr/local/bin:/usr/bin"),
+            ("GDK_PIXBUF_MODULE_FILE", "/tmp/.mount_Px/usr/lib/gdk-pixbuf/loaders.cache"),
+            ("XDG_DATA_DIRS", "/usr/share:/tmp/.mount_Px/usr/share"),
+            ("HOME", "/home/timo"),
+            ("OTHER", "/tmp/.mount_Pxy/usr/lib"),
+        ]
+        .map(|(k, v)| (OsString::from(k), OsString::from(v)));
+        let changed = outside_bundle(vars.into_iter(), "/tmp/.mount_Px/".as_ref());
+        let get = |k: &str| changed.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone());
+        assert_eq!(get("LD_LIBRARY_PATH"), Some(None));
+        assert_eq!(get("GDK_PIXBUF_MODULE_FILE"), Some(None));
+        assert_eq!(get("PATH"), Some(Some("/usr/local/bin:/usr/bin".into())));
+        assert_eq!(get("XDG_DATA_DIRS"), Some(Some("/usr/share".into())));
+        // Unrelated variables and look-alike folders stay as they are.
+        assert_eq!((get("HOME"), get("OTHER")), (None, None));
+        assert!(library_failure("git-remote-https: symbol lookup error: /usr/lib/libcurl.so.4: undefined symbol: x"));
+        assert!(!library_failure("fatal: repository not found"));
+    }
+
     #[test]
     fn drains_stop_retaining_bytes_at_the_budget() {
         let drain = Drain::spawn(Box::new(std::io::Cursor::new(vec![0; 100000])), 32);

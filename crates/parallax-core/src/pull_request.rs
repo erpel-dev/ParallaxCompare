@@ -1,7 +1,7 @@
 //! Read-only GitHub PRs: resolve a pinned merge-base/head pair through `gh`,
 //! then fetch Git objects into the existing bare cache without a checkout.
 
-use std::{collections::BTreeMap, process::Command, time::Duration};
+use std::{collections::BTreeMap, time::Duration};
 
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -105,7 +105,22 @@ struct Commit {
 }
 
 fn bad(message: impl std::fmt::Display) -> Error {
-    Error::Unsupported(format!("GitHub PR: {message}"))
+    Error::Unsupported(format!("GitHub PR: {}", plain(&message.to_string())))
+}
+
+/// A message without the prefixes of the errors it went through ("not supported: GitHub PR: …").
+fn plain(message: &str) -> String {
+    message
+        .replace(": not supported: GitHub PR: ", ": ")
+        .replace(": not supported: ", ": ")
+        .trim_start_matches("not supported: ")
+        .trim_start_matches("GitHub PR: ")
+        .to_string()
+}
+
+/// Sign-in advice, unless the program could not start at all (then it would mislead).
+fn advice(error: &impl std::fmt::Display, help: &str) -> String {
+    if error.to_string().contains("could not start because") { String::new() } else { format!(" {help}") }
 }
 
 fn commit_id(sha: &str) -> Result<()> {
@@ -117,7 +132,7 @@ fn commit_id(sha: &str) -> Result<()> {
 }
 
 fn gh(args: &[&str]) -> Result<String> {
-    let mut cmd = Command::new("gh");
+    let mut cmd = crate::process::command("gh");
     cmd.args(args).env("GH_PROMPT_DISABLED", "1").env("GH_NO_UPDATE_NOTIFIER", "1");
     crate::process::run(&mut cmd, "gh", "gh request", Duration::from_secs(60))
 }
@@ -129,8 +144,9 @@ pub fn resolve(input: &str) -> Result<PullRequestComparison> {
     let result = resolve_with(
         &pr,
         &mut |endpoint| {
-            let json = gh(&["api", "--hostname", &pr.host, "--method", "GET", endpoint])
-                .map_err(|e| bad(format!("cannot read {} on {}: {e}. {}", pr.endpoint(), pr.host, pr.access_help())))?;
+            let json = gh(&["api", "--hostname", &pr.host, "--method", "GET", endpoint]).map_err(|e| {
+                bad(format!("cannot read {} on {}: {e}.{}", pr.endpoint(), pr.host, advice(&e, &pr.access_help())))
+            })?;
             serde_json::from_str(&json).map_err(|e| bad(format!("invalid API response: {e}")))
         },
         &mut |url, rev| {
@@ -189,7 +205,7 @@ fn resolve_with(
     let base = comparison.merge_base_commit.sha;
     commit_id(&base)?;
     let access_error = |role: &str, error: Error| {
-        bad(format!("Git cannot fetch the {role} from {clone}: {error}. {}", pr.access_help()))
+        bad(format!("Git cannot fetch the {role} from {clone}: {error}.{}", advice(&error, &pr.access_help())))
     };
     let fetched = fetch(&clone, &base).map_err(|e| access_error("merge base", e))?;
     if fetched != base {
@@ -411,7 +427,7 @@ pub fn conversation(url: &str, pinned_head: &str) -> Result<Conversation> {
             if let Some(a) = &after {
                 args.extend(["-f", a.as_str()]);
             }
-            let json = gh(&args).map_err(|e| bad(format!("cannot read the comments: {e}. {help}")))?;
+            let json = gh(&args).map_err(|e| bad(format!("cannot read the comments: {e}.{}", advice(&e, &help))))?;
             serde_json::from_str(&json).map_err(|e| bad(format!("invalid API response: {e}")))
         },
         &mut |endpoint| {
@@ -822,7 +838,7 @@ pub fn write(url: &str, change: Write) -> Result<()> {
     let help = pr.access_help();
     let run = |args: Vec<String>| -> Result<serde_json::Value> {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let json = gh(&args).map_err(|e| bad(format!("{e}. {help}")))?;
+        let json = gh(&args).map_err(|e| bad(format!("{e}.{}", advice(&e, &help))))?;
         if json.trim().is_empty() {
             return Ok(serde_json::Value::Null);
         }
@@ -844,13 +860,7 @@ pub fn write(url: &str, change: Write) -> Result<()> {
             run(args)
         },
     )
-    .map_err(|e| {
-        // One message, without the prefixes of the errors it went through.
-        let message = e.to_string();
-        let message = message.strip_prefix("not supported: ").unwrap_or(&message);
-        let message = message.strip_prefix("GitHub PR: ").unwrap_or(message);
-        bad(format!("GitHub did not take the change: {message}"))
-    })
+    .map_err(|e| bad(format!("GitHub did not take the change: {}", plain(&e.to_string()))))
 }
 
 const MAX_BODY: usize = 65_000;

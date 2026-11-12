@@ -154,7 +154,7 @@ fn join_disk(dir: &Path, rel: &str) -> String {
 /// HEAD or the index, as `git status` counts them; `None` when Git takes too long
 /// or is not available.
 pub fn changed_files(repo: &str, path: Option<&str>) -> Option<u32> {
-    let mut cmd = std::process::Command::new("git");
+    let mut cmd = crate::process::command("git");
     cmd.arg("-C").arg(repo).args([
         "status",
         "--porcelain=v1",
@@ -183,7 +183,7 @@ pub fn changed_files(repo: &str, path: Option<&str>) -> Option<u32> {
 /// Only on request: it needs the network and may ask for credentials, which fail
 /// here instead of waiting for input.
 pub fn fetch(repo: &str) -> Result<()> {
-    let mut cmd = std::process::Command::new("git");
+    let mut cmd = crate::process::command("git");
     cmd.arg("-C").arg(repo).args(["fetch", "--quiet"]);
     cmd.env("GIT_TERMINAL_PROMPT", "0");
     crate::process::run_bytes(&mut cmd, "git", "git fetch", Duration::from_secs(300)).map(|_| ())

@@ -15,7 +15,7 @@ pub mod highlight;
 pub mod merge;
 pub mod merge_session;
 pub mod ops;
-mod process;
+pub mod process;
 pub mod progress;
 pub mod pull_request;
 pub mod remote;

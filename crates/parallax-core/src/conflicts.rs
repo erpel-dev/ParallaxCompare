@@ -6,7 +6,6 @@
 //! extension, and staging must go through it anyway so hooks and attributes apply.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -74,7 +73,7 @@ pub struct RepoConflicts {
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::process::command("git");
     cmd.arg("-C").arg(dir).args(args).env("GIT_TERMINAL_PROMPT", "0");
     let command = args.first().copied().unwrap_or_default();
     let run = if command == "cat-file" { crate::process::run_blob } else { crate::process::run_bytes };
@@ -416,7 +415,7 @@ mod tests {
     use super::*;
 
     fn run(dir: &Path, args: &[&str]) -> bool {
-        Command::new("git")
+        std::process::Command::new("git")
             .args(["-c", "user.email=t@example.com", "-c", "user.name=T", "-c", "init.defaultBranch=main"])
             .args(args)
             .current_dir(dir)

@@ -294,7 +294,42 @@ pub async fn preview_source(
 
 #[tauri::command]
 pub async fn resolve_pull_request(url: String) -> CmdResult<parallax_core::pull_request::PullRequestComparison> {
-    blocking(move || parallax_core::pull_request::resolve(&url).map_err(err)).await
+    blocking(move || parallax_core::pull_request::resolve(&url).map_err(message)).await
+}
+
+/// An error's message without the "not supported:" its kind adds.
+fn message(e: parallax_core::Error) -> String {
+    match e {
+        parallax_core::Error::Unsupported(message) => message,
+        e => err(e),
+    }
+}
+
+/// Opens a link or file with the system's default app. Inside an AppImage the
+/// opener is started without the app's own libraries, which would break the
+/// browser or file manager it starts (see `parallax_core::process::command`).
+fn open_with_system(target: &str, path: bool) -> CmdResult<()> {
+    #[cfg(target_os = "linux")]
+    if parallax_core::process::bundle_dir().is_some() {
+        use std::process::Stdio;
+        let mut child = parallax_core::process::command("xdg-open")
+            .arg(target)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("xdg-open could not be run: {e}"))?;
+        // xdg-open hands over and exits; reap it so it does not linger.
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        return Ok(());
+    }
+    if path {
+        tauri_plugin_opener::open_path(target, None::<&str>).map_err(err)
+    } else {
+        tauri_plugin_opener::open_url(target, None::<&str>).map_err(err)
+    }
 }
 
 /// The comments, reviews and CI findings of a pull request, for the head it was
@@ -304,20 +339,14 @@ pub async fn pull_request_conversation(
     url: String,
     head: String,
 ) -> CmdResult<parallax_core::pull_request::Conversation> {
-    blocking(move || parallax_core::pull_request::conversation(&url, &head).map_err(err)).await
+    blocking(move || parallax_core::pull_request::conversation(&url, &head).map_err(message)).await
 }
 
 /// Changes a pull request's conversation: a reply, a comment, resolving, editing or
 /// deleting a comment, or the viewer's pending review. Only on an explicit click.
 #[tauri::command]
 pub async fn pull_request_write(url: String, change: parallax_core::pull_request::Write) -> CmdResult<()> {
-    blocking(move || {
-        parallax_core::pull_request::write(&url, change).map_err(|e| match e {
-            parallax_core::Error::Unsupported(message) => message,
-            e => err(e),
-        })
-    })
-    .await
+    blocking(move || parallax_core::pull_request::write(&url, change).map_err(message)).await
 }
 
 /// Opens a link of a pull request's conversation in the browser: HTTPS links on
@@ -327,7 +356,7 @@ pub async fn open_pull_request_link(url: String, link: String) -> CmdResult<()> 
     if !parallax_core::pull_request::link_allowed(&url, &link) {
         return Err(format!("only links on the pull request's GitHub host are opened here: {link}"));
     }
-    blocking(move || tauri_plugin_opener::open_url(&link, None::<&str>).map_err(err)).await
+    blocking(move || open_with_system(&link, false)).await
 }
 
 /// Opens the pull request's *Files changed* page at lines of a file, where GitHub
@@ -335,7 +364,7 @@ pub async fn open_pull_request_link(url: String, link: String) -> CmdResult<()> 
 #[tauri::command]
 pub async fn open_pull_request_lines(url: String, path: String, side: String, start: u32, end: u32) -> CmdResult<()> {
     let link = parallax_core::pull_request::line_link(&url, &path, &side, start, end).map_err(err)?;
-    blocking(move || tauri_plugin_opener::open_url(&link, None::<&str>).map_err(err)).await
+    blocking(move || open_with_system(&link, false)).await
 }
 
 /// The rows that show the given 0-based lines of one side of a file comparison.
@@ -415,7 +444,7 @@ pub async fn open_source(spec: SourceSpec, reveal: bool) -> CmdResult<()> {
             tauri_plugin_opener::reveal_item_in_dir(path).map_err(err)
         } else {
             let path = spec.disk_path().ok_or("only files and folders on disk can be opened in another app")?;
-            tauri_plugin_opener::open_path(path, None::<&str>).map_err(err)
+            open_with_system(&path.to_string_lossy(), true)
         }
     })
     .await
