@@ -31,6 +31,16 @@ test('large failure totals are independent of the bounded clipboard list', () =>
   assert.match(list.text, /List truncated: 20,000 of 25,000/);
 });
 
+test('structured archive reasons keep their fields and explain common decoder errors', () => {
+  assert.equal(causeOf('archive: UnsupportedVersion { major: 99, minor: 111 }'),
+    'unsupported 7z version 99.111 (unsupported or corrupt archive)');
+  assert.equal(causeOf('a.7z: DecoderError { reason: BadHeader, index: 3 }'),
+    'decoderError { reason: BadHeader, index: 3 }');
+  assert.equal(causeOf('archive: invalid Zip archive: Could not find EOCD'),
+    'incomplete or corrupt ZIP archive (end-of-directory record missing)');
+  assert.equal(causeOf('C:\\[backup]\\a.7z: Permission denied (os error 13)'), 'permission denied');
+});
+
 test('clipboard character budget and deep trees are handled without recursion', () => {
   const list = exportErrors(root([error('large', 'x'.repeat(1000)), error('small')]), 20, 100);
   assert.equal(list.copied, 0);

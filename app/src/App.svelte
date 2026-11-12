@@ -505,6 +505,7 @@
       { group, title: "New comparison", keys: "Ctrl+T", run: newTab },
       { group, title: "Keyboard shortcuts", keys: "?", run: () => (shortcutsOpen = true) },
       { group, title: "Preferences", keys: "Ctrl+,", run: () => (prefsOpen = true) },
+      { group, title: "About ParallaxCompare — version and diagnostics", run: () => (prefsOpen = true) },
       { group, title: "Larger text", keys: "Ctrl++", run: () => prefs.step(1) },
       { group, title: "Smaller text", keys: "Ctrl+−", run: () => prefs.step(-1) },
       { group, title: "Text size 100 %", keys: "Ctrl+0", enabled: prefs.zoom !== 1, run: () => prefs.step(0) },

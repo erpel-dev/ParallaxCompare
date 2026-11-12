@@ -21,8 +21,19 @@ export function causeOf(message: string | undefined): string {
   if (/temporary drive is full/i.test(text)) return "temporary drive is full";
   if (/could not use temporary storage/i.test(text)) return "could not use temporary storage";
   if (/not enough memory/i.test(text)) return "not enough memory";
-  const separator = text.lastIndexOf(": ");
+  // Decoder diagnostics can contain fields such as { major: 99, minor: 111 }.
+  // Only separators outside structured values can introduce a cause.
+  let separator = -1;
+  let depth = 0;
+  for (let i = 0; i < text.length; i++) {
+    if ("{[(".includes(text[i])) depth++;
+    else if ("}])".includes(text[i])) depth = Math.max(0, depth - 1);
+    else if (!depth && text.slice(i, i + 2) === ": ") separator = i;
+  }
   const last = (separator < 0 ? text : text.slice(separator + 2)).trim();
+  const version = last.match(/^UnsupportedVersion\s*\{\s*major:\s*(\d+),\s*minor:\s*(\d+)\s*\}$/);
+  if (version) return `unsupported 7z version ${version[1]}.${version[2]} (unsupported or corrupt archive)`;
+  if (/could not find EOCD/i.test(last)) return "incomplete or corrupt ZIP archive (end-of-directory record missing)";
   return last ? last.charAt(0).toLowerCase() + last.slice(1) : "could not be read";
 }
 

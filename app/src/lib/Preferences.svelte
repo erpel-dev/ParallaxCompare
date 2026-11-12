@@ -1,9 +1,27 @@
 <script lang="ts">
+  import { onMount } from "svelte";
+  import { api, type AppInfo } from "./api";
   import { prefs, CONTEXTS, ZOOMS, type Theme } from "./prefs.svelte";
 
   let { onClose }: { onClose: () => void } = $props();
   let el = $state<HTMLDivElement>();
+  let info = $state.raw<AppInfo | null>(null);
+  let infoError = $state("");
+  let copyStatus = $state("");
   $effect(() => el?.focus());
+  onMount(() => {
+    api.appInfo().then((value) => (info = value)).catch((e) => (infoError = String(e)));
+  });
+
+  async function copyDiagnostics() {
+    if (!info) return;
+    try {
+      await navigator.clipboard.writeText(`ParallaxCompare ${info.version}\nBuild: ${info.revision}\nOS: ${info.os} (${info.arch})\nTemporary directory: ${info.tempDir}`);
+      copyStatus = "Diagnostics copied.";
+    } catch (e) {
+      copyStatus = `Could not copy diagnostics: ${String(e)}`;
+    }
+  }
 
   const themes: [Theme, string][] = [["system", "System"], ["light", "Light"], ["dark", "Dark"]];
   const set = (change: () => void) => {
@@ -50,6 +68,20 @@
     </div>
     <p class="note">How many unchanged lines stay around each difference when a file view is filtered. A view can change it for itself, next to the filters.</p>
 
+    <h3>About ParallaxCompare</h3>
+    {#if info}
+      <dl class="about">
+        <dt>Version</dt><dd>{info.version}</dd>
+        <dt>Build</dt><dd><code>{info.revision}</code></dd>
+        <dt>System</dt><dd>{info.os} ({info.arch})</dd>
+        <dt>Temporary directory</dt><dd>{info.tempDir}</dd>
+      </dl>
+      <button onclick={copyDiagnostics}>Copy diagnostics</button>
+    {:else}
+      <p class="note about-status">{infoError ? `Could not load application details: ${infoError}` : "Loading application details…"}</p>
+    {/if}
+    {#if copyStatus}<p class="about-status" role="status">{copyStatus}</p>{/if}
+
     <p class="foot">These apply to the whole app and are kept between runs. Compare rules (compare by, line endings, excluded files) are set per comparison under Options; the New comparison page remembers the ones last used.</p>
   </div>
 </div>
@@ -75,5 +107,9 @@
   .dim { color: var(--dim); font-size: 11px; }
   .note { margin: 2px 0 0 200px; font-size: 11.5px; color: var(--dim); max-width: 44ch; }
   .foot { margin: 16px 0 0; padding-top: 10px; border-top: 1px solid var(--line); font-size: 11.5px; color: var(--dim); }
+  .about { display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 5px 10px; font-size: 12.5px; }
+  .about dt { color: var(--dim); }
+  .about dd { margin: 0; overflow-wrap: anywhere; }
+  .about-status { margin: 8px 0; font-size: 12px; }
   @media (max-width: 560px) { .f { grid-template-columns: 1fr; } .note { margin-left: 0; } }
 </style>
