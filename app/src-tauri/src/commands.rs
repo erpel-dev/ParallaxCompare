@@ -1277,7 +1277,7 @@ pub async fn open_file_diff(
             View::PythonOutline => Some("Python".into()),
             View::PerlOutline => Some("Perl".into()),
             View::RustOutline => Some("Rust".into()),
-            View::EcucValues => Some("JSON".into()),
+            View::EcucValues | View::ArxmlStructure => Some("JSON".into()),
             View::XpandOutline => Some("Xpand".into()),
             View::XtendOutline if name.to_ascii_lowercase().ends_with(".chk") => Some("Check (oAW)".into()),
             View::XtendOutline => Some("Xtend (oAW)".into()),

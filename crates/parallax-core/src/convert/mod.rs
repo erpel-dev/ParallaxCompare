@@ -7,6 +7,7 @@
 
 mod a2l;
 mod android;
+mod arxml;
 mod binary;
 mod cdfx;
 mod cert;
@@ -78,6 +79,8 @@ pub enum View {
     Firmware,
     /// XML re-indented, one element per line.
     PrettyXml,
+    /// AUTOSAR tree matched by parent-scoped SHORT-NAME, read-only.
+    ArxmlStructure,
     /// JSON re-indented.
     PrettyJson,
     /// A hex dump, 16 bytes per line.
@@ -194,6 +197,7 @@ impl View {
             View::Diagram => "Diagram",
             View::Executable => "Executable summary",
             View::Firmware => "Firmware address map",
+            View::ArxmlStructure => "AUTOSAR structure",
             View::PrettyXml => "Pretty-printed XML",
             View::PrettyJson => "Pretty-printed JSON",
             View::Hex => "Hex dump",
@@ -323,6 +327,7 @@ enum Kind {
     Check,
     /// ARXML with ECUC module configuration values.
     Ecuc,
+    Arxml,
 }
 
 fn extension(name: &str) -> String {
@@ -492,6 +497,9 @@ fn kind_of(name: &str, data: &[u8]) -> Kind {
     if matches!(ext.as_str(), "arxml" | "xml") && ecuc::is_ecuc(data) {
         return Kind::Ecuc;
     }
+    if ext == "arxml" && arxml::is_arxml(&text::decode(data).text) {
+        return Kind::Arxml;
+    }
     if crate::highlight::is_xml_name(name) || data.starts_with(b"<?xml") {
         return Kind::Xml;
     }
@@ -582,6 +590,7 @@ pub fn views_for(name: &str, data: &[u8]) -> Vec<View> {
         Kind::Js(_) => vec![View::Text, View::JsOutline],
         Kind::Xpand => vec![View::Text, View::XpandOutline],
         Kind::Xtend | Kind::Check => vec![View::Text, View::XtendOutline],
+        Kind::Arxml => vec![View::ArxmlStructure, View::Text, View::PrettyXml],
         Kind::Ecuc => vec![View::EcucValues, View::Text, View::PrettyXml],
         Kind::ConanIni => vec![View::Text, View::NormalizedConan],
         Kind::ConanManifest => vec![View::Text],
@@ -644,6 +653,7 @@ pub fn render(view: View, name: &str, data: &[u8]) -> Result<String> {
         },
         View::Executable => binary::executable_summary(data),
         View::Firmware => binary::firmware_map(data),
+        View::ArxmlStructure => arxml::render(&text::decode(data).text).map_err(Error::Unsupported),
         View::PrettyXml => pretty::xml(&text::decode(data).text),
         View::PrettyJson => pretty::json(data),
         View::Hex => binary::hex_dump(data),
@@ -805,7 +815,7 @@ pub fn canonical_text(view: View, edited: &str) -> std::result::Result<String, S
 /// Whether the view's text is a tree whose lines are matched by name rather
 /// than by text (see [`crate::textdiff::DiffOptions::keyed`]).
 pub fn keyed_view(view: View) -> bool {
-    view == View::EcucValues
+    matches!(view, View::EcucValues | View::ArxmlStructure)
 }
 
 /// The bytes of `original` with the edited text of `view` applied, in the
@@ -1091,6 +1101,14 @@ fn content_equal_with(name: &str, left: &[u8], right: &[u8], renders: &mut Rende
             let (l, r) = (text::decode(left).text, text::decode(right).text);
             return xpand::same_code(&l, &r).then_some("same code, only comments or formatting differ");
         }
+        Kind::Arxml => {
+            if left.len().max(right.len()) > MAX_SOURCE_COMPARE {
+                return None;
+            }
+            let a = render(View::ArxmlStructure, name, left).ok()?;
+            let b = render(View::ArxmlStructure, name, right).ok()?;
+            return (a == b).then_some("AUTOSAR structure matches");
+        }
         Kind::Ecuc => {
             let (l, r) = (text::decode(left).text, text::decode(right).text);
             return (ecuc::render(&l).ok()? == ecuc::render(&r).ok()?)
@@ -1108,6 +1126,28 @@ fn content_equal_with(name: &str, left: &[u8], right: &[u8], renders: &mut Rende
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn autosar_matching_is_keyed_and_read_only() {
+        let a = "<X><SHORT-NAME>A</SHORT-NAME><VALUE>1</VALUE></X>";
+        let b = "<X><SHORT-NAME>B</SHORT-NAME><VALUE>2</VALUE></X>";
+        let doc = |x: &str| format!("<AUTOSAR><ELEMENTS>{x}</ELEMENTS></AUTOSAR>");
+        let left = doc(&(a.to_owned() + b));
+        let reordered = doc(&(b.to_owned() + a));
+        assert_eq!(views_for("system.arxml", left.as_bytes())[0], View::ArxmlStructure);
+        assert!(keyed_view(View::ArxmlStructure));
+        assert!(!can_write_back(View::ArxmlStructure));
+        assert!(content_equal("system.arxml", left.as_bytes(), reordered.as_bytes()).is_some());
+        let changed = reordered.replace("<VALUE>1</VALUE>", "<VALUE>3</VALUE>");
+        assert_eq!(content_equal("system.arxml", left.as_bytes(), changed.as_bytes()), None);
+        let l = text::decode(render(View::ArxmlStructure, "system.arxml", left.as_bytes()).unwrap().as_bytes());
+        let r = text::decode(render(View::ArxmlStructure, "system.arxml", changed.as_bytes()).unwrap().as_bytes());
+        let diff =
+            crate::textdiff::diff_docs(&l, &r, &crate::textdiff::DiffOptions { keyed: true, ..Default::default() });
+        assert_eq!(diff.stats.changed, 1);
+        assert_eq!((diff.stats.added, diff.stats.removed), (0, 0));
+        assert_eq!(render(View::Text, "system.arxml", left.as_bytes()).unwrap(), left);
+    }
 
     #[test]
     fn detects_views() {
@@ -1521,7 +1561,7 @@ mod tests {
             views_for("Can_EcucValues.arxml", &v1),
             vec![View::EcucValues, View::Text, View::PrettyXml, View::Hex]
         );
-        assert_eq!(views_for("System.arxml", b"<?xml version=\"1.0\"?>\n<AUTOSAR/>\n")[0], View::Text);
+        assert_eq!(views_for("System.arxml", b"<?xml version=\"1.0\"?>\n<AUTOSAR/>\n")[0], View::ArxmlStructure);
         // Another package name, parameter order, number spelling and no UUIDs: the same configuration.
         assert_eq!(
             content_equal("Can_EcucValues.arxml", &v1, &other),
