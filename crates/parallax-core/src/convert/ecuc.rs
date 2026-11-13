@@ -24,13 +24,56 @@ use quick_xml::reader::Reader;
 
 /// Whether the data holds ECUC module configuration values.
 pub fn is_ecuc(data: &[u8]) -> bool {
-    memchr::memmem::find(data, b"<ECUC-MODULE-CONFIGURATION-VALUES").is_some()
+    let decoded = crate::text::decode(data);
+    // Probe actual XML events before allocating a tree: most ARXML files are not ECUC.
+    let mut reader = Reader::from_str(&decoded.text);
+    let mut found = false;
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e) | Event::Empty(e)) => {
+                if e.name().as_ref().contains(':') {
+                    return false;
+                }
+                found |= e.local_name().as_ref() == "ECUC-MODULE-CONFIGURATION-VALUES";
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => return false,
+            _ => {}
+        }
+    }
+    if !found {
+        return false;
+    }
+    let Ok(root) = parse_xml(&decoded.text) else {
+        return false;
+    };
+    let doc = XDoc::read(&root);
+    fn only_values(el: &El) -> bool {
+        (el.name != "ELEMENTS" || el.children.iter().all(|c| c.name == "ECUC-MODULE-CONFIGURATION-VALUES"))
+            && el.children.iter().all(only_values)
+    }
+    !doc.modules.is_empty() && doc.ambiguous.is_none() && only_values(&root)
+}
+
+// The patch writer creates unprefixed tags; offer the complete tree for prefixed documents.
+fn has_prefixed_elements(xml: &str) -> bool {
+    let mut reader = Reader::from_str(xml);
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e) | Event::Empty(e)) if e.name().as_ref().contains(':') => return true,
+            Ok(Event::Eof) | Err(_) => return false,
+            _ => {}
+        }
+    }
 }
 
 /// The simplified JSON of every module configuration in the file.
 pub fn render(xml: &str) -> Result<String, String> {
     let root = parse_xml(xml)?;
     let doc = XDoc::read(&root);
+    if let Some(name) = &doc.ambiguous {
+        return Err(format!("{name} occurs twice; use AUTOSAR structure to compare all instances"));
+    }
     Ok(to_json(&doc.model()))
 }
 
@@ -52,6 +95,9 @@ pub fn write_back(original: &str, edited: &str, donor: Option<&str>) -> Result<S
     let wanted = from_json(edited)?;
     if same_model(&doc.model(), &wanted).is_none() {
         return Ok(original.to_string());
+    }
+    if has_prefixed_elements(original) {
+        return Err("prefixed ECUC XML cannot be patched safely; use the Text view to edit it".into());
     }
     let donor_root = donor.and_then(|d| parse_xml(d).ok());
     let mut templates = Templates::default();
@@ -123,25 +169,33 @@ fn parse_xml(xml: &str) -> Result<El, String> {
         let before = reader.buffer_position() as usize;
         let event = reader.read_event().map_err(|e| format!("XML error at byte {before}: {e}"))?;
         let after = reader.buffer_position() as usize;
-        let attrs_of = |e: &quick_xml::events::BytesStart<'_>| {
+        let attrs_of = |e: &quick_xml::events::BytesStart<'_>| -> Result<Vec<(String, String)>, String> {
             e.attributes()
-                .flatten()
                 .map(|a| {
-                    let key = a.key.local_name().as_ref().to_string();
-                    (key, a.value.into_owned())
+                    let a = a.map_err(|e| e.to_string())?;
+                    Ok((
+                        a.key.local_name().as_ref().to_string(),
+                        quick_xml::escape::unescape(&a.value).map_err(|e| e.to_string())?.into_owned(),
+                    ))
                 })
-                .collect::<Vec<_>>()
+                .collect()
         };
         match event {
             Event::Start(e) => {
+                if stack.len() >= 128 {
+                    return Err("ECUC XML nesting exceeds 127 levels".into());
+                }
                 let name = e.local_name().as_ref().to_string();
-                let mut el = new(name, attrs_of(&e), before);
+                let mut el = new(name, attrs_of(&e)?, before);
                 el.inner = after..after;
                 stack.push(el);
             }
             Event::Empty(e) => {
+                if stack.len() >= 128 {
+                    return Err("ECUC XML nesting exceeds 127 levels".into());
+                }
                 let name = e.local_name().as_ref().to_string();
-                let mut el = new(name, attrs_of(&e), before);
+                let mut el = new(name, attrs_of(&e)?, before);
                 el.span = before..after;
                 el.inner = after..after;
                 el.empty = true;
@@ -159,19 +213,12 @@ fn parse_xml(xml: &str) -> Result<El, String> {
             Event::Text(t) => stack.last_mut().expect("root").text.push_str(&t.xml10_content()),
             Event::CData(t) => stack.last_mut().expect("root").text.push_str(&t),
             Event::GeneralRef(r) => {
-                let resolved = match r.resolve_char_ref() {
-                    Ok(Some(c)) => c.to_string(),
-                    _ => match &*r {
-                        "amp" => "&".into(),
-                        "lt" => "<".into(),
-                        "gt" => ">".into(),
-                        "quot" => "\"".into(),
-                        "apos" => "'".into(),
-                        other => format!("&{other};"),
-                    },
-                };
+                let resolved = quick_xml::escape::unescape(&format!("&{};", &*r))
+                    .map_err(|e| format!("XML entity error at byte {before}: {e}"))?
+                    .into_owned();
                 stack.last_mut().expect("root").text.push_str(&resolved);
             }
+            Event::DocType(_) => return Err("ECUC XML document type declarations are unsupported".into()),
             Event::Eof => break,
             _ => {}
         }
@@ -180,6 +227,9 @@ fn parse_xml(xml: &str) -> Result<El, String> {
         return Err("the XML ends inside an element".into());
     }
     let mut root = stack.pop().expect("root");
+    if root.children.len() != 1 || root.children[0].name != "AUTOSAR" || !root.text.trim().is_empty() {
+        return Err("ECUC XML expects one AUTOSAR root element".into());
+    }
     root.span = 0..xml.len();
     root.inner = 0..xml.len();
     Ok(root)
@@ -201,7 +251,12 @@ enum Val {
 }
 
 impl Val {
-    /// The value as compared: a number written as text equals the number.
+    /// JSON types are significant: a textual "true" cannot become a boolean on save.
+    fn comparison_key(&self) -> String {
+        json_val(self)
+    }
+
+    /// The scalar text used when writing XML.
     fn key(&self) -> String {
         match self {
             Val::Null => "\u{0}null".into(),
@@ -242,12 +297,12 @@ fn same_model(a: &Model, b: &Model) -> Option<String> {
 
 fn same_node(a: &Node, b: &Node, path: &str) -> Option<String> {
     let keys = |v: &[Val]| {
-        let mut k: Vec<String> = v.iter().map(Val::key).collect();
+        let mut k: Vec<String> = v.iter().map(Val::comparison_key).collect();
         k.sort();
         k
     };
     for k in a.attrs.keys().chain(b.attrs.keys()) {
-        if a.attrs.get(k).map(Val::key) != b.attrs.get(k).map(Val::key) {
+        if a.attrs.get(k).map(Val::comparison_key) != b.attrs.get(k).map(Val::comparison_key) {
             return Some(format!("{path}/{k}"));
         }
     }
@@ -321,7 +376,7 @@ fn write_node(out: &mut String, name: &str, node: &Node, depth: usize, last: boo
             }
             Entry::Values(k, vs) => {
                 let mut sorted: Vec<&Val> = vs.iter().collect();
-                sorted.sort_by_key(|v| v.key());
+                sorted.sort_by_key(|v| v.comparison_key());
                 let _ = writeln!(out, "{inner}{}: [", json_str(k));
                 for (j, v) in sorted.iter().enumerate() {
                     let _ = writeln!(out, "{inner}  {}{}", json_val(v), comma(j + 1 == sorted.len()));
@@ -569,9 +624,16 @@ impl<'a> XDoc<'a> {
         let mut node =
             XNode { el, def: def.clone(), attrs: BTreeMap::new(), values: BTreeMap::new(), groups: BTreeMap::new() };
         let wrappers = [el.child("PARAMETER-VALUES"), el.child("REFERENCE-VALUES")];
+        let mut definitions = BTreeMap::new();
         for v in wrappers.into_iter().flatten().flat_map(|w| w.children.iter()) {
             let Some(xv) = self.value(v) else { continue };
-            let name = last_segment(&v.text_of("DEFINITION-REF").unwrap_or_default()).to_string();
+            let definition = v.text_of("DEFINITION-REF").unwrap_or_default();
+            let name = last_segment(&definition).to_string();
+            if let Some(previous) = definitions.insert(name.clone(), definition.clone())
+                && previous != definition
+            {
+                self.ambiguous.get_or_insert(name.clone());
+            }
             node.values.entry(name).or_default().push(xv);
         }
         for c in subs.into_iter().flat_map(|s| s.named("ECUC-CONTAINER-VALUE")) {
@@ -1058,9 +1120,15 @@ fn indent_unit(src: &str, root: &El) -> String {
 
 /// The whitespace before `pos` on its line, when nothing else precedes it.
 fn indent_at(src: &str, pos: usize) -> Option<String> {
-    let start = src[..pos].rfind('\n').map_or(0, |i| i + 1);
-    let before = &src[start..pos];
-    before.chars().all(|c| c == ' ' || c == '\t').then(|| before.to_string())
+    // Stop at the first non-indentation character. Searching back to the newline
+    // for every XML element is quadratic on minified, single-line documents.
+    let before = &src[..pos];
+    let start = match before.rfind(|c| c != ' ' && c != '\t') {
+        Some(i) if before.as_bytes()[i] == b'\n' => i + 1,
+        Some(_) => return None,
+        None => 0,
+    };
+    Some(before[start..].to_string())
 }
 
 fn line_start(src: &str, pos: usize) -> usize {
@@ -1069,9 +1137,8 @@ fn line_start(src: &str, pos: usize) -> usize {
 
 /// After the line break that follows `pos`, when only whitespace is between.
 fn after_line(src: &str, pos: usize) -> Option<usize> {
-    let rest = &src[pos..];
-    let nl = rest.find('\n')?;
-    rest[..nl].trim().is_empty().then_some(pos + nl + 1)
+    let (offset, next) = src[pos..].char_indices().find(|(_, c)| *c == '\n' || !c.is_whitespace())?;
+    (next == '\n').then_some(pos + offset + 1)
 }
 
 struct Patch {
@@ -1375,9 +1442,13 @@ impl Writer<'_> {
             // Values on both sides stay; the others are changed in place, removed or added.
             let mut used = vec![false; have.len()];
             let mut missing = Vec::new();
+            let mut available = BTreeMap::<String, Vec<usize>>::new();
+            for (i, h) in have.iter().enumerate().rev() {
+                available.entry(h.val.comparison_key()).or_default().push(i);
+            }
             for w in want {
-                match have.iter().enumerate().find(|(i, h)| !used[*i] && h.val.key() == w.key()) {
-                    Some((i, _)) => used[i] = true,
+                match available.get_mut(&w.comparison_key()).and_then(Vec::pop) {
+                    Some(i) => used[i] = true,
                     None => missing.push(w),
                 }
             }
@@ -1848,5 +1919,84 @@ mod tests {
         assert_eq!(numerical("INF", "ECUC-FLOAT-PARAM-DEF"), Val::Str("INF".into()));
         let other = FILE.replace("ActiveEcuC", "EcucValues").replace("0x1F", "31").replace("<VALUE>1<", "<VALUE>true<");
         assert_eq!(render(&other).unwrap(), render(FILE).unwrap());
+    }
+    #[test]
+    fn detection_requires_real_unambiguous_unmixed_values() {
+        assert!(is_ecuc(FILE.as_bytes()));
+        assert!(!is_ecuc(b"<AUTOSAR><!-- ECUC-MODULE-CONFIGURATION-VALUES --><X/></AUTOSAR>"));
+        let mixed = FILE.replace("</ELEMENTS>", "<SYSTEM><SHORT-NAME>S</SHORT-NAME></SYSTEM></ELEMENTS>");
+        assert!(!is_ecuc(mixed.as_bytes()));
+        let root = parse_xml(FILE).unwrap();
+        let module = XDoc::read(&root).modules["Can"].node.el.span.clone();
+        let duplicate = FILE.replace("</ELEMENTS>", &format!("{}</ELEMENTS>", &FILE[module]));
+        assert!(!is_ecuc(duplicate.as_bytes()));
+        assert!(render(&duplicate).unwrap_err().contains("occurs twice"));
+        let mut utf16 = vec![0xff, 0xfe];
+        utf16.extend(FILE.encode_utf16().flat_map(u16::to_le_bytes));
+        assert!(is_ecuc(&utf16));
+    }
+
+    #[test]
+    fn saves_never_silently_discard_scalar_type_changes() {
+        let textual = FILE.replace("INTERRUPT", "true");
+        let edited = render(&textual).unwrap().replace("\"CanRxProcessing\": \"true\"", "\"CanRxProcessing\": true");
+        let err = write_back(&textual, &edited, None).unwrap_err();
+        assert!(err.contains("CanRxProcessing") && err.contains("nothing was saved"), "{err}");
+        let edited = render(FILE).unwrap().replace("\"CanControllerId\": 31", "\"CanControllerId\": \"31\"");
+        assert!(write_back(FILE, &edited, None).unwrap_err().contains("CanControllerId"));
+    }
+
+    #[test]
+    fn rejects_invalid_attributes_entities_and_deep_xml() {
+        let malformed = FILE.replace("UUID=\"c2\"", "UUID=\"c2\" UUID=\"again\"");
+        assert_ne!(malformed, FILE);
+        assert!(render(&malformed).is_err());
+        assert!(write_back(&malformed, &render(FILE).unwrap(), None).is_err());
+        assert!(render(&format!("<!DOCTYPE AUTOSAR [<!ENTITY value 'foo'>]>{FILE}")).is_err());
+        let deep = format!("<AUTOSAR>{}{}</AUTOSAR>", "<X>".repeat(600), "</X>".repeat(600));
+        assert!(render(&deep).unwrap_err().contains("nesting"));
+    }
+
+    #[test]
+    fn repeated_values_reuse_each_xml_node_once() {
+        let value = "<ECUC-TEXTUAL-PARAM-VALUE><DEFINITION-REF DEST=\"ECUC-STRING-PARAM-DEF\">/D/P</DEFINITION-REF><VALUE>x</VALUE></ECUC-TEXTUAL-PARAM-VALUE>";
+        let xml = format!(
+            "<AUTOSAR><ELEMENTS><ECUC-MODULE-CONFIGURATION-VALUES><SHORT-NAME>M</SHORT-NAME><DEFINITION-REF>/D</DEFINITION-REF><PARAMETER-VALUES>{}</PARAMETER-VALUES></ECUC-MODULE-CONFIGURATION-VALUES></ELEMENTS></AUTOSAR>",
+            value.repeat(2000)
+        );
+        let mut model = XDoc::read(&parse_xml(&xml).unwrap()).model();
+        model.get_mut("M").unwrap().values.get_mut("P").unwrap()[1000] = Val::Str("changed".into());
+        let edited = to_json(&model);
+        let saved = write_back(&xml, &edited, None).unwrap();
+        assert_eq!(render(&saved).unwrap(), edited);
+        assert_eq!(saved.matches("<VALUE>changed</VALUE>").count(), 1);
+        assert_eq!(saved.matches("<VALUE>x</VALUE>").count(), 1999);
+    }
+    #[test]
+    fn conflicting_parameter_definitions_and_duplicate_packages_are_not_projected() {
+        let root = parse_xml(FILE).unwrap();
+        let span = XDoc::read(&root).modules["Can"].node.el.span.clone();
+        let module = &FILE[span];
+        let duplicate = FILE.replace(
+            "</AR-PACKAGES>",
+            &format!(
+                "<AR-PACKAGE><SHORT-NAME>Other</SHORT-NAME><ELEMENTS>{module}</ELEMENTS></AR-PACKAGE></AR-PACKAGES>"
+            ),
+        );
+        assert!(!is_ecuc(duplicate.as_bytes()));
+        assert!(render(&duplicate).unwrap_err().contains("occurs twice"));
+        let parameter = "<ECUC-NUMERICAL-PARAM-VALUE><DEFINITION-REF DEST='ECUC-INTEGER-PARAM-DEF'>/Other/CanControllerId</DEFINITION-REF><VALUE>999</VALUE></ECUC-NUMERICAL-PARAM-VALUE>";
+        let conflict = FILE.replace("</PARAMETER-VALUES>", &format!("{parameter}</PARAMETER-VALUES>"));
+        assert!(!is_ecuc(conflict.as_bytes()));
+        assert!(render(&conflict).unwrap_err().contains("CanControllerId"));
+        assert!(render(&FILE.replace("INTERRUPT", "&unknown;")).is_err());
+    }
+    #[test]
+    fn indentation_boundaries_handle_minified_crlf_and_tabs() {
+        assert_eq!(indent_at("<A><B/>", 3), None);
+        assert_eq!(indent_at("  <A/>", 2).as_deref(), Some("  "));
+        assert_eq!(indent_at("<A>\r\n\t<B/>", 6).as_deref(), Some("\t"));
+        assert_eq!(after_line("<A/>  \r\n<B/>", 4), Some(8));
+        assert_eq!(after_line("<A/><B/>", 4), None);
     }
 }
