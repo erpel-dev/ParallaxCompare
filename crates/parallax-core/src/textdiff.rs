@@ -93,23 +93,34 @@ pub struct TextDiff {
 
 /// Interned line key: the normalized text, plus the raw text for slider heuristics.
 #[derive(Eq)]
-struct Key<'a>(Cow<'a, str>);
+enum Key<'a> {
+    Text(Cow<'a, str>),
+    Tree([u8; 16]),
+}
 
 impl PartialEq for Key<'_> {
     fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
+        match (self, other) {
+            (Key::Text(a), Key::Text(b)) => a == b,
+            (Key::Tree(a), Key::Tree(b)) => a == b,
+            _ => false,
+        }
     }
 }
 
 impl Hash for Key<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.hash(state)
+        std::mem::discriminant(self).hash(state);
+        self.as_ref().hash(state)
     }
 }
 
 impl AsRef<[u8]> for Key<'_> {
     fn as_ref(&self) -> &[u8] {
-        self.0.as_bytes()
+        match self {
+            Key::Text(text) => text.as_bytes(),
+            Key::Tree(bytes) => bytes,
+        }
     }
 }
 
@@ -139,14 +150,15 @@ fn normalize_line<'a>(line: &'a str, opts: &DiffOptions) -> Cow<'a, str> {
 }
 
 pub fn diff_docs(left: &TextDoc, right: &TextDoc, opts: &DiffOptions) -> TextDiff {
-    let mut interner = Interner::new(left.len() + right.len());
+    let mut interner = Interner::new(left.len().max(right.len()));
     let (before, after) = if opts.keyed {
-        let mut keys =
-            |doc: &TextDoc| tree_keys(doc).into_iter().map(|k| interner.intern(Key(Cow::Owned(k)))).collect();
-        (keys(left), keys(right))
+        let mut paths = TreePaths::default();
+        let before = compact_tree_keys(left, &mut paths).into_iter().map(|k| interner.intern(Key::Tree(k))).collect();
+        let after = compact_tree_keys(right, &mut paths).into_iter().map(|k| interner.intern(Key::Tree(k))).collect();
+        (before, after)
     } else {
-        let before = (0..left.len()).map(|i| interner.intern(Key(normalize_line(left.line(i), opts)))).collect();
-        let after = (0..right.len()).map(|i| interner.intern(Key(normalize_line(right.line(i), opts)))).collect();
+        let before = (0..left.len()).map(|i| interner.intern(Key::Text(normalize_line(left.line(i), opts)))).collect();
+        let after = (0..right.len()).map(|i| interner.intern(Key::Text(normalize_line(right.line(i), opts)))).collect();
         (before, after)
     };
     let input = InternedInput { before, after, interner };
@@ -225,6 +237,71 @@ pub fn diff_docs(left: &TextDoc, right: &TextDoc, opts: &DiffOptions) -> TextDif
         sections.push(Section { start, end: rows.len() as u32 });
     }
     TextDiff { rows, sections, stats }
+}
+
+/// Each edge retains only a borrowed local name and its parent ID, rather than
+/// repeating every ancestor's text for every line. IDs are shared by both sides;
+/// equality uses the complete edge tuple, never a potentially colliding hash.
+#[derive(Default)]
+struct TreePaths<'a>(std::collections::HashMap<(u64, &'a str, TreePart), u64>);
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum TreePart {
+    Path,
+    Member,
+    OpenObject,
+    OpenArray,
+    CloseObject,
+    CloseArray,
+    ArrayValue,
+    Raw,
+}
+
+impl<'a> TreePaths<'a> {
+    fn intern(&mut self, parent: u64, name: &'a str, part: TreePart) -> u64 {
+        let next = self.0.len() as u64 + 1;
+        *self.0.entry((parent, name, part)).or_insert(next)
+    }
+}
+
+fn compact_tree_keys<'a>(doc: &'a TextDoc, paths: &mut TreePaths<'a>) -> Vec<[u8; 16]> {
+    use TreePart::*;
+    let mut stack = Vec::<(u64, bool)>::new();
+    let mut seen = std::collections::HashMap::<u64, u64>::new();
+    let mut keys = Vec::with_capacity(doc.len());
+    for i in 0..doc.len() {
+        let line = doc.line(i).trim();
+        let t = line.strip_suffix(',').unwrap_or(line).trim_end();
+        let (parent, in_array) = stack.last().copied().unwrap_or((0, false));
+        let open_part = |array| if array { OpenArray } else { OpenObject };
+        let id = if t == "}" || t == "]" {
+            stack.pop();
+            paths.intern(parent, "", if t == "}" { CloseObject } else { CloseArray })
+        } else if t == "{" || t == "[" {
+            let array = t == "[";
+            stack.push((paths.intern(parent, "", Path), array));
+            paths.intern(parent, "", open_part(array))
+        } else if in_array {
+            paths.intern(parent, t, ArrayValue)
+        } else if let Some((name, value)) = member(t) {
+            if value == "{" || value == "[" {
+                let array = value == "[";
+                stack.push((paths.intern(parent, name, Path), array));
+                paths.intern(parent, name, open_part(array))
+            } else {
+                paths.intern(parent, name, Member)
+            }
+        } else {
+            paths.intern(parent, t, Raw)
+        };
+        let occurrence = seen.entry(id).or_default();
+        *occurrence += 1;
+        let mut key = [0; 16];
+        key[..8].copy_from_slice(&id.to_le_bytes());
+        key[8..].copy_from_slice(&occurrence.to_le_bytes());
+        keys.push(key);
+    }
+    keys
 }
 
 /// A key per line of a JSON-like tree, as written by the ECUC values view: the
@@ -549,6 +626,26 @@ mod tests {
         use RowKind::*;
         assert_eq!(kinds(&diff), vec![Equal, Equal, Equal, Minor, Removed, Removed, Removed, Equal]);
         assert_eq!(diff.stats.changed, 0);
+    }
+
+    #[test]
+    fn compact_keys_do_not_confuse_slashes_in_names_with_parent_paths() {
+        let left = decode(b"{\n  \"a/b\": {\n    \"value\": 1\n  }\n}\n");
+        let right = decode(b"{\n  \"a\": {\n    \"b\": {\n      \"value\": 2\n    }\n  }\n}\n");
+        let mut paths = TreePaths::default();
+        let a = compact_tree_keys(&left, &mut paths);
+        let b = compact_tree_keys(&right, &mut paths);
+        assert_ne!(a[2], b[3], "the value belongs to a different parent hierarchy");
+        let diff = diff_docs(&left, &right, &DiffOptions { keyed: true, ..Default::default() });
+        assert!(!diff.rows.iter().any(|r| r.left == Some(2) && r.right == Some(3)));
+    }
+
+    #[test]
+    fn repeated_array_values_keep_distinct_occurrences() {
+        let left = decode(b"{\n  \"items\": [\n    1,\n    1,\n    2\n  ]\n}\n");
+        let right = decode(b"{\n  \"items\": [\n    1,\n    2\n  ]\n}\n");
+        let diff = diff_docs(&left, &right, &DiffOptions { keyed: true, ..Default::default() });
+        assert_eq!((diff.stats.changed, diff.stats.removed, diff.stats.added), (0, 1, 0));
     }
 
     #[test]

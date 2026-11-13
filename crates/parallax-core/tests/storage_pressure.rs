@@ -92,18 +92,27 @@ fn real_disk_full_extraction_and_saves() {
     writer.push_source_path(&src, |_| true).unwrap();
     writer.finish().unwrap();
     let archive = ArchiveFs::open_file(&archive_path, ArchiveFormat::SevenZ, "spill.7z").unwrap();
+    // Repeated bytes compress into a resident NTFS record even on a full drive.
+    // Incompressible output must allocate data clusters in every archive format.
+    let mut state = 0x1234_5678_9abc_def0u64;
+    let replacement: Vec<u8> = (0..1 << 20)
+        .map(|_| {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (state >> 32) as u8
+        })
+        .collect();
     let filler = exhaust(&root);
-    let error = local.apply(vec![put("value.arxml", &vec![5; 1 << 20])], &Progress::default()).unwrap_err().to_string();
+    let error = local.apply(vec![put("value.arxml", &replacement)], &Progress::default()).unwrap_err().to_string();
     println!("local save error: {error}");
     assert!(error.contains("full") && error.contains("value.arxml"), "{error}");
     assert_eq!(fs::read(root.join("value.arxml")).unwrap(), b"<AUTOSAR>original</AUTOSAR>");
     let error =
-        mount.apply(vec![put("pack.zip/value.txt", &vec![7; 1 << 20])], &Progress::default()).unwrap_err().to_string();
+        mount.apply(vec![put("pack.zip/value.txt", &replacement)], &Progress::default()).unwrap_err().to_string();
     println!("archive save error: {error}");
     assert!(error.contains("full") && error.contains("pack.zip"), "{error}");
     assert_eq!(fs::read(root.join("pack.zip")).unwrap(), original_archive);
     let error =
-        mount.apply(vec![put("pack.7z/value.txt", &vec![9; 1 << 20])], &Progress::default()).unwrap_err().to_string();
+        mount.apply(vec![put("pack.7z/value.txt", &replacement)], &Progress::default()).unwrap_err().to_string();
     println!("7z save error: {error}");
     assert!(error.contains("full") && error.contains("pack.7z"), "{error}");
     assert_eq!(fs::read(root.join("pack.7z")).unwrap(), original_7z);

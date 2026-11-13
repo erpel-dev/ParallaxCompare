@@ -1,4 +1,9 @@
 $ErrorActionPreference = 'Stop'
+# Compile with normal temporary storage; only the test process uses the full VHD.
+$artifacts = cargo test -p parallax-core --test storage_pressure --no-run --message-format=json | ForEach-Object { $_ | ConvertFrom-Json }
+if ($LASTEXITCODE -ne 0) { throw 'Failed to build the disk-full test' }
+$testBinary = ($artifacts | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'storage_pressure' -and $_.executable } | Select-Object -Last 1).executable
+if (-not $testBinary -or -not (Test-Path $testBinary)) { throw 'Disk-full test executable was not produced' }
 $letter = ([char[]]'RSTUVWXYZ' | Where-Object { -not (Test-Path "${_}:\") } | Select-Object -First 1)
 if (-not $letter) { throw 'No unused drive letter for the disposable test disk' }
 $vhd = Join-Path $env:RUNNER_TEMP 'parallax-pressure.vhd'
@@ -24,7 +29,7 @@ assign letter=$letter
     $env:PARALLAX_PRESSURE_WORK = Join-Path $env:RUNNER_TEMP 'parallax-pressure-work'
     $env:TEMP = $root
     $env:TMP = $root
-    cargo test -p parallax-core --test storage_pressure real_disk_full_extraction_and_saves -- --ignored --exact --nocapture --test-threads=1
+    & $testBinary real_disk_full_extraction_and_saves --ignored --exact --nocapture --test-threads=1
     if ($LASTEXITCODE -ne 0) { throw "Disk-full integration test failed ($LASTEXITCODE)" }
 } finally {
     $env:TEMP = $oldTemp
