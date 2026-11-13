@@ -10,6 +10,9 @@ struct Node {
     tag: String,
     attrs: BTreeMap<String, String>,
     content: Vec<Item>,
+    preserve_space: bool,
+    namespaces: BTreeMap<String, String>,
+    namespace: String,
 }
 enum Item {
     Element(Node),
@@ -28,20 +31,77 @@ impl Node {
             self.content.push(Item::Text(text))
         }
     }
-    fn start(e: &BytesStart<'_>) -> Result<Self, String> {
-        let mut n = Self { tag: e.name().as_ref().to_owned(), ..Default::default() };
-        for a in e.attributes() {
-            let a = a.map_err(|e| e.to_string())?;
-            n.attrs.insert(
-                a.key.as_ref().to_owned(),
-                quick_xml::escape::unescape(&a.value).map_err(|e| e.to_string())?.into_owned(),
-            );
+    fn start(e: &BytesStart<'_>, parent: &Node) -> Result<Self, String> {
+        let mut n = Self { namespaces: parent.namespaces.clone(), ..Default::default() };
+        let attributes = e
+            .attributes()
+            .map(|a| {
+                let a = a.map_err(|e| e.to_string())?;
+                Ok((
+                    a.key.as_ref().to_owned(),
+                    quick_xml::escape::unescape(&a.value).map_err(|e| e.to_string())?.into_owned(),
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        for (key, value) in &attributes {
+            if key == "xmlns" {
+                n.namespaces.insert(String::new(), value.clone());
+            } else if let Some(prefix) = key.strip_prefix("xmlns:") {
+                n.namespaces.insert(prefix.to_owned(), value.clone());
+            }
         }
+        let qname = e.name();
+        let name = qname.as_ref();
+        let (prefix, name) = name.split_once(':').unwrap_or(("", name));
+        n.namespace = n.namespaces.get(prefix).cloned().unwrap_or_default();
+        if !prefix.is_empty() && n.namespace.is_empty() {
+            return Err(format!("ARXML: unbound namespace prefix {prefix}"));
+        }
+        n.tag = name.to_owned();
+        if n.namespace != parent.namespace {
+            n.attrs.insert("@namespace".into(), n.namespace.clone());
+        }
+        for (key, value) in attributes {
+            if key == "xmlns" || key.starts_with("xmlns:") {
+                continue;
+            }
+            let key = if let Some((prefix, name)) = key.split_once(':') {
+                if prefix == "xml" {
+                    key.clone()
+                } else {
+                    let uri =
+                        n.namespaces.get(prefix).ok_or_else(|| format!("ARXML: unbound attribute prefix {prefix}"))?;
+                    format!("{{{uri}}}{name}")
+                }
+            } else {
+                key
+            };
+            // xsi:type holds a QName too; retaining its spelling alone could hide
+            // a changed binding or report equivalent namespace aliases as different.
+            let value = if key == "{http://www.w3.org/2001/XMLSchema-instance}type" {
+                let (prefix, name) = value.split_once(':').unwrap_or(("", &value));
+                let uri = n.namespaces.get(prefix).map(String::as_str).unwrap_or("");
+                if !prefix.is_empty() && uri.is_empty() {
+                    return Err(format!("ARXML: unbound type prefix {prefix}"));
+                }
+                format!("{{{uri}}}{name}")
+            } else {
+                value
+            };
+            if n.attrs.insert(key.clone(), value).is_some() {
+                return Err(format!("ARXML: duplicate attribute {key}"));
+            }
+        }
+        n.preserve_space = match n.attrs.get("xml:space").map(String::as_str) {
+            Some("preserve") => true,
+            Some("default") => false,
+            _ => parent.preserve_space,
+        };
         Ok(n)
     }
     fn short_name(&self) -> Option<String> {
         let mut names = self.content.iter().filter_map(|c| match c {
-            Item::Element(n) if local(&n.tag) == "SHORT-NAME" => Some(n),
+            Item::Element(n) if n.tag == "SHORT-NAME" && n.namespace == self.namespace => Some(n),
             _ => None,
         });
         let n = names.next()?;
@@ -71,7 +131,8 @@ impl Node {
         if !self.attrs.is_empty() {
             out.insert("@attributes".into(), json!(self.attrs));
         }
-        let mixed = self.content.iter().any(|c| matches!(c,Item::Text(t) if !t.trim().is_empty()));
+        let mixed =
+            self.preserve_space || self.content.iter().any(|c| matches!(c,Item::Text(t) if !t.trim().is_empty()));
         let mut names = BTreeMap::<&str, BTreeSet<String>>::new();
         let mut ambiguous = BTreeSet::new();
         for c in &self.content {
@@ -138,9 +199,16 @@ pub fn render(text: &str) -> Result<String, String> {
                 if stack.len() >= 128 {
                     return Err("ARXML nesting exceeds 127 levels".into());
                 }
-                stack.push(Node::start(&e)?);
+                let node = Node::start(&e, stack.last().unwrap())?;
+                stack.push(node);
             }
-            Event::Empty(e) => stack.last_mut().unwrap().content.push(Item::Element(Node::start(&e)?)),
+            Event::Empty(e) => {
+                if stack.len() >= 128 {
+                    return Err("ARXML nesting exceeds 127 levels".into());
+                }
+                let node = Node::start(&e, stack.last().unwrap())?;
+                stack.last_mut().unwrap().content.push(Item::Element(node));
+            }
             Event::End(_) => {
                 if stack.len() <= 1 {
                     return Err("ARXML: unexpected closing element".into());
@@ -257,5 +325,30 @@ mod tests {
             assert!(render(s).is_err(), "{s}");
         }
         assert!(render(&format!("<AUTOSAR>{}{}</AUTOSAR>", "<X>".repeat(130), "</X>".repeat(130))).is_err());
+    }
+    #[test]
+    fn namespace_aliases_match_but_namespace_uris_differ() {
+        let a = "<a:AUTOSAR xmlns:a='urn:autosar' xmlns:x='urn:attrs'><a:X x:DEST='T'><a:SHORT-NAME>A</a:SHORT-NAME></a:X></a:AUTOSAR>";
+        let b = a.replace("a:", "b:").replace("xmlns:a", "xmlns:b").replace("x:", "y:").replace("xmlns:x", "xmlns:y");
+        assert_eq!(render(a).unwrap(), render(&b).unwrap());
+        assert_ne!(render(a).unwrap(), render(&a.replace("urn:autosar", "urn:other")).unwrap());
+        assert!(render("<a:AUTOSAR/>").is_err());
+    }
+
+    #[test]
+    fn xml_space_preserve_is_inherited_and_can_be_reset() {
+        let a = "<AUTOSAR><X xml:space='preserve'> <Y/> </X></AUTOSAR>";
+        assert_ne!(render(a).unwrap(), render(&a.replace("> <Y/>", "><Y/>")).unwrap());
+        let a = "<AUTOSAR xml:space='preserve'><X> <Y/> </X></AUTOSAR>";
+        assert_ne!(render(a).unwrap(), render(&a.replace("> <Y/>", "><Y/>")).unwrap());
+        let a = "<AUTOSAR xml:space='preserve'><X xml:space='default'> <Y/> </X></AUTOSAR>";
+        assert_eq!(render(a).unwrap(), render(&a.replace("> <Y/>", "><Y/>")).unwrap());
+    }
+    #[test]
+    fn type_qnames_retain_namespace_semantics() {
+        let a = "<AUTOSAR xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance' xmlns:t='urn:types'><X xsi:type='t:Thing'/></AUTOSAR>";
+        assert_eq!(render(a).unwrap(), render(&a.replace("xmlns:t", "xmlns:u").replace("t:Thing", "u:Thing")).unwrap());
+        assert_ne!(render(a).unwrap(), render(&a.replace("urn:types", "urn:other")).unwrap());
+        assert!(render("<AUTOSAR xmlns:a='urn:a' xmlns:b='urn:a' a:x='1' b:x='2'/>").is_err());
     }
 }

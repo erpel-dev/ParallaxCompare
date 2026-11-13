@@ -591,7 +591,7 @@ pub fn views_for(name: &str, data: &[u8]) -> Vec<View> {
         Kind::Xpand => vec![View::Text, View::XpandOutline],
         Kind::Xtend | Kind::Check => vec![View::Text, View::XtendOutline],
         Kind::Arxml => vec![View::ArxmlStructure, View::Text, View::PrettyXml],
-        Kind::Ecuc => vec![View::EcucValues, View::Text, View::PrettyXml],
+        Kind::Ecuc => vec![View::EcucValues, View::ArxmlStructure, View::Text, View::PrettyXml],
         Kind::ConanIni => vec![View::Text, View::NormalizedConan],
         Kind::ConanManifest => vec![View::Text],
     };
@@ -1101,18 +1101,13 @@ fn content_equal_with(name: &str, left: &[u8], right: &[u8], renders: &mut Rende
             let (l, r) = (text::decode(left).text, text::decode(right).text);
             return xpand::same_code(&l, &r).then_some("same code, only comments or formatting differ");
         }
-        Kind::Arxml => {
+        Kind::Arxml | Kind::Ecuc => {
+            // The value projection omits reference types, full definitions and other XML details.
+            // Only full-tree equality can safely classify byte-different files as similar.
             if left.len().max(right.len()) > MAX_SOURCE_COMPARE {
                 return None;
             }
-            let a = render(View::ArxmlStructure, name, left).ok()?;
-            let b = render(View::ArxmlStructure, name, right).ok()?;
-            return (a == b).then_some("AUTOSAR structure matches");
-        }
-        Kind::Ecuc => {
-            let (l, r) = (text::decode(left).text, text::decode(right).text);
-            return (ecuc::render(&l).ok()? == ecuc::render(&r).ok()?)
-                .then_some("same configuration, only order, UUIDs, admin data, number spelling or package differ");
+            return renders.equal(View::ArxmlStructure, name, left, right)?.then_some("AUTOSAR structure matches");
         }
         Kind::NeedsJson => {
             return needs::same_needs_json(left, right)?
@@ -1559,14 +1554,11 @@ mod tests {
         let (v1, other, v2) = (fixture("Can-v1.arxml"), fixture("Can-v1-other-tool.arxml"), fixture("Can-v2.arxml"));
         assert_eq!(
             views_for("Can_EcucValues.arxml", &v1),
-            vec![View::EcucValues, View::Text, View::PrettyXml, View::Hex]
+            vec![View::EcucValues, View::ArxmlStructure, View::Text, View::PrettyXml, View::Hex]
         );
         assert_eq!(views_for("System.arxml", b"<?xml version=\"1.0\"?>\n<AUTOSAR/>\n")[0], View::ArxmlStructure);
-        // Another package name, parameter order, number spelling and no UUIDs: the same configuration.
-        assert_eq!(
-            content_equal("Can_EcucValues.arxml", &v1, &other),
-            Some("same configuration, only order, UUIDs, admin data, number spelling or package differ")
-        );
+        // Simplified values may agree while full XML semantics differ; never hide those changes.
+        assert_eq!(content_equal("Can_EcucValues.arxml", &v1, &other), None);
         assert_eq!(content_equal("Can_EcucValues.arxml", &v1, &v2), None);
         assert!(has_content_rule("Can_EcucValues.arxml"));
 
@@ -1746,5 +1738,40 @@ mod tests {
             assert!(has_content_rule(name));
             assert!(content_equal(name, &data, &data).is_some());
         }
+    }
+    #[test]
+    fn ecuc_folder_equality_checks_full_reference_semantics() {
+        let bytes = std::fs::read(format!("{}/tests/fixtures/ecuc/Can-v1.arxml", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let xml = String::from_utf8(bytes).unwrap();
+        for changed in [
+            xml.replace("DEST=\"ECUC-CONTAINER-VALUE\"", "DEST=\"OTHER\""),
+            xml.replace("/CanController/CanControllerId", "/Other/CanControllerId"),
+        ] {
+            assert_ne!(changed, xml);
+            assert_eq!(content_equal("Can.arxml", xml.as_bytes(), changed.as_bytes()), None);
+        }
+        let mixed =
+            xml.replace("</ELEMENTS>", "<SYSTEM><SHORT-NAME>S</SHORT-NAME><VALUE>1</VALUE></SYSTEM></ELEMENTS>");
+        assert_eq!(views_for("Mixed.arxml", mixed.as_bytes())[0], View::ArxmlStructure);
+        assert_eq!(
+            content_equal(
+                "Mixed.arxml",
+                mixed.as_bytes(),
+                mixed.replace("<VALUE>1</VALUE>", "<VALUE>2</VALUE>").as_bytes()
+            ),
+            None
+        );
+        let comment = b"<AUTOSAR><!-- ECUC-MODULE-CONFIGURATION-VALUES --><X>one</X></AUTOSAR>";
+        assert_eq!(views_for("System.arxml", comment)[0], View::ArxmlStructure);
+        assert_eq!(
+            content_equal(
+                "System.arxml",
+                comment,
+                &String::from_utf8_lossy(comment).replace("one", "two").into_bytes()
+            ),
+            None
+        );
+        let prefixed = b"<a:AUTOSAR xmlns:a='urn:autosar'><a:ELEMENTS><a:ECUC-MODULE-CONFIGURATION-VALUES><a:SHORT-NAME>M</a:SHORT-NAME></a:ECUC-MODULE-CONFIGURATION-VALUES></a:ELEMENTS></a:AUTOSAR>";
+        assert_eq!(views_for("Prefix.arxml", prefixed)[0], View::ArxmlStructure);
     }
 }

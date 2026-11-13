@@ -1201,6 +1201,32 @@ pub async fn open_file_diff(
             }
         }
 
+        // Equal simplified values do not imply equal AUTOSAR content. Show omitted
+        // differences by default, and explain the limitation for an explicitly chosen view.
+        if chosen == View::EcucValues && !identical
+            && matches!((&left_text, &right_text), (Some(Ok(l)), Some(Ok(r))) if l == r)
+        {
+            let (l, r) = std::thread::scope(|s| {
+                let l = s.spawn(|| render(&left_data, View::ArxmlStructure, 0));
+                let r = render(&right_data, View::ArxmlStructure, 1);
+                (l.join().ok().flatten(), r)
+            });
+            match (l, r) {
+                (Some(Ok(l)), Some(Ok(r))) if l != r => {
+                    note = Some("ECUC values match, but other AUTOSAR content differs. AUTOSAR structure shows full definitions, reference types, attributes and metadata.".into());
+                    if view.is_none() {
+                        chosen = View::ArxmlStructure;
+                        (left_text, right_text) = (Some(Ok(l)), Some(Ok(r)));
+                    }
+                }
+                // An incomplete full-tree comparison must not imply that the files match.
+                (Some(Err(e)), _) | (_, Some(Err(e))) => {
+                    note = Some(format!("ECUC values match; full AUTOSAR content could not be checked ({e}). Use Text to inspect all differences."));
+                }
+                _ => {}
+            }
+        }
+
         let make_doc = |data: &Option<Data>,
                         converted: Option<Result<String, String>>,
                         info: &mut SideInfo|
