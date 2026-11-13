@@ -1,6 +1,6 @@
 <script lang="ts">
   import { api } from "./api";
-  import { prConversations, reviewSummary, linesApply, type PrState } from "./prConversation.svelte";
+  import { prConversations, reviewSummary, linesApply, needsSignIn, type PrState } from "./prConversation.svelte";
   import ReviewDialog from "./ReviewDialog.svelte";
   import type { Snippet } from "svelte";
 
@@ -36,7 +36,7 @@
       return "github.com";
     }
   });
-  const signIn = $derived(!!pr.error && /auth|login|401|credential|token/i.test(pr.error));
+  const signIn = $derived(!!pr.error && needsSignIn(pr.error));
 </script>
 
 <div class="prbar" role="region" aria-label="Pull request">

@@ -23,11 +23,11 @@ async function fixture() {
   globalThis.__prTest = { api };
   const path = new URL(`store-${process.pid}-${sequence++}.mjs`, cache);
   await writeFile(path, compiled);
-  const { prConversations: store } = await import(path.href);
+  const { prConversations: store, needsSignIn } = await import(path.href);
   const round = () => { active = Object.fromEntries(['Conversation', 'Checks', 'Files'].map((part) => [part, deferred()])); rounds.push(active); return active; };
   const first = round();
   store.register(1, { url: 'https://github.com/fixture/repo/pull/1' }, 'head');
-  return { store, first, round, calls };
+  return { store, first, round, calls, needsSignIn };
 }
 
 test('comment errors are visible while independent CI and file requests are still pending', async () => {
@@ -95,4 +95,14 @@ test('sequential reply and resolve wait for fresh comments but never optional CI
   assert.equal(calls.filter((c) => c === 'Write').length, 2);
   for (const r of [replyRefresh, resolveRefresh]) { r.Checks.resolve(details); r.Files.resolve({ files: {}, truncated: false }); }
   await settle();
+});
+
+test('generic GitHub access advice cannot turn an unrelated read error into a sign-in diagnosis', async () => {
+  const { store, first, needsSignIn } = await fixture();
+  const advice = '. Check repository access and run `gh auth login --hostname github.com`.';
+  assert.equal(needsSignIn('gh request: temporary outage' + advice), false);
+  assert.equal(needsSignIn('helper output exceeded its memory limit' + advice), false);
+  assert.equal(needsSignIn('HTTP 401: Bad credentials' + advice), true);
+  assert.equal(needsSignIn('To get started, run gh auth login' + advice), true);
+  store.release(1); first.Conversation.resolve(conversation()); first.Checks.resolve(details); first.Files.resolve({ files: {}, truncated: false }); await settle();
 });

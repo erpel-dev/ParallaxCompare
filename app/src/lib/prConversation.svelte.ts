@@ -136,6 +136,11 @@ class PrConversations {
 
 export const prConversations = new PrConversations();
 
+/** Generic access advice is appended to all read failures; it is not an authentication diagnosis. */
+export function needsSignIn(message: string): boolean {
+  return /auth|login|401|credential|token/i.test(message.split("Check repository access and run")[0]);
+}
+
 /** Whether the comparison's head is the one the threads' lines refer to. */
 export const linesApply = (c: PrConversation) => c.head === c.pinnedHead;
 

@@ -135,7 +135,7 @@
 </div>
 
 <style>
-  .composer { border: 1px solid var(--accent); border-radius: 6px; background: var(--bg); display: grid; min-width: 0; cursor: default; }
+  .composer { border: 1px solid var(--accent); border-radius: 6px; background: var(--bg); display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; cursor: default; }
   .ch { display: flex; align-items: center; gap: 8px; padding: 3px 6px 3px 8px; border-bottom: 1px solid var(--line); font-size: 11.5px; }
   .h { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dim); }
   .tabs { display: inline-flex; }
@@ -143,7 +143,7 @@
   .tabs button:first-child { border-radius: 4px 0 0 4px; margin-left: 0; }
   .tabs button:last-child { border-radius: 0 4px 4px 0; }
   .tabs button.on { background: var(--sel); border-color: var(--accent); position: relative; }
-  textarea { border: none; outline: none; resize: vertical; min-height: 60px; padding: 6px 8px; background: var(--bg); color: var(--text); font-family: var(--mono); font-size: 11.5px; line-height: 1.5; }
+  textarea { border: none; outline: none; resize: vertical; min-width: 0; width: 100%; box-sizing: border-box; min-height: 60px; padding: 6px 8px; background: var(--bg); color: var(--text); font-family: var(--mono); font-size: 11.5px; line-height: 1.5; }
   .pv { padding: 6px 8px; min-height: 60px; line-height: 1.45; overflow-wrap: anywhere; font-size: 12px; }
   .pv :global(p) { margin: 0 0 6px; }
   .pv :global(code) { font-family: var(--mono); font-size: 11px; background: var(--panel); padding: 0 3px; border-radius: 3px; }
