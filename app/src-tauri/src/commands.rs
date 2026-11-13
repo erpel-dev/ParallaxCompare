@@ -349,6 +349,16 @@ pub async fn pull_request_conversation(
     blocking(move || parallax_core::pull_request::conversation(&url, &head).map_err(message)).await
 }
 
+/// CI data can finish or fail independently of comments.
+#[tauri::command]
+pub async fn pull_request_checks(url: String, head: String) -> CmdResult<parallax_core::pull_request::CheckDetails> {
+    blocking(move || parallax_core::pull_request::check_details(&url, &head).map_err(message)).await
+}
+#[tauri::command]
+pub async fn pull_request_files(url: String) -> CmdResult<parallax_core::pull_request::FileDetails> {
+    blocking(move || parallax_core::pull_request::file_details(&url).map_err(message)).await
+}
+
 /// Changes a pull request's conversation: a reply, a comment, resolving, editing or
 /// deleting a comment, or the viewer's pending review. Only on an explicit click.
 #[tauri::command]

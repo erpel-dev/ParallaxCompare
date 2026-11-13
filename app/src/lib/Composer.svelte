@@ -60,11 +60,15 @@
   }
 
   function key(e: KeyboardEvent) {
-    // The composer's keys stay in it: none of the comparison's shortcuts apply here.
+    // App navigation is global; typing/comparison keys stay inside the composer.
+    const mod = e.ctrlKey || e.metaKey;
+    const appKey = e.key === "F1" || (mod && (e.key.length === 1 && /[1-9]/.test(e.key) ||
+      ["t", "w", "k", "p", ",", "+", "=", "-", "_", "0", "Tab", "PageUp", "PageDown"].includes(e.key) || e.key === "Enter" && e.shiftKey));
+    if (appKey) return;
     e.stopPropagation();
     if (e.key === "Escape") {
       e.preventDefault();
-      cancel();
+      onCancel();
     } else if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
       e.preventDefault();
       const action = actions.find((a) => a.review) ?? actions.find((a) => a.primary);
@@ -74,6 +78,7 @@
 
   function cancel() {
     unsent.set(url, target, "");
+    text = "";
     onCancel();
   }
 
@@ -119,7 +124,7 @@
     <button class="sm" onclick={() => wrap("**")} title="Bold" aria-label="Bold"><b>B</b></button>
     <button class="sm" onclick={() => wrap("`")} title="Code" aria-label="Code">`c`</button>
     <span class="grow"></span>
-    <button class="sm" onclick={cancel} disabled={busy}>Cancel</button>
+    <button class="sm" onclick={cancel} disabled={busy} title="Deletes this saved draft">Discard draft</button>
     {#each actions as a (a.label)}
       <button class="sm" class:primary={a.primary} onclick={() => run(a)} disabled={empty || busy} title={a.title}>
         {a.label}{#if a.review}<span class="k">Ctrl+Enter</span>{/if}

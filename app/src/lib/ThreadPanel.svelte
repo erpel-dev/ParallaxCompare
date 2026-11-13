@@ -4,6 +4,7 @@
   import { ago, intoReview, linesApply, linesBlocked, prConversations } from "./prConversation.svelte";
   import { notify } from "./toast.svelte";
   import { ask } from "./confirm.svelte";
+  import { tick } from "svelte";
   import Composer, { type ComposerAction } from "./Composer.svelte";
 
   let {
@@ -55,12 +56,22 @@
   const sorted = (list: { thread: PrThread; index: number }[]) =>
     [...list].sort((a, b) => a.thread.path.localeCompare(b.thread.path) || (a.thread.line ?? a.thread.originalLine ?? 0) - (b.thread.line ?? b.thread.originalLine ?? 0));
 
-  // The selected row's thread comes into view in the panel.
+  const PAGE = 50;
+  let threadPage = $state(0), annotationPage = $state(0);
+  const view = $derived(`${data.url}:${path}:${scope}:${tab}`);
+  $effect(() => { void view; threadPage = annotationPage = 0; });
+  const ordered = $derived(sorted(tab === "conversation" ? [] : lists[tab]));
+  const threadStart = $derived(Math.min(threadPage, Math.max(0, Math.ceil(ordered.length / PAGE) - 1)) * PAGE);
+  const annotationStart = $derived(Math.min(annotationPage, Math.max(0, Math.ceil(annotations.length / PAGE) - 1)) * PAGE);
+  const visibleThreads = $derived(ordered.slice(threadStart, threadStart + PAGE));
+  const visibleAnnotations = $derived(annotations.slice(annotationStart, annotationStart + PAGE));
   $effect(() => {
     if (current === null || !el) return;
     const t = data.threads[current];
     if (t && !t.resolved && !t.outdated) tab = "open";
-    queueMicrotask(() => el?.querySelector(`[data-thread="${current}"]`)?.scrollIntoView({ block: "nearest" }));
+    const position = sorted(tab === "conversation" ? [] : lists[tab]).findIndex((entry) => entry.index === current);
+    if (position >= 0) threadPage = Math.floor(position / PAGE);
+    tick().then(() => el?.querySelector(`[data-thread="${current}"]`)?.scrollIntoView({ block: "nearest" }));
   });
 
   function where(t: PrThread): string {
@@ -76,10 +87,12 @@
 
   // ---- Writing ----
   const writable = $derived(session !== null && !!data.viewer && data.canComment);
-  const busy = $derived(session !== null && !!prConversations.busy[session]);
+  const readState = $derived(session === null ? undefined : prConversations.get(session));
+  const busy = $derived(session !== null && (!!prConversations.busy[session] || !!readState?.loading || !!readState?.error));
   const as = $derived(data.viewer ? ` as ${data.viewer}` : "");
-  /** The thread (index) with an open reply field, and the comment being edited (node ID). */
-  let replying = $state<number | null>(null);
+  /** Keep the original thread identity through refreshes and deletion. */
+  let replying = $state<PrThread | null>(null);
+  const missingReply = $derived(replying && !data.threads.some((t) => t.id === replying!.id) ? replying : null);
   let editing = $state<string | null>(null);
   const write = (change: PrWrite) => (session === null ? Promise.resolve(false) : prConversations.write(session, change));
 
@@ -91,7 +104,7 @@
     const t = data.threads[r.thread];
     if (t?.canReply && t.id) {
       if (t.resolved) tab = "resolved";
-      replying = r.thread;
+      replying = t;
     } else notify(t ? "You cannot reply to this thread" : "No thread at the selected line", "info");
   });
 
@@ -120,12 +133,12 @@
     ];
   }
 
-  function replyActions(index: number, t: PrThread): ComposerAction[] {
+  function replyActions(t: PrThread): ComposerAction[] {
     const comment = t.comments.find((c) => c.databaseId !== null)?.databaseId ?? 0;
     const send = (review: boolean, resolve = false) => async (text: string) => {
       let ok = await write({ kind: "reply", thread: t.id, comment, body: text, review: review ? intoReview(data) : null });
       if (ok && resolve) ok = await write({ kind: "resolve", thread: t.id, resolved: true });
-      if (ok && replying === index) replying = null;
+      if (ok && replying?.id === t.id) replying = null;
       return ok;
     };
     if (data.review)
@@ -259,7 +272,20 @@
         <p class="empty">No reviews or comments on the pull request as a whole.</p>
       {/each}
     {:else}
-      {#each sorted(lists[tab]) as { thread, index } (index)}
+      {#if missingReply}
+        <section class="orphan" role="status">
+          <p>The original reply thread is no longer available. Your draft is kept; it will not be sent to another thread.</p>
+          {#key missingReply.id}<Composer heading="Unsent reply · original thread unavailable" url={data.url} target="reply:{missingReply.id}" actions={[]} rows={3} onCancel={() => (replying = null)} />{/key}
+        </section>
+      {/if}
+      {#if ordered.length > PAGE}
+        <nav class="paging" aria-label="Review thread pages">
+          <button class="sm" disabled={threadStart === 0} onclick={() => (threadPage = threadStart / PAGE - 1)}>Previous threads</button>
+          <span>{threadStart + 1}–{Math.min(threadStart + PAGE, ordered.length)} of {ordered.length} threads</span>
+          <button class="sm" disabled={threadStart + PAGE >= ordered.length} onclick={() => (threadPage = threadStart / PAGE + 1)}>Next threads</button>
+        </nav>
+      {/if}
+      {#each visibleThreads as { thread, index } (thread.id || thread.comments[0]?.id || index)}
         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
         <div class="thread" class:cur={index === current} class:dimmed={tab !== "open"} data-thread={index} onclick={() => onGo(index)}>
           <div class="where">
@@ -273,11 +299,11 @@
           </div>
           {#each thread.comments as c, i (i)}{@render note(c, i > 0, thread.pending)}{/each}
           {#if writable && thread.id}
-            {#if replying === index}
-              <Composer heading="Reply{as}" url={data.url} target="reply:{thread.id}" {busy} rows={3} actions={replyActions(index, thread)} onCancel={() => (replying = null)} />
+            {#if replying?.id === thread.id}
+              <Composer heading="Reply{as}" url={data.url} target="reply:{thread.id}" {busy} rows={3} actions={replyActions(thread)} onCancel={() => (replying = null)} />
             {:else if !thread.pending || thread.canResolve || thread.canUnresolve}
               <div class="acts">
-                {#if thread.canReply}<button class="replybox" onclick={(e) => { e.stopPropagation(); replying = index; }} disabled={busy}>Reply…</button>{/if}
+                {#if thread.canReply}<button class="replybox" onclick={(e) => { e.stopPropagation(); replying = thread; }} disabled={busy}>Reply…</button>{/if}
                 {#if thread.canResolve && !thread.resolved}<button class="sm" onclick={(e) => { e.stopPropagation(); void write({ kind: "resolve", thread: thread.id, resolved: true }); }} disabled={busy} title="Marks the conversation as resolved on GitHub">✓ Resolve</button>{/if}
                 {#if thread.canUnresolve && thread.resolved}<button class="sm" onclick={(e) => { e.stopPropagation(); void write({ kind: "resolve", thread: thread.id, resolved: false }); }} disabled={busy}>Unresolve</button>{/if}
               </div>
@@ -286,7 +312,14 @@
         </div>
       {/each}
       {#if tab === "open"}
-        {#each annotations as a, i (i)}
+        {#if annotations.length > PAGE}
+          <nav class="paging" aria-label="CI finding pages">
+            <button class="sm" disabled={annotationStart === 0} onclick={() => (annotationPage = annotationStart / PAGE - 1)}>Previous findings</button>
+            <span>{annotationStart + 1}–{Math.min(annotationStart + PAGE, annotations.length)} of {annotations.length} CI findings</span>
+            <button class="sm" disabled={annotationStart + PAGE >= annotations.length} onclick={() => (annotationPage = annotationStart / PAGE + 1)}>Next findings</button>
+          </nav>
+        {/if}
+        {#each visibleAnnotations as a, i (annotationStart + i)}
           <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
           <div class="thread annotation" class:go={!!onAnnotation} onclick={() => onAnnotation?.(a)} title={onAnnotation ? "Show the line" : undefined}>
             <div class="where"><b>{#if a.path === ".github" || a.path === ""}{a.path || "repository"} · workflow{:else}{path === null ? `${a.path} · ` : ""}right {a.startLine}{a.endLine !== a.startLine ? `–${a.endLine}` : ""}{/if}</b><span class="sev {a.level}">{a.level === "failure" ? "Failure" : a.level === "warning" ? "Warning" : "Notice"}</span><span>{a.check}</span>{#if a.url}<button class="gh" onclick={(e) => { e.stopPropagation(); openLink(a.url!); }} title="Opens the check run on GitHub">Open check ↗</button>{/if}</div>
@@ -303,6 +336,9 @@
 </aside>
 
 <style>
+  .paging { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px; border-block: 1px solid var(--line); font-size: 11px; }
+  .orphan { padding: 8px; border: 1px solid var(--similar); }
+  .orphan p { font-size: 12px; margin: 0 0 8px; }
   .panel { width: 340px; flex: none; display: flex; flex-direction: column; min-height: 0; border-left: 1px solid var(--line); background: var(--panel-2); font-size: 12px; }
   header { display: grid; gap: 5px; padding: 5px 8px 6px; border-bottom: 1px solid var(--line); background: var(--panel); min-width: 0; }
   .top { display: flex; align-items: center; gap: 8px; min-width: 0; }

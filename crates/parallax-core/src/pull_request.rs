@@ -401,17 +401,20 @@ pub struct Checks {
 const THREAD_PAGES: u32 = 20;
 /// The checks of the compared commit and the findings (annotations) they left,
 /// in one request instead of one per check. At most 30 suites of 50 runs with
-/// 100 annotations each: GitHub's limit is 500 000 nodes per query.
+/// 20 annotations each: GitHub's limit is 500 000 nodes per query.
 const CHECKS_QUERY: &str = r#"query($owner: String!, $repo: String!, $oid: GitObjectID!) {
   repository(owner: $owner, name: $repo) {
     object(oid: $oid) {
       ... on Commit {
         checkSuites(first: 30) {
+          pageInfo { hasNextPage }
           nodes {
             checkRuns(first: 50) {
+              pageInfo { hasNextPage }
               nodes {
                 name status conclusion permalink
-                annotations(first: 100) {
+                annotations(first: 20) {
+                  pageInfo { hasNextPage }
                   nodes { path annotationLevel title message location { start { line } end { line } } }
                 }
               }
@@ -458,49 +461,70 @@ const CONVERSATION_QUERY: &str = r#"query($owner: String!, $repo: String!, $numb
 pub fn conversation(url: &str, pinned_head: &str) -> Result<Conversation> {
     let pr = PullRequestUrl::parse(url)?;
     commit_id(pinned_head)?;
-    let help = pr.access_help();
-    let result = conversation_with(
-        &pr,
-        pinned_head,
-        &|query, fields| {
-            let mut args = vec!["api".to_string(), "--hostname".into(), pr.host.clone(), "graphql".into()];
-            args.extend(field_args(&[("query", Field::Text(query.to_string()))]));
-            args.extend(field_args(fields));
-            let args: Vec<&str> = args.iter().map(String::as_str).collect();
-            let json = gh(&args).map_err(|e| bad(format!("cannot read the comments: {e}.{}", advice(&e, &help))))?;
-            serde_json::from_str(&json).map_err(|e| bad(format!("invalid API response: {e}")))
-        },
-        &|endpoint| {
-            let json = gh(&["api", "--hostname", &pr.host, "--method", "GET", endpoint])
-                .map_err(|e| bad(format!("cannot read {endpoint}: {e}")))?;
-            serde_json::from_str(&json).map_err(|e| bad(format!("invalid API response: {e}")))
-        },
-    );
-    result.map_err(|e| bad(format!("cannot read the conversation of {}: {e}", pr.url)))
+    read_conversation(&pr, pinned_head, &|query, fields| query_api(&pr, query, fields), &|endpoint| {
+        rest_api(&pr, endpoint)
+    })
+    .map_err(|e| bad(format!("cannot read the conversation of {}: {e}", pr.url)))
 }
 
-/// A GraphQL request (query and variables) and a REST GET, both callable from
-/// several threads: the conversation's requests are independent of each other.
+/// CI is independent of comments: optional reads must not delay comments or their errors.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckDetails {
+    pub checks: Checks,
+    pub annotations: Vec<Annotation>,
+    pub checks_truncated: bool,
+    pub annotations_truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileDetails {
+    pub files: BTreeMap<String, Commentable>,
+    pub truncated: bool,
+}
+
+pub fn check_details(url: &str, pinned_head: &str) -> Result<CheckDetails> {
+    let pr = PullRequestUrl::parse(url)?;
+    commit_id(pinned_head)?;
+    read_checks(&pr, pinned_head, &|query, fields| query_api(&pr, query, fields))
+}
+
+pub fn file_details(url: &str) -> Result<FileDetails> {
+    let pr = PullRequestUrl::parse(url)?;
+    read_files(&pr, &|endpoint| rest_api(&pr, endpoint))
+}
+
+fn query_api(pr: &PullRequestUrl, query: &str, fields: &[(&str, Field)]) -> Result<serde_json::Value> {
+    let mut args = vec!["api".to_string(), "--hostname".into(), pr.host.clone(), "graphql".into()];
+    args.extend(field_args(&[("query", Field::Text(query.to_string()))]));
+    args.extend(field_args(fields));
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let json = gh(&args).map_err(|e| bad(format!("cannot read GitHub data: {e}.{}", advice(&e, &pr.access_help()))))?;
+    serde_json::from_str(&json).map_err(|e| bad(format!("invalid API response: {e}")))
+}
+
+fn rest_api(pr: &PullRequestUrl, endpoint: &str) -> Result<serde_json::Value> {
+    let json = gh(&["api", "--hostname", &pr.host, "--method", "GET", endpoint])
+        .map_err(|e| bad(format!("cannot read {endpoint}: {e}")))?;
+    serde_json::from_str(&json).map_err(|e| bad(format!("invalid API response: {e}")))
+}
+
 type Query<'a> = dyn Fn(&str, &[(&str, Field)]) -> Result<serde_json::Value> + Sync + 'a;
 type Get<'a> = dyn Fn(&str) -> Result<serde_json::Value> + Sync + 'a;
 
+// Fixture integration helper; production requests each part independently.
+#[cfg(test)]
 fn conversation_with(pr: &PullRequestUrl, pinned_head: &str, graphql: &Query, rest: &Get) -> Result<Conversation> {
-    // The checks and the changed files do not depend on the comments: all three
-    // are read at the same time, each a round trip of a few hundred milliseconds.
-    std::thread::scope(|scope| {
-        let checks = scope.spawn(|| read_checks(pr, pinned_head, graphql));
-        let files = scope.spawn(|| read_files(pr, rest));
-        let mut conv = read_conversation(pr, pinned_head, graphql, rest)?;
-        if let Ok(Some((checks, annotations))) = checks.join() {
-            conv.checks = checks;
-            conv.annotations = annotations;
-        }
-        // The hunks are those of the current head; they fit only while it is the one compared.
-        if conv.head == pinned_head {
-            conv.files = files.join().unwrap_or_default();
-        }
-        Ok(conv)
-    })
+    let mut conv = read_conversation(pr, pinned_head, graphql, rest)?;
+    if let Ok(details) = read_checks(pr, pinned_head, graphql) {
+        conv.checks = details.checks;
+        conv.annotations = details.annotations;
+    }
+    if conv.head == pinned_head {
+        conv.files = read_files(pr, rest).map(|d| d.files).unwrap_or_default();
+    }
+    Ok(conv)
 }
 
 fn read_conversation(pr: &PullRequestUrl, pinned_head: &str, graphql: &Query, rest: &Get) -> Result<Conversation> {
@@ -716,73 +740,93 @@ fn read_conversation(pr: &PullRequestUrl, pinned_head: &str, graphql: &Query, re
 }
 
 /// Where GitHub accepts comments: the hunks of the pull request's diff, per file.
-fn read_files(pr: &PullRequestUrl, rest: &Get) -> BTreeMap<String, Commentable> {
+fn read_files(pr: &PullRequestUrl, rest: &Get) -> Result<FileDetails> {
     let mut files = BTreeMap::new();
     for page in 1..=FILE_PAGES {
-        let Ok(list) = rest(&format!("{}/pulls/{}/files?per_page=100&page={page}", pr.endpoint(), pr.number)) else {
-            break;
-        };
-        let list = list.as_array().cloned().unwrap_or_default();
-        for f in &list {
+        let list = rest(&format!("{}/pulls/{}/files?per_page=100&page={page}", pr.endpoint(), pr.number))?;
+        let list = list.as_array().ok_or_else(|| bad("invalid changed-files response"))?;
+        for f in list {
             let path = f.get("filename").and_then(serde_json::Value::as_str).unwrap_or_default();
             if !path.is_empty() {
                 files.insert(path.to_string(), hunks(f.get("patch").and_then(serde_json::Value::as_str).unwrap_or("")));
             }
         }
         if list.len() < 100 {
-            break;
+            return Ok(FileDetails { files, truncated: false });
         }
     }
-    files
+    Ok(FileDetails { files, truncated: true })
 }
 
-/// The checks of the compared commit and their findings, from one GraphQL request.
-/// None when CI cannot be read (no permission, no checks): the rest still shows.
-fn read_checks(pr: &PullRequestUrl, pinned_head: &str, graphql: &Query) -> Option<(Checks, Vec<Annotation>)> {
+/// Bound retained data as well as the query's per-run limit.
+const FINDINGS_LIMIT: usize = 2000;
+fn nodes(value: Option<&serde_json::Value>) -> &[serde_json::Value] {
+    value.and_then(|v| v.get("nodes")).and_then(serde_json::Value::as_array).map(Vec::as_slice).unwrap_or_default()
+}
+fn more(value: Option<&serde_json::Value>, limit: usize) -> bool {
+    value
+        .and_then(|v| v.pointer("/pageInfo/hasNextPage"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or_else(|| nodes(value).len() >= limit)
+}
+fn read_checks(pr: &PullRequestUrl, pinned_head: &str, graphql: &Query) -> Result<CheckDetails> {
     use serde_json::Value;
     let fields = [
         ("owner", Field::Text(pr.owner.clone())),
         ("repo", Field::Text(pr.repo.clone())),
         ("oid", Field::Text(pinned_head.to_string())),
     ];
-    let data = graphql(CHECKS_QUERY, &fields).and_then(graphql_ok).ok()?;
+    let data = graphql_ok(graphql(CHECKS_QUERY, &fields)?)?;
+    let suites = data
+        .pointer("/data/repository/object/checkSuites")
+        .filter(|v| v.is_object())
+        .ok_or_else(|| bad("CI checks are unavailable for the compared commit"))?;
     let text = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
-    let nodes =
-        |v: Option<&Value>| v.and_then(|v| v.get("nodes")).and_then(Value::as_array).cloned().unwrap_or_default();
-    let mut checks = Checks::default();
-    let mut annotations = Vec::new();
-    for suite in nodes(data.pointer("/data/repository/object/checkSuites")) {
-        for run in nodes(suite.get("checkRuns")) {
-            match (text(&run, "status").as_str(), text(&run, "conclusion").as_str()) {
-                ("COMPLETED", "SUCCESS" | "NEUTRAL" | "SKIPPED") => checks.passed += 1,
-                ("COMPLETED", _) => checks.failed += 1,
-                _ => checks.pending += 1,
+    let mut details = CheckDetails {
+        checks: Checks::default(),
+        annotations: Vec::new(),
+        checks_truncated: more(Some(suites), 30),
+        annotations_truncated: false,
+    };
+    for suite in nodes(Some(suites)) {
+        let runs = suite.get("checkRuns");
+        details.checks_truncated |= more(runs, 50);
+        for run in nodes(runs) {
+            match (text(run, "status").as_str(), text(run, "conclusion").as_str()) {
+                ("COMPLETED", "SUCCESS" | "NEUTRAL" | "SKIPPED") => details.checks.passed += 1,
+                ("COMPLETED", _) => details.checks.failed += 1,
+                _ => details.checks.pending += 1,
             }
+            details.annotations_truncated |= more(run.get("annotations"), 20);
             for a in nodes(run.get("annotations")) {
                 let line = |k: &str| {
                     a.pointer(&format!("/location/{k}/line"))
                         .and_then(Value::as_u64)
                         .and_then(|n| u32::try_from(n).ok())
                 };
-                let (path, Some(start)) = (text(&a, "path"), line("start")) else { continue };
+                let (path, Some(start)) = (text(a, "path"), line("start")) else { continue };
                 if path.is_empty() || start == 0 {
                     continue;
                 }
-                annotations.push(Annotation {
+                if details.annotations.len() == FINDINGS_LIMIT {
+                    details.annotations_truncated = true;
+                    continue;
+                }
+                details.annotations.push(Annotation {
                     path,
                     start_line: start,
                     end_line: line("end").unwrap_or(start).max(start),
-                    // FAILURE, WARNING, NOTICE: as the REST API and the app write them.
-                    level: text(&a, "annotationLevel").to_lowercase(),
+                    level: text(a, "annotationLevel").to_lowercase(),
                     title: a.get("title").and_then(Value::as_str).filter(|t| !t.is_empty()).map(str::to_string),
-                    message: text(&a, "message"),
-                    check: text(&run, "name"),
+                    message: text(a, "message"),
+                    check: text(run, "name"),
                     url: run.get("permalink").and_then(Value::as_str).map(str::to_string),
                 });
             }
         }
     }
-    Some((checks, annotations))
+    details.annotations_truncated |= details.checks_truncated;
+    Ok(details)
 }
 
 /// The severity a review bot marks a finding with, at the start of its comment.
@@ -1357,38 +1401,48 @@ mod tests {
     }
 
     #[test]
-    fn comments_checks_and_files_are_read_at_the_same_time() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::time::{Duration, Instant};
-        // Each request waits until all three have started: only possible if they run together.
-        let started = AtomicUsize::new(0);
-        let together = || {
-            started.fetch_add(1, Ordering::SeqCst);
-            let until = Instant::now() + Duration::from_secs(5);
-            while started.load(Ordering::SeqCst) < 3 {
-                assert!(Instant::now() < until, "the requests ran one after another");
-                std::thread::sleep(Duration::from_millis(5));
-            }
-        };
-        let page = json!({"data": {"repository": {"pullRequest": {"number": 42, "title": "T", "state": "OPEN",
-            "headRefOid": HEAD, "reviews": {"nodes": []}, "comments": {"nodes": []},
-            "reviewThreads": {"pageInfo": {"hasNextPage": false}, "nodes": []}}}}});
-        let began = Instant::now();
-        let conv = conversation_with(
+    fn comment_errors_do_not_wait_for_auxiliary_reads() {
+        let err = read_conversation(
             &pr(),
             HEAD,
             &|query, _| {
-                together();
-                if query.contains("checkSuites") { Ok(json!({"data": {}})) } else { Ok(page.clone()) }
+                assert!(!query.contains("checkSuites"));
+                Err(bad("comments denied"))
             },
-            &|_| {
-                together();
-                Ok(json!([]))
-            },
-        )
-        .unwrap();
-        assert_eq!(conv.number, 42);
-        assert!(began.elapsed() < Duration::from_secs(5));
+            &|_| panic!("independent reads"),
+        );
+        assert!(err.unwrap_err().to_string().contains("comments denied"));
+    }
+    #[test]
+    fn checks_report_errors_and_truncation() {
+        assert!(
+            read_checks(&pr(), HEAD, &|_, _| Ok(json!({"errors":[{"message":"CI denied"}]})))
+                .unwrap_err()
+                .to_string()
+                .contains("CI denied")
+        );
+        assert!(read_checks(&pr(), HEAD, &|_, _| Ok(json!({"data":{"repository":{"object":null}}}))).is_err());
+        let data = json!({"data":{"repository":{"object":{"checkSuites":{"pageInfo":{"hasNextPage":false},"nodes":[{"checkRuns":{"pageInfo":{"hasNextPage":true},"nodes":[{"name":"test","status":"COMPLETED","conclusion":"SUCCESS","annotations":{"nodes":[]}}]}}]}}}}});
+        let result = read_checks(&pr(), HEAD, &|_, _| Ok(data.clone())).unwrap();
+        assert_eq!(result.checks.passed, 1);
+        assert!(result.checks_truncated && result.annotations_truncated);
+    }
+    #[test]
+    fn findings_have_a_total_budget_without_losing_check_counts() {
+        let annotation = json!({"path":"a.rs","annotationLevel":"WARNING","message":"check this","location":{"start":{"line":1},"end":{"line":1}}});
+        let runs: Vec<_> = (0..120).map(|_| json!({"status":"COMPLETED","conclusion":"SUCCESS","annotations":{"pageInfo":{"hasNextPage":true},"nodes":vec![annotation.clone();20]}})).collect();
+        let data = json!({"data":{"repository":{"object":{"checkSuites":{"pageInfo":{"hasNextPage":false},"nodes":[{"checkRuns":{"pageInfo":{"hasNextPage":false},"nodes":runs}}]}}}}});
+        let result = read_checks(&pr(), HEAD, &|_, _| Ok(data.clone())).unwrap();
+        assert_eq!(result.checks.passed, 120);
+        assert_eq!(result.annotations.len(), FINDINGS_LIMIT);
+        assert!(!result.checks_truncated && result.annotations_truncated);
+    }
+    #[test]
+    fn file_metadata_errors_are_not_empty_successes() {
+        assert!(read_files(&pr(), &|_| Err(bad("files denied"))).is_err());
+        assert!(read_files(&pr(), &|_| Ok(json!({"message":"unexpected"}))).is_err());
+        let data = read_files(&pr(), &|_| Ok(json!([]))).unwrap();
+        assert!(!data.truncated && data.files.is_empty());
     }
 
     #[test]

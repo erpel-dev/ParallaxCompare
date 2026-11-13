@@ -57,6 +57,8 @@ fn main() {
             commands::rows_text,
             commands::rows_of_lines,
             commands::pull_request_conversation,
+            commands::pull_request_checks,
+            commands::pull_request_files,
             commands::open_pull_request_link,
             commands::open_pull_request_lines,
             commands::pull_request_write,

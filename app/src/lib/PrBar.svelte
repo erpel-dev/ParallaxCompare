@@ -49,9 +49,9 @@
       </span>
     {/each}
     {#if bots}<span class="pill dim" title="Review bots that commented">{bots} {bots === 1 ? "bot" : "bots"}</span>{/if}
-    {#if totalChecks}
-      <span class="pill" class:ok={!checks!.failed && !checks!.pending} class:bad={checks!.failed > 0} title="{checks!.passed} passed, {checks!.failed} failed, {checks!.pending} running, on the compared head">
-        Checks {checks!.passed} / {totalChecks}
+    {#if totalChecks || pr.checksTruncated}
+      <span class="pill" class:ok={!checks!.failed && !checks!.pending && !pr.checksTruncated && !pr.checksLoading && !pr.checksError} class:bad={checks!.failed > 0} title="{checks!.passed} passed, {checks!.failed} failed, {checks!.pending} running, on the compared head">
+        Checks {checks!.passed} / {totalChecks}{#if pr.checksTruncated}{" "}shown · partial{/if}
       </span>
     {/if}
     {#if onPanel}
@@ -63,16 +63,25 @@
       <span class="review" title="Your pending review: only you see it until you submit; it is the same one GitHub shows in the browser">
         Your review · {data.review.comments} pending
       </span>
-      <button class="small primary" onclick={() => (prConversations.reviewing = session)} title="Submit or discard your review (Ctrl+Shift+Enter)">Finish review ›</button>
+      <button class="small primary" onclick={() => (prConversations.reviewing = session)} disabled={pr.loading || !!pr.error} title="Submit or discard your review (Ctrl+Shift+Enter)">Finish review ›</button>
     {:else if data.viewer && data.canComment}
-      <button class="small" onclick={() => (prConversations.reviewing = session)} title="Approve, request changes or comment on the pull request as a whole (Ctrl+Shift+Enter)">Review…</button>
+      <button class="small" onclick={() => (prConversations.reviewing = session)} disabled={pr.loading || !!pr.error} title="Approve, request changes or comment on the pull request as a whole (Ctrl+Shift+Enter)">Review…</button>
     {/if}
     {@render extra?.()}
   {:else if pr.loading}
     <span class="dim">Reading comments and reviews…</span>
-  {:else if pr.error}
-    <span class="err" title={pr.error}>{signIn ? `Comments need gh signed in: gh auth login --hostname ${host}` : "Comments could not be read."}</span>
   {/if}
+  {#if pr.error}<span class="err" role="status" title={pr.error}>{signIn ? `Comments need gh signed in: gh auth login --hostname ${host}` : data ? "Comments refresh failed; previous results shown." : "Comments could not be read."}</span>
+  {:else if data && pr.loading}<span class="dim" role="status">Refreshing comments…</span>{/if}
+  {#if pr.checksLoading}<span class="dim" role="status">Reading CI…</span>{/if}
+  {#if pr.checksError}<span class="err" role="status" title={pr.checksError}>CI unavailable{#if totalChecks || ci}; previous results shown{/if}.</span>{/if}
+  {#if pr.checksTruncated || pr.annotationsTruncated}<span class="moved" role="status">{pr.checksTruncated ? "Check results are incomplete." : "Some CI findings are omitted."} Open on GitHub for all results.</span>{/if}
+  {#if data && linesApply(data)}
+    {#if pr.filesLoading}<span class="dim" role="status">Preparing line comments…</span>{/if}
+    {#if pr.filesError}<span class="err" role="status" title={pr.filesError}>Changed files could not be read; line comments are unavailable.</span>{/if}
+    {#if pr.filesTruncated}<span class="moved" role="status">Some changed files are omitted; line comments cover loaded files only.</span>{/if}
+  {/if}
+  {#if pr.error || pr.checksError || pr.filesError}<button class="small" onclick={() => prConversations.load(session)} disabled={pr.loading}>Retry</button>{/if}
   <span class="grow"></span>
   {#if data && !linesApply(data)}
     <span class="moved" title="Comments placed on lines refer to the new head; they are listed, not placed, here.">The pull request has a newer head.</span>
