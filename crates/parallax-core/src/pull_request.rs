@@ -175,6 +175,7 @@ pub fn resolve(input: &str) -> Result<PullRequestComparison> {
             Ok(commit)
         },
         &mut || gh(&["config", "get", "git_protocol", "--host", &pr.host]).is_ok_and(|v| v.trim() == "ssh"),
+        &mut |url, ids| crate::remote::fetch_commits(url, ids),
     );
     result.map_err(|e| bad(format!("cannot open {}: {e}", pr.url)))
 }
@@ -184,6 +185,7 @@ fn resolve_with(
     api: &mut dyn FnMut(&str) -> Result<serde_json::Value>,
     fetch: &mut dyn FnMut(&str, &str) -> Result<String>,
     prefer_ssh: &mut dyn FnMut() -> bool,
+    prefetch: &mut dyn FnMut(&str, &[&str]) -> Result<()>,
 ) -> Result<PullRequestComparison> {
     let pull: Pull = serde_json::from_value(api(&format!("{}/pulls/{}", pr.endpoint(), pr.number))?)
         .map_err(|e| bad(format!("invalid pull request response: {e}")))?;
@@ -227,6 +229,9 @@ fn resolve_with(
     let access_error = |role: &str, error: Error| {
         bad(format!("Git cannot fetch the {role} from {clone}: {error}.{}", advice(&error, &pr.access_help())))
     };
+    // Both commits in one fetch, about half the time of two. If that fails (an
+    // unreachable head, say), the fetches below get them one by one, with fallbacks.
+    let _ = prefetch(&clone, &[&base, &pull.head.sha]);
     let fetched = fetch(&clone, &base).map_err(|e| access_error("merge base", e))?;
     if fetched != base {
         return Err(bad("Git fetched a different merge-base commit"));
@@ -394,8 +399,29 @@ pub struct Checks {
 
 /// GraphQL pages of 100 review threads read at most.
 const THREAD_PAGES: u32 = 20;
-/// Check runs whose annotations are read at most.
-const ANNOTATED_RUNS: usize = 30;
+/// The checks of the compared commit and the findings (annotations) they left,
+/// in one request instead of one per check. At most 30 suites of 50 runs with
+/// 100 annotations each: GitHub's limit is 500 000 nodes per query.
+const CHECKS_QUERY: &str = r#"query($owner: String!, $repo: String!, $oid: GitObjectID!) {
+  repository(owner: $owner, name: $repo) {
+    object(oid: $oid) {
+      ... on Commit {
+        checkSuites(first: 30) {
+          nodes {
+            checkRuns(first: 50) {
+              nodes {
+                name status conclusion permalink
+                annotations(first: 100) {
+                  nodes { path annotationLevel title message location { start { line } end { line } } }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}"#;
 
 /// Pages of 100 changed files read for the commentable lines at most.
 const FILE_PAGES: u32 = 30;
@@ -433,24 +459,18 @@ pub fn conversation(url: &str, pinned_head: &str) -> Result<Conversation> {
     let pr = PullRequestUrl::parse(url)?;
     commit_id(pinned_head)?;
     let help = pr.access_help();
-    let number = pr.number.to_string();
     let result = conversation_with(
         &pr,
         pinned_head,
-        &mut |after| {
-            let query = format!("query={CONVERSATION_QUERY}");
-            let (owner, repo, number) =
-                (format!("owner={}", pr.owner), format!("repo={}", pr.repo), format!("number={number}"));
-            let after = after.map(|a| format!("after={a}"));
-            let mut args =
-                vec!["api", "--hostname", &pr.host, "graphql", "-f", &query, "-f", &owner, "-f", &repo, "-F", &number];
-            if let Some(a) = &after {
-                args.extend(["-f", a.as_str()]);
-            }
+        &|query, fields| {
+            let mut args = vec!["api".to_string(), "--hostname".into(), pr.host.clone(), "graphql".into()];
+            args.extend(field_args(&[("query", Field::Text(query.to_string()))]));
+            args.extend(field_args(fields));
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
             let json = gh(&args).map_err(|e| bad(format!("cannot read the comments: {e}.{}", advice(&e, &help))))?;
             serde_json::from_str(&json).map_err(|e| bad(format!("invalid API response: {e}")))
         },
-        &mut |endpoint| {
+        &|endpoint| {
             let json = gh(&["api", "--hostname", &pr.host, "--method", "GET", endpoint])
                 .map_err(|e| bad(format!("cannot read {endpoint}: {e}")))?;
             serde_json::from_str(&json).map_err(|e| bad(format!("invalid API response: {e}")))
@@ -459,12 +479,31 @@ pub fn conversation(url: &str, pinned_head: &str) -> Result<Conversation> {
     result.map_err(|e| bad(format!("cannot read the conversation of {}: {e}", pr.url)))
 }
 
-fn conversation_with(
-    pr: &PullRequestUrl,
-    pinned_head: &str,
-    graphql: &mut dyn FnMut(Option<&str>) -> Result<serde_json::Value>,
-    rest: &mut dyn FnMut(&str) -> Result<serde_json::Value>,
-) -> Result<Conversation> {
+/// A GraphQL request (query and variables) and a REST GET, both callable from
+/// several threads: the conversation's requests are independent of each other.
+type Query<'a> = dyn Fn(&str, &[(&str, Field)]) -> Result<serde_json::Value> + Sync + 'a;
+type Get<'a> = dyn Fn(&str) -> Result<serde_json::Value> + Sync + 'a;
+
+fn conversation_with(pr: &PullRequestUrl, pinned_head: &str, graphql: &Query, rest: &Get) -> Result<Conversation> {
+    // The checks and the changed files do not depend on the comments: all three
+    // are read at the same time, each a round trip of a few hundred milliseconds.
+    std::thread::scope(|scope| {
+        let checks = scope.spawn(|| read_checks(pr, pinned_head, graphql));
+        let files = scope.spawn(|| read_files(pr, rest));
+        let mut conv = read_conversation(pr, pinned_head, graphql, rest)?;
+        if let Ok(Some((checks, annotations))) = checks.join() {
+            conv.checks = checks;
+            conv.annotations = annotations;
+        }
+        // The hunks are those of the current head; they fit only while it is the one compared.
+        if conv.head == pinned_head {
+            conv.files = files.join().unwrap_or_default();
+        }
+        Ok(conv)
+    })
+}
+
+fn read_conversation(pr: &PullRequestUrl, pinned_head: &str, graphql: &Query, rest: &Get) -> Result<Conversation> {
     use serde_json::Value;
     let text = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
     let author = |v: &Value| -> (Option<String>, bool) {
@@ -501,7 +540,15 @@ fn conversation_with(
     let mut pending_db: Option<u64> = None;
     let mut pending_ids: Vec<String> = Vec::new();
     for page in 0..THREAD_PAGES {
-        let data = graphql(after.as_deref())?;
+        let mut fields = vec![
+            ("owner", Field::Text(pr.owner.clone())),
+            ("repo", Field::Text(pr.repo.clone())),
+            ("number", Field::Number(pr.number)),
+        ];
+        if let Some(a) = &after {
+            fields.push(("after", Field::Text(a.clone())));
+        }
+        let data = graphql(CONVERSATION_QUERY, &fields)?;
         if let Some(errors) = data.get("errors").and_then(Value::as_array).filter(|e| !e.is_empty()) {
             let message = errors.iter().filter_map(|e| e.get("message").and_then(Value::as_str)).collect::<Vec<_>>();
             return Err(bad(message.join("; ")));
@@ -664,67 +711,78 @@ fn conversation_with(
     }
     conv.threads = threads;
 
-    // Where GitHub accepts comments: the hunks of the pull request's diff, which
-    // is the merge base against the current head; only useful while that is the one compared.
-    if conv.head == pinned_head {
-        'pages: for page in 1..=FILE_PAGES {
-            let Ok(list) = rest(&format!("{}/pulls/{}/files?per_page=100&page={page}", pr.endpoint(), pr.number))
-            else {
-                break;
-            };
-            let list = list.as_array().cloned().unwrap_or_default();
-            for f in &list {
-                let path = text(f, "filename");
-                if !path.is_empty() {
-                    conv.files.insert(path, hunks(f.get("patch").and_then(Value::as_str).unwrap_or("")));
-                }
+    conv.truncated = truncated;
+    Ok(conv)
+}
+
+/// Where GitHub accepts comments: the hunks of the pull request's diff, per file.
+fn read_files(pr: &PullRequestUrl, rest: &Get) -> BTreeMap<String, Commentable> {
+    let mut files = BTreeMap::new();
+    for page in 1..=FILE_PAGES {
+        let Ok(list) = rest(&format!("{}/pulls/{}/files?per_page=100&page={page}", pr.endpoint(), pr.number)) else {
+            break;
+        };
+        let list = list.as_array().cloned().unwrap_or_default();
+        for f in &list {
+            let path = f.get("filename").and_then(serde_json::Value::as_str).unwrap_or_default();
+            if !path.is_empty() {
+                files.insert(path.to_string(), hunks(f.get("patch").and_then(serde_json::Value::as_str).unwrap_or("")));
             }
-            if list.len() < 100 {
-                break 'pages;
-            }
+        }
+        if list.len() < 100 {
+            break;
         }
     }
+    files
+}
 
-    // Checks and their annotations, on the head that is compared. CI that cannot
-    // be read (no permission, no checks) leaves the rest of the conversation.
-    if let Ok(runs) = rest(&format!("{}/commits/{pinned_head}/check-runs?per_page=100", pr.endpoint())) {
-        let runs = runs.get("check_runs").and_then(Value::as_array).cloned().unwrap_or_default();
-        for run in &runs {
-            let status = text(run, "status");
-            match (status.as_str(), run.get("conclusion").and_then(Value::as_str)) {
-                ("completed", Some("success" | "neutral" | "skipped")) => conv.checks.passed += 1,
-                ("completed", _) => conv.checks.failed += 1,
-                _ => conv.checks.pending += 1,
+/// The checks of the compared commit and their findings, from one GraphQL request.
+/// None when CI cannot be read (no permission, no checks): the rest still shows.
+fn read_checks(pr: &PullRequestUrl, pinned_head: &str, graphql: &Query) -> Option<(Checks, Vec<Annotation>)> {
+    use serde_json::Value;
+    let fields = [
+        ("owner", Field::Text(pr.owner.clone())),
+        ("repo", Field::Text(pr.repo.clone())),
+        ("oid", Field::Text(pinned_head.to_string())),
+    ];
+    let data = graphql(CHECKS_QUERY, &fields).and_then(graphql_ok).ok()?;
+    let text = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+    let nodes =
+        |v: Option<&Value>| v.and_then(|v| v.get("nodes")).and_then(Value::as_array).cloned().unwrap_or_default();
+    let mut checks = Checks::default();
+    let mut annotations = Vec::new();
+    for suite in nodes(data.pointer("/data/repository/object/checkSuites")) {
+        for run in nodes(suite.get("checkRuns")) {
+            match (text(&run, "status").as_str(), text(&run, "conclusion").as_str()) {
+                ("COMPLETED", "SUCCESS" | "NEUTRAL" | "SKIPPED") => checks.passed += 1,
+                ("COMPLETED", _) => checks.failed += 1,
+                _ => checks.pending += 1,
             }
-        }
-        let annotated =
-            runs.iter().filter(|r| r.pointer("/output/annotations_count").and_then(Value::as_u64).unwrap_or(0) > 0);
-        for run in annotated.take(ANNOTATED_RUNS) {
-            let Some(id) = run.get("id").and_then(Value::as_u64) else { continue };
-            let Ok(list) = rest(&format!("{}/check-runs/{id}/annotations?per_page=100", pr.endpoint())) else {
-                continue;
-            };
-            for a in list.as_array().into_iter().flatten() {
-                let line = |k: &str| a.get(k).and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok()).unwrap_or(0);
-                let path = text(a, "path");
-                if path.is_empty() || line("start_line") == 0 {
+            for a in nodes(run.get("annotations")) {
+                let line = |k: &str| {
+                    a.pointer(&format!("/location/{k}/line"))
+                        .and_then(Value::as_u64)
+                        .and_then(|n| u32::try_from(n).ok())
+                };
+                let (path, Some(start)) = (text(&a, "path"), line("start")) else { continue };
+                if path.is_empty() || start == 0 {
                     continue;
                 }
-                conv.annotations.push(Annotation {
+                annotations.push(Annotation {
                     path,
-                    start_line: line("start_line"),
-                    end_line: line("end_line").max(line("start_line")),
-                    level: text(a, "annotation_level"),
+                    start_line: start,
+                    end_line: line("end").unwrap_or(start).max(start),
+                    // FAILURE, WARNING, NOTICE: as the REST API and the app write them.
+                    level: text(&a, "annotationLevel").to_lowercase(),
                     title: a.get("title").and_then(Value::as_str).filter(|t| !t.is_empty()).map(str::to_string),
-                    message: text(a, "message"),
-                    check: text(run, "name"),
-                    url: run.get("html_url").and_then(Value::as_str).map(str::to_string),
+                    message: text(&a, "message"),
+                    check: text(&run, "name"),
+                    url: run.get("permalink").and_then(Value::as_str).map(str::to_string),
                 });
             }
         }
     }
-    conv.truncated = truncated;
-    Ok(conv)
+    Some((checks, annotations))
 }
 
 /// The severity a review bot marks a finding with, at the start of its comment.
@@ -1151,7 +1209,7 @@ mod tests {
                 "reviewThreads": {"pageInfo": {"hasNextPage": next.is_some(), "endCursor": next}, "nodes": threads}
             }}}})
         };
-        let mut pages = vec![
+        let pages = vec![
             page(
                 vec![thread(
                     "src/a.rs",
@@ -1166,31 +1224,36 @@ mod tests {
             page(vec![thread("src/b.rs", json!(null), "LEFT", true, "Old remark", who("bob", "User"))], None),
         ]
         .into_iter();
-        let mut afters = Vec::new();
+        let pages = std::sync::Mutex::new(pages);
+        let afters = std::sync::Mutex::new(Vec::new());
+        let annotation = json!({"path": "src/a.rs", "annotationLevel": "WARNING", "title": "", "message": "too many arguments",
+            "location": {"start": {"line": 20}, "end": {"line": 20}}});
+        let runs = json!([
+            {"name": "clippy", "status": "COMPLETED", "conclusion": "FAILURE", "permalink": "https://github.company.example/r/7",
+             "annotations": {"nodes": [annotation]}},
+            {"name": "test", "status": "IN_PROGRESS", "conclusion": null, "annotations": {"nodes": []}}]);
+        let checks =
+            json!({"data": {"repository": {"object": {"checkSuites": {"nodes": [{"checkRuns": {"nodes": runs}}]}}}}});
         let conv = conversation_with(
             &pr(),
             HEAD,
-            &mut |after| {
-                afters.push(after.map(str::to_string));
-                Ok(pages.next().unwrap())
-            },
-            &mut |endpoint| {
-                if endpoint.ends_with("/check-runs?per_page=100") {
-                    assert_eq!(endpoint, format!("repos/team/project/commits/{HEAD}/check-runs?per_page=100"));
-                    Ok(json!({"check_runs": [
-                        {"id": 7, "name": "clippy", "status": "completed", "conclusion": "failure", "html_url": "https://github.company.example/r/7", "output": {"annotations_count": 1}},
-                        {"id": 8, "name": "test", "status": "in_progress", "conclusion": null, "output": {"annotations_count": 0}}]}))
-                } else if endpoint.contains("/files?") {
-                    Ok(json!([]))
-                } else {
-                    assert_eq!(endpoint, "repos/team/project/check-runs/7/annotations?per_page=100");
-                    Ok(json!([{"path": "src/a.rs", "start_line": 20, "end_line": 20, "annotation_level": "warning",
-                               "title": "", "message": "too many arguments"}]))
+            &|query, fields| {
+                if query.contains("checkSuites") {
+                    assert!(fields.contains(&("oid", Field::Text(HEAD.into()))));
+                    return Ok(checks.clone());
                 }
+                assert!(fields.contains(&("number", Field::Number(42))));
+                let after = fields.iter().find(|(k, _)| *k == "after").map(|(_, v)| v.clone());
+                afters.lock().unwrap().push(after);
+                Ok(pages.lock().unwrap().next().unwrap())
+            },
+            &|endpoint| {
+                assert!(endpoint.contains("/files?"), "{endpoint}");
+                Ok(json!([]))
             },
         )
         .unwrap();
-        assert_eq!(afters, [None, Some("c1".to_string())]);
+        assert_eq!(afters.into_inner().unwrap(), [None, Some(Field::Text("c1".into()))]);
         assert_eq!(
             (conv.title.as_str(), conv.author.as_deref(), conv.head.as_str()),
             ("Change calibration", Some("alice"), HEAD)
@@ -1206,7 +1269,12 @@ mod tests {
         assert_eq!((b.side, b.line, b.original_line, b.outdated), ("left", None, Some(7), true));
         assert_eq!(conv.checks, Checks { passed: 0, failed: 1, pending: 1 });
         assert_eq!(conv.annotations.len(), 1);
-        assert_eq!((conv.annotations[0].check.as_str(), conv.annotations[0].title.as_deref()), ("clippy", None));
+        let a = &conv.annotations[0];
+        assert_eq!(
+            (a.check.as_str(), a.title.as_deref(), a.level.as_str(), a.start_line),
+            ("clippy", None, "warning", 20)
+        );
+        assert_eq!(a.url.as_deref(), Some("https://github.company.example/r/7"));
         assert!(!conv.truncated);
     }
 
@@ -1228,20 +1296,30 @@ mod tests {
             "comments": {"pageInfo": {"hasNextPage": false}, "nodes": []},
             "reviewThreads": {"pageInfo": {"hasNextPage": false, "endCursor": null}, "nodes": [thread]}});
         let page = json!({"data": {"viewer": {"login": "dave"}, "repository": {"viewerPermission": "READ", "pullRequest": pull}}});
-        let mut endpoints = Vec::new();
-        let conv = conversation_with(&pr(), HEAD, &mut |_| Ok(page.clone()), &mut |endpoint| {
-            endpoints.push(endpoint.to_string());
-            if endpoint.contains("/reviews/9/comments") {
-                Ok(json!([{"node_id": "C_2", "id": 102, "path": "src/b.rs", "line": null, "side": "RIGHT",
+        let endpoints = std::sync::Mutex::new(Vec::new());
+        let conv = conversation_with(
+            &pr(),
+            HEAD,
+            &|query, _| {
+                // CI that cannot be read leaves the rest.
+                if query.contains("checkSuites") { Err(bad("no checks")) } else { Ok(page.clone()) }
+            },
+            &|endpoint| {
+                endpoints.lock().unwrap().push(endpoint.to_string());
+                if endpoint.contains("/reviews/9/comments") {
+                    Ok(json!([{"node_id": "C_2", "id": 102, "path": "src/b.rs", "line": null, "side": "RIGHT",
                     "subject_type": "file", "body": "Split this file", "created_at": "t", "html_url": "u",
                     "user": {"login": "dave", "type": "User"}}]))
-            } else if endpoint.contains("/files?") {
-                Ok(json!([{"filename": "src/a.rs", "patch": "@@ -1,3 +1,5 @@\n a\n+b"}, {"filename": "logo.png"}]))
-            } else {
-                Err(bad("no checks"))
-            }
-        })
+                } else if endpoint.contains("/files?") {
+                    Ok(json!([{"filename": "src/a.rs", "patch": "@@ -1,3 +1,5 @@\n a\n+b"}, {"filename": "logo.png"}]))
+                } else {
+                    Err(bad("unexpected"))
+                }
+            },
+        )
         .unwrap();
+        let endpoints = endpoints.into_inner().unwrap();
+        assert_eq!((conv.checks.clone(), conv.annotations.len()), (Checks::default(), 0));
         assert_eq!(
             (conv.id.as_str(), conv.viewer.as_deref(), conv.can_comment, conv.own),
             ("PR_42", Some("dave"), true, false)
@@ -1266,13 +1344,51 @@ mod tests {
         assert!(endpoints.iter().any(|e| e == "repos/team/project/pulls/42/files?per_page=100&page=1"));
 
         // A newer head: lines of the compared one are not commentable, so not read.
-        let mut endpoints = Vec::new();
-        let conv = conversation_with(&pr(), TARGET, &mut |_| Ok(page.clone()), &mut |endpoint| {
-            endpoints.push(endpoint.to_string());
-            Ok(json!([]))
+        // (They are read at the same time as the comments, then left out.)
+        let conv = conversation_with(&pr(), TARGET, &|_, _| Ok(page.clone()), &|endpoint| {
+            Ok(if endpoint.contains("/files?") {
+                json!([{"filename": "src/a.rs", "patch": "@@ -1 +1 @@"}])
+            } else {
+                json!([])
+            })
         })
         .unwrap();
-        assert!(conv.files.is_empty() && !endpoints.iter().any(|e| e.contains("/files?")));
+        assert!(conv.files.is_empty());
+    }
+
+    #[test]
+    fn comments_checks_and_files_are_read_at_the_same_time() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::{Duration, Instant};
+        // Each request waits until all three have started: only possible if they run together.
+        let started = AtomicUsize::new(0);
+        let together = || {
+            started.fetch_add(1, Ordering::SeqCst);
+            let until = Instant::now() + Duration::from_secs(5);
+            while started.load(Ordering::SeqCst) < 3 {
+                assert!(Instant::now() < until, "the requests ran one after another");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let page = json!({"data": {"repository": {"pullRequest": {"number": 42, "title": "T", "state": "OPEN",
+            "headRefOid": HEAD, "reviews": {"nodes": []}, "comments": {"nodes": []},
+            "reviewThreads": {"pageInfo": {"hasNextPage": false}, "nodes": []}}}}});
+        let began = Instant::now();
+        let conv = conversation_with(
+            &pr(),
+            HEAD,
+            &|query, _| {
+                together();
+                if query.contains("checkSuites") { Ok(json!({"data": {}})) } else { Ok(page.clone()) }
+            },
+            &|_| {
+                together();
+                Ok(json!([]))
+            },
+        )
+        .unwrap();
+        assert_eq!(conv.number, 42);
+        assert!(began.elapsed() < Duration::from_secs(5));
     }
 
     #[test]
@@ -1407,8 +1523,8 @@ mod tests {
         let err = conversation_with(
             &pr(),
             HEAD,
-            &mut |_| Ok(json!({"errors": [{"message": "Could not resolve to a Repository"}]})),
-            &mut |_| unreachable!(),
+            &|_, _| Ok(json!({"errors": [{"message": "Could not resolve to a Repository"}]})),
+            &|_| Ok(json!([])),
         )
         .unwrap_err();
         assert!(err.to_string().contains("Could not resolve"), "{err}");
@@ -1467,6 +1583,7 @@ mod tests {
                 Ok(rev.to_string())
             },
             &mut || false,
+            &mut |_, _| Ok(()),
         )
         .unwrap();
         let expected = |sha: &str| SourceSpec::GitRev {
@@ -1483,6 +1600,31 @@ mod tests {
     }
 
     #[test]
+    fn fetches_both_commits_together_and_falls_back_one_by_one() {
+        for works in [true, false] {
+            let mut together = Vec::new();
+            let mut single = Vec::new();
+            let result = resolve_with(
+                &pr(),
+                &mut api,
+                &mut |_, rev| {
+                    single.push(rev.to_string());
+                    Ok(rev.to_string())
+                },
+                &mut || false,
+                &mut |_, ids| {
+                    together.push(ids.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+                    if works { Ok(()) } else { Err(bad("not our ref")) }
+                },
+            );
+            assert!(result.is_ok());
+            assert_eq!(together, [vec![BASE.to_string(), HEAD.to_string()]]);
+            // The one-by-one fetches find them (in the app, without the network), or fetch them.
+            assert_eq!(single, [BASE, HEAD]);
+        }
+    }
+
+    #[test]
     fn respects_the_hosts_ssh_protocol_preference() {
         let result = resolve_with(
             &pr(),
@@ -1492,6 +1634,7 @@ mod tests {
                 Ok(rev.into())
             },
             &mut || true,
+            &mut |_, _| Ok(()),
         )
         .unwrap();
         assert!(matches!(result.right, SourceSpec::GitRev { repo, .. } if repo.starts_with("git@")));
@@ -1515,6 +1658,7 @@ mod tests {
                     }
                 },
                 &mut || false,
+                &mut |_, _| Ok(()),
             );
             assert_eq!(refs, [BASE, HEAD, "refs/pull/42/head"]);
             if moved {
@@ -1527,9 +1671,10 @@ mod tests {
 
     #[test]
     fn fetch_errors_name_the_repo_and_explain_git_authentication() {
-        let error = resolve_with(&pr(), &mut api, &mut |_, _| Err(bad("Permission denied")), &mut || false)
-            .unwrap_err()
-            .to_string();
+        let error =
+            resolve_with(&pr(), &mut api, &mut |_, _| Err(bad("Permission denied")), &mut || false, &mut |_, _| Ok(()))
+                .unwrap_err()
+                .to_string();
         for text in [
             "merge base",
             "https://github.company.example/team/project.git",
@@ -1547,6 +1692,7 @@ mod tests {
                 if rev == BASE { Ok(BASE.into()) } else { Err(bad("Git repository not found")) }
             },
             &mut || false,
+            &mut |_, _| Ok(()),
         )
         .unwrap_err()
         .to_string();
@@ -1557,7 +1703,10 @@ mod tests {
     #[test]
     fn api_errors_and_invalid_metadata_do_not_fetch() {
         let no_fetch = &mut |_: &str, _: &str| -> Result<String> { panic!("must not fetch") };
-        let error = resolve_with(&pr(), &mut |_| Err(bad("HTTP 403: not authorized")), no_fetch, &mut || false)
+        let error =
+            resolve_with(&pr(), &mut |_| Err(bad("HTTP 403: not authorized")), no_fetch, &mut || false, &mut |_, _| {
+                Ok(())
+            })
             .unwrap_err()
             .to_string();
         assert!(error.contains("403"));
@@ -1589,7 +1738,9 @@ mod tests {
                 p
             },
         ] {
-            assert!(resolve_with(&pr(), &mut |_| Ok(data.clone()), no_fetch, &mut || false).is_err());
+            assert!(
+                resolve_with(&pr(), &mut |_| Ok(data.clone()), no_fetch, &mut || false, &mut |_, _| Ok(())).is_err()
+            );
         }
         assert!(
             resolve_with(
@@ -1598,7 +1749,8 @@ mod tests {
                     if ep.contains("/pulls/") { Ok(metadata()) } else { Ok(json!({"merge_base_commit":{"sha":"bad"}})) }
                 },
                 no_fetch,
-                &mut || false
+                &mut || false,
+                &mut |_, _| Ok(())
             )
             .is_err()
         );

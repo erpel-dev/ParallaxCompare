@@ -206,17 +206,11 @@ pub fn fetch(url: &str, rev: &str) -> Result<(PathBuf, String)> {
     plain_arg("repository", url)?;
     check_protocol(url)?;
     plain_arg("revision", rev)?;
-    // One fetch at a time: fetches into one cache repository would collide.
-    static FETCHING: Mutex<()> = Mutex::new(());
     let _one = FETCHING.lock();
-    let dir = cache_dir()?.join(cache_name(url));
-    if !dir.join("HEAD").exists() {
-        std::fs::create_dir_all(&dir).map_err(|e| Error::io(dir.display().to_string(), e))?;
-        git(&["init", "--bare", "--quiet"], Some(&dir))?;
-    }
+    let dir = cache_repo(url)?;
     // A full commit id that is here already needs no network.
-    let full_id = rev.len() == 40 && rev.chars().all(|c| c.is_ascii_hexdigit());
-    if full_id && git(&["cat-file", "-e", &format!("{rev}^{{commit}}")], Some(&dir)).is_ok() {
+    let full_id = is_full_id(rev);
+    if full_id && has_commit(&dir, rev) {
         return Ok((dir, rev.to_string()));
     }
     git(&["fetch", "--quiet", "--depth", "1", "--no-tags", "--end-of-options", url, rev], Some(&dir)).map_err(|e| {
@@ -229,6 +223,50 @@ pub fn fetch(url: &str, rev: &str) -> Result<(PathBuf, String)> {
     })?;
     let commit = git(&["rev-parse", "FETCH_HEAD^{commit}"], Some(&dir))?;
     Ok((dir, commit.trim().to_string()))
+}
+
+/// One fetch at a time: fetches into one cache repository would collide.
+static FETCHING: Mutex<()> = Mutex::new(());
+
+/// The cache repository for `url`, created on first use.
+fn cache_repo(url: &str) -> Result<PathBuf> {
+    let dir = cache_dir()?.join(cache_name(url));
+    if !dir.join("HEAD").exists() {
+        std::fs::create_dir_all(&dir).map_err(|e| Error::io(dir.display().to_string(), e))?;
+        git(&["init", "--bare", "--quiet"], Some(&dir))?;
+    }
+    Ok(dir)
+}
+
+fn is_full_id(rev: &str) -> bool {
+    rev.len() == 40 && rev.bytes().all(|c| c.is_ascii_hexdigit())
+}
+
+fn has_commit(dir: &std::path::Path, id: &str) -> bool {
+    git(&["cat-file", "-e", &format!("{id}^{{commit}}")], Some(dir)).is_ok()
+}
+
+/// Fetches several commits (full ids) of the repository at `url` into the cache
+/// in one `git fetch`: one connection and one negotiation instead of one each,
+/// about half the time for two commits. Commits already here are not fetched.
+/// [`fetch`] then finds them without the network; on an error it still fetches
+/// them one by one, with its own fallbacks.
+pub fn fetch_commits(url: &str, ids: &[&str]) -> Result<()> {
+    plain_arg("repository", url)?;
+    check_protocol(url)?;
+    if !ids.iter().all(|id| is_full_id(id)) {
+        return Err(Error::Unsupported("only full commit ids are fetched together".into()));
+    }
+    let _one = FETCHING.lock();
+    let dir = cache_repo(url)?;
+    let missing: Vec<&str> = ids.iter().copied().filter(|id| !has_commit(&dir, id)).collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let mut args = vec!["fetch", "--quiet", "--depth", "1", "--no-tags", "--end-of-options", url];
+    args.extend(&missing);
+    git(&args, Some(&dir))?;
+    Ok(())
 }
 
 /// Keep an opened PR snapshot reachable when Git later runs cache maintenance.
@@ -478,5 +516,25 @@ mod tests {
         assert!(fetch(&url, &option).is_err());
         assert!(fetch(&url, "-q").is_err() && ls_remote("--help").is_err());
         assert!(!marker.exists());
+
+        // Two new commits in one fetch; afterwards both are found without the network.
+        let head = |r: &str| {
+            let out = std::process::Command::new("git").args(["rev-parse", r]).current_dir(origin.path()).output();
+            String::from_utf8(out.unwrap().stdout).unwrap().trim().to_string()
+        };
+        run(&["checkout", "-q", "-b", "other"]);
+        std::fs::write(origin.path().join("a.txt"), "two").unwrap();
+        run(&["commit", "-q", "-am", "two"]);
+        run(&["checkout", "-q", "main"]);
+        std::fs::write(origin.path().join("a.txt"), "three").unwrap();
+        run(&["commit", "-q", "-am", "three"]);
+        let (two, three) = (head("other"), head("main"));
+        assert!(!has_commit(&dir, &two) && !has_commit(&dir, &three));
+        fetch_commits(&url, &[&two, &three]).unwrap();
+        assert!(has_commit(&dir, &two) && has_commit(&dir, &three));
+        assert_eq!(fetch(&url, &two).unwrap().1, two);
+        // Nothing missing: no fetch at all, even from a repository that is gone.
+        fetch_commits("file:///nonexistent/parallax/repo", &[]).unwrap();
+        assert!(fetch_commits(&url, &["main"]).is_err());
     }
 }
