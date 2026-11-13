@@ -62,8 +62,9 @@
   function key(e: KeyboardEvent) {
     // App navigation is global; typing/comparison keys stay inside the composer.
     const mod = e.ctrlKey || e.metaKey;
+    const key = e.key.toLowerCase();
     const appKey = e.key === "F1" || (mod && (e.key.length === 1 && /[1-9]/.test(e.key) ||
-      ["t", "w", "k", "p", ",", "+", "=", "-", "_", "0", "Tab", "PageUp", "PageDown"].includes(e.key) || e.key === "Enter" && e.shiftKey));
+      ["t", "w", "k", "p", ",", "+", "=", "-", "_", "0", "tab", "pageup", "pagedown"].includes(key) || key === "enter" && e.shiftKey));
     if (appKey) return;
     e.stopPropagation();
     if (e.key === "Escape") {
