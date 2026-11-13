@@ -72,7 +72,7 @@ class PrConversations {
       notify(String(e));
       return false;
     } finally {
-      if (this.bySession[session] === s) { this.busy[session] = false; void this.load(session); }
+      if (this.bySession[session] === s) { this.busy[session] = false; await this.load(session); }
     }
   }
 
@@ -116,18 +116,20 @@ class PrConversations {
       s.data.files = files.files; s.filesTruncated = files.truncated;
     };
     // Each part is delivered as soon as it finishes; optional reads cannot delay comments/errors.
-    await Promise.allSettled([
-      api.pullRequestConversation(s.info.url, s.head).then((data) => {
+    const comments = api.pullRequestConversation(s.info.url, s.head).then((data) => {
         if (!current()) return;
         const cached = s.data;
         s.data = { ...data, checks: cached?.checks ?? data.checks, annotations: cached?.annotations ?? data.annotations };
         s.loading = false; s.at = Date.now(); applyChecks(); applyFiles();
-      }).catch((error) => { if (current()) s.error = String(error); }).finally(() => { if (current()) s.loading = false; }),
+      }).catch((error) => { if (current()) s.error = String(error); }).finally(() => { if (current()) s.loading = false; });
+    void Promise.allSettled([
       api.pullRequestChecks(s.info.url, s.head).then((data) => { if (current()) { checks = data; applyChecks(); } })
         .catch((error) => { if (current()) s.checksError = String(error); }).finally(() => { if (current()) s.checksLoading = false; }),
       api.pullRequestFiles(s.info.url).then((data) => { if (current()) { files = data; applyFiles(); } })
         .catch((error) => { if (current()) s.filesError = String(error); }).finally(() => { if (current()) s.filesLoading = false; }),
     ]);
+    // A caller sequencing writes needs fresh comments, never a slow optional CI read.
+    await comments;
   }
 
 }

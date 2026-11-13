@@ -19,7 +19,7 @@ const details = { checks: { passed: 50, failed: 0, pending: 0 }, annotations: []
 async function fixture() {
   const rounds = [], calls = [];
   let active;
-  const api = Object.fromEntries(['Conversation', 'Checks', 'Files'].map((part) => ['pullRequest' + part, () => { calls.push(part); return active[part].promise; }]));
+  const api = { ...Object.fromEntries(['Conversation', 'Checks', 'Files'].map((part) => ['pullRequest' + part, () => { calls.push(part); return active[part].promise; }])), pullRequestWrite: async () => { calls.push('Write'); } };
   globalThis.__prTest = { api };
   const path = new URL(`store-${process.pid}-${sequence++}.mjs`, cache);
   await writeFile(path, compiled);
@@ -79,4 +79,20 @@ test('a newer refresh wins when old requests complete out of order', async () =>
   second.Conversation.resolve(conversation({ title: 'new' })); second.Checks.resolve(details); second.Files.resolve({ files: {}, truncated: false }); await loaded;
   first.Conversation.resolve(conversation({ title: 'old' })); first.Checks.reject('old error'); first.Files.reject('old error'); await settle();
   assert.equal(store.get(1).data.title, 'new'); assert.equal(store.get(1).checksError, null); assert.equal(store.get(1).filesError, null);
+});
+
+test('sequential reply and resolve wait for fresh comments but never optional CI', async () => {
+  const { store, first, round, calls } = await fixture();
+  first.Conversation.resolve(conversation()); first.Checks.resolve(details); first.Files.resolve({ files: {}, truncated: false }); await settle();
+  const replyRefresh = round();
+  const reply = store.write(1, { kind: 'reply', thread: 'T0', comment: 100, body: 'test', review: null });
+  await settle(); assert.equal(store.get(1).loading, true);
+  replyRefresh.Conversation.resolve(conversation()); assert.equal(await reply, true);
+  assert.equal(store.get(1).checksLoading, true);
+  const resolveRefresh = round();
+  const resolved = store.write(1, { kind: 'resolve', thread: 'T0', resolved: true });
+  await settle(); resolveRefresh.Conversation.resolve(conversation()); assert.equal(await resolved, true);
+  assert.equal(calls.filter((c) => c === 'Write').length, 2);
+  for (const r of [replyRefresh, resolveRefresh]) { r.Checks.resolve(details); r.Files.resolve({ files: {}, truncated: false }); }
+  await settle();
 });
