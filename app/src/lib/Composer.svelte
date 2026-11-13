@@ -60,11 +60,16 @@
   }
 
   function key(e: KeyboardEvent) {
-    // The composer's keys stay in it: none of the comparison's shortcuts apply here.
+    // App navigation is global; typing/comparison keys stay inside the composer.
+    const mod = e.ctrlKey || e.metaKey;
+    const key = e.key.toLowerCase();
+    const appKey = e.key === "F1" || (mod && (e.key.length === 1 && /[1-9]/.test(e.key) ||
+      ["t", "w", "k", "p", ",", "+", "=", "-", "_", "0", "tab", "pageup", "pagedown"].includes(key) || key === "enter" && e.shiftKey));
+    if (appKey) return;
     e.stopPropagation();
     if (e.key === "Escape") {
       e.preventDefault();
-      cancel();
+      onCancel();
     } else if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
       e.preventDefault();
       const action = actions.find((a) => a.review) ?? actions.find((a) => a.primary);
@@ -74,6 +79,7 @@
 
   function cancel() {
     unsent.set(url, target, "");
+    text = "";
     onCancel();
   }
 
@@ -119,7 +125,7 @@
     <button class="sm" onclick={() => wrap("**")} title="Bold" aria-label="Bold"><b>B</b></button>
     <button class="sm" onclick={() => wrap("`")} title="Code" aria-label="Code">`c`</button>
     <span class="grow"></span>
-    <button class="sm" onclick={cancel} disabled={busy}>Cancel</button>
+    <button class="sm" onclick={cancel} disabled={busy} title="Deletes this saved draft">Discard draft</button>
     {#each actions as a (a.label)}
       <button class="sm" class:primary={a.primary} onclick={() => run(a)} disabled={empty || busy} title={a.title}>
         {a.label}{#if a.review}<span class="k">Ctrl+Enter</span>{/if}
@@ -129,7 +135,7 @@
 </div>
 
 <style>
-  .composer { border: 1px solid var(--accent); border-radius: 6px; background: var(--bg); display: grid; min-width: 0; cursor: default; }
+  .composer { border: 1px solid var(--accent); border-radius: 6px; background: var(--bg); display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; cursor: default; }
   .ch { display: flex; align-items: center; gap: 8px; padding: 3px 6px 3px 8px; border-bottom: 1px solid var(--line); font-size: 11.5px; }
   .h { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dim); }
   .tabs { display: inline-flex; }
@@ -137,7 +143,7 @@
   .tabs button:first-child { border-radius: 4px 0 0 4px; margin-left: 0; }
   .tabs button:last-child { border-radius: 0 4px 4px 0; }
   .tabs button.on { background: var(--sel); border-color: var(--accent); position: relative; }
-  textarea { border: none; outline: none; resize: vertical; min-height: 60px; padding: 6px 8px; background: var(--bg); color: var(--text); font-family: var(--mono); font-size: 11.5px; line-height: 1.5; }
+  textarea { border: none; outline: none; resize: vertical; min-width: 0; width: 100%; box-sizing: border-box; min-height: 60px; padding: 6px 8px; background: var(--bg); color: var(--text); font-family: var(--mono); font-size: 11.5px; line-height: 1.5; }
   .pv { padding: 6px 8px; min-height: 60px; line-height: 1.45; overflow-wrap: anywhere; font-size: 12px; }
   .pv :global(p) { margin: 0 0 6px; }
   .pv :global(code) { font-family: var(--mono); font-size: 11px; background: var(--panel); padding: 0 3px; border-radius: 3px; }

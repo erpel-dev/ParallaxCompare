@@ -267,7 +267,7 @@
     return lines ? { side: activeSide, lines } : null;
   });
   /** Whether comments can be written here: signed in, allowed, and the compared head is the current one. */
-  const canWrite = $derived(!!pr?.data && !linesBlocked(pr.data) && !!pr.data.files[path]);
+  const canWrite = $derived(!!pr?.data && !pr.loading && !pr.error && !pr.filesLoading && !pr.filesError && !linesBlocked(pr.data) && !!pr.data.files[path]);
   /** The text of the selected lines of a side, for a suggested change; null if any is cut for display. */
   function selectedText(side: 0 | 1): string[] | null {
     const rows = lineRange ?? (selected !== null ? [selected, selected + 1] : null);
@@ -1735,7 +1735,6 @@
       else redo();
     }
     else if (e.key === "F9" && !e.defaultPrevented && !isField(e.target) && prMarks) nextThread(e.shiftKey ? -1 : 1);
-    else if (e.key === "Enter" && mod && e.shiftKey && !e.defaultPrevented && pr?.data?.viewer && pr.data.canComment) prConversations.reviewing = session.id;
     // F7/F8 also when the focus has left the scroll area (which handles them otherwise), but not in a field.
     else if ((e.key === "F7" || e.key === "F8") && !e.defaultPrevented && !isField(e.target))
       next(e.key === "F8" ? 1 : -1);

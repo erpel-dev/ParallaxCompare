@@ -125,6 +125,14 @@ export interface PrConversation {
   files: Record<string, PrCommentable>;
 }
 
+export interface PrCheckDetails {
+  checks: PrConversation["checks"];
+  annotations: PrAnnotation[];
+  checksTruncated: boolean;
+  annotationsTruncated: boolean;
+}
+export interface PrFileDetails { files: PrConversation["files"]; truncated: boolean; }
+
 /** Whether a program the app starts works (see parallax_core::tools). */
 export interface ToolCheck {
   name: string;
@@ -705,6 +713,8 @@ export const api = {
   previewSource: (text: string, spec: SourceSpec | null = null) => invoke<SourcePreview>("preview_source", { text, spec }),
   pullRequestTools: (url: string) => invoke<PullRequestTools>("pull_request_tools", { url }),
   resolvePullRequest: (url: string) => invoke<PullRequestComparison>("resolve_pull_request", { url }),
+  pullRequestChecks: (url: string, head: string) => invoke<PrCheckDetails>("pull_request_checks", { url, head }),
+  pullRequestFiles: (url: string) => invoke<PrFileDetails>("pull_request_files", { url }),
   pullRequestConversation: (url: string, head: string) => invoke<PrConversation>("pull_request_conversation", { url, head }),
   pullRequestWrite: (url: string, change: PrWrite) => invoke<void>("pull_request_write", { url, change }),
   openPullRequestLink: (url: string, link: string) => invoke<void>("open_pull_request_link", { url, link }),

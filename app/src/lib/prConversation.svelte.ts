@@ -11,6 +11,14 @@ export interface PrState {
   /** The head commit the comparison shows. */
   head: string;
   loading: boolean;
+  checksLoading: boolean;
+  checksError: string | null;
+  checksTruncated: boolean;
+  annotationsTruncated: boolean;
+  filesLoading: boolean;
+  filesError: string | null;
+  filesTruncated: boolean;
+  generation: number;
   data: PrConversation | null;
   error: string | null;
   at: number | null;
@@ -55,6 +63,7 @@ class PrConversations {
   async write(session: number, change: PrWrite): Promise<boolean> {
     const s = this.bySession[session];
     if (!s || this.busy[session]) return false;
+    if (s.loading || s.error) { notify("Refresh the comments successfully before sending a change"); return false; }
     this.busy[session] = true;
     try {
       await api.pullRequestWrite(s.info.url, change);
@@ -63,14 +72,15 @@ class PrConversations {
       notify(String(e));
       return false;
     } finally {
-      this.busy[session] = false;
-      await this.load(session);
+      if (this.bySession[session] === s) { this.busy[session] = false; await this.load(session); }
     }
   }
 
   register(session: number, info: PullRequestInfo, head: string) {
     if (this.bySession[session]?.head === head) return;
-    this.bySession[session] = { info, head, loading: false, data: null, error: null, at: null };
+    this.bySession[session] = { info, head, loading: false, data: null, error: null, at: null,
+      checksLoading: false, checksError: null, checksTruncated: false, annotationsTruncated: false,
+      filesLoading: false, filesError: null, filesTruncated: false, generation: 0 };
     void this.load(session);
   }
 
@@ -78,29 +88,58 @@ class PrConversations {
     return this.bySession[session];
   }
 
-  async load(session: number) {
-    const s = this.bySession[session];
-    if (!s || s.loading) return;
-    s.loading = true;
-    s.error = null;
-    try {
-      const data = await api.pullRequestConversation(s.info.url, s.head);
-      const now = this.bySession[session];
-      if (now && now.head === s.head) {
-        now.data = data;
-        now.at = Date.now();
-      }
-    } catch (e) {
-      const now = this.bySession[session];
-      if (now) now.error = String(e);
-    } finally {
-      const now = this.bySession[session];
-      if (now) now.loading = false;
-    }
+  /** Release cached data and invalidate pending reads when a comparison closes. */
+  release(session: number) {
+    delete this.bySession[session]; delete this.busy[session];
+    if (this.focus?.session === session) this.focus = null;
+    if (this.composer?.session === session) this.composer = null;
+    if (this.replyTo?.session === session) this.replyTo = null;
+    if (this.reviewing === session) this.reviewing = null;
   }
+  async load(session: number) {
+    const s = this.bySession[session]; if (!s) return;
+    const generation = ++s.generation;
+    const current = () => this.bySession[session] === s && s.generation === generation;
+    s.loading = s.checksLoading = s.filesLoading = true;
+    s.error = s.checksError = s.filesError = null;
+    if (s.data) s.data.files = {};
+    s.filesTruncated = false;
+    let checks: Awaited<ReturnType<typeof api.pullRequestChecks>> | null = null;
+    let files: Awaited<ReturnType<typeof api.pullRequestFiles>> | null = null;
+    const applyChecks = () => {
+      if (!s.data || !checks) return;
+      s.data.checks = checks.checks; s.data.annotations = checks.annotations;
+      s.checksTruncated = checks.checksTruncated; s.annotationsTruncated = checks.annotationsTruncated;
+    };
+    const applyFiles = () => {
+      if (!s.data || !files || s.loading || !linesApply(s.data)) return;
+      s.data.files = files.files; s.filesTruncated = files.truncated;
+    };
+    // Each part is delivered as soon as it finishes; optional reads cannot delay comments/errors.
+    const comments = api.pullRequestConversation(s.info.url, s.head).then((data) => {
+        if (!current()) return;
+        const cached = s.data;
+        s.data = { ...data, checks: cached?.checks ?? data.checks, annotations: cached?.annotations ?? data.annotations };
+        s.loading = false; s.at = Date.now(); applyChecks(); applyFiles();
+      }).catch((error) => { if (current()) s.error = String(error); }).finally(() => { if (current()) s.loading = false; });
+    void Promise.allSettled([
+      api.pullRequestChecks(s.info.url, s.head).then((data) => { if (current()) { checks = data; applyChecks(); } })
+        .catch((error) => { if (current()) s.checksError = String(error); }).finally(() => { if (current()) s.checksLoading = false; }),
+      api.pullRequestFiles(s.info.url).then((data) => { if (current()) { files = data; applyFiles(); } })
+        .catch((error) => { if (current()) s.filesError = String(error); }).finally(() => { if (current()) s.filesLoading = false; }),
+    ]);
+    // A caller sequencing writes needs fresh comments, never a slow optional CI read.
+    await comments;
+  }
+
 }
 
 export const prConversations = new PrConversations();
+
+/** Generic access advice is appended to all read failures; it is not an authentication diagnosis. */
+export function needsSignIn(message: string): boolean {
+  return /auth|login|401|credential|token/i.test(message.split("Check repository access and run")[0]);
+}
 
 /** Whether the comparison's head is the one the threads' lines refer to. */
 export const linesApply = (c: PrConversation) => c.head === c.pinnedHead;

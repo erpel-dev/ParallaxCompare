@@ -225,9 +225,11 @@
   /** Releases what a comparison tab holds: its session, and the file tabs that share it. */
   function release(tab: SessionTab) {
     if (tab.kind === "folder") {
+      prConversations.release(tab.session.id);
       api.closeSession(tab.session.id);
       tabs = tabs.filter((t) => !(t.kind === "text" && !t.request && t.session.id === tab.session.id));
     } else if (tab.request) {
+      prConversations.release(tab.session.id);
       api.closeSession(tab.session.id);
     }
   }
@@ -576,6 +578,13 @@
     else if (mod && !e.altKey && (e.key === "+" || e.key === "=")) prefs.step(1);
     else if (mod && !e.altKey && (e.key === "-" || e.key === "_")) prefs.step(-1);
     else if (mod && !e.altKey && e.key === "0") prefs.step(0);
+    else if (mod && e.shiftKey && key === "enter") {
+      const tab = tabs.find((t) => t.key === active);
+      if (tab?.kind !== "folder" && tab?.kind !== "text") return;
+      const pr = prConversations.get(tab.session.id);
+      if (!pr?.data?.viewer || !pr.data.canComment || pr.error || pr.loading) return;
+      prConversations.reviewing = tab.session.id;
+    }
     else if (mod && key === "w") close(active);
     else if (mod && key === "t") newTab();
     else if ((mod && e.shiftKey && key === "p") || (mod && !e.shiftKey && key === "k") || e.key === "F1") {
