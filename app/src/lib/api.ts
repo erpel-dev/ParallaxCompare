@@ -355,6 +355,7 @@ export type View =
   | "executable"
   | "firmware"
   | "prettyXml"
+  | "arxmlStructure"
   | "prettyJson"
   | "hex"
   | "image"

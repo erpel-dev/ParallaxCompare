@@ -404,3 +404,7 @@ This is the first version of the MVP described in the concept. Not done yet:
 ## License
 
 MIT, see [LICENSE](LICENSE). Notices of included third-party code are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+
+### AUTOSAR ARXML matching
+
+Non-ECUC `.arxml` files with an `AUTOSAR` root open in **AUTOSAR structure**, a read-only JSON tree. Named siblings match by element type and `SHORT-NAME` within their parent hierarchy; their source order does not affect the comparison. Attributes (including UUIDs), reference targets, comments and values remain visible. Duplicate names, unnamed sibling sequences and mixed text content keep their order. Renaming or moving an element changes its identity. **Text** and **Pretty-printed XML** remain available for inspecting the source. ECUC configuration values retain their existing editable **ECUC values** view.
