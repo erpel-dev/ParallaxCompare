@@ -132,8 +132,13 @@ jobs:
       - name: Self-test
         run: scripts/appimage-self-test.sh dist/ParallaxCompare-*.AppImage
 
+  flatpak:
+    uses: ./.github/workflows/flatpak.yml
+    with:
+      bundle: ParallaxCompare-${{ github.event.inputs.tag || github.ref_name }}-x86_64.flatpak
+
   release:
-    needs: [linux, windows, appimage-self-test]
+    needs: [linux, windows, appimage-self-test, flatpak]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

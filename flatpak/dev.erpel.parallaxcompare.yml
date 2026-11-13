@@ -1,0 +1,56 @@
+# Flatpak of the desktop app, built by .github/workflows/flatpak.yml:
+#   flatpak-builder --user --install-deps-from=flathub --repo=repo build flatpak/dev.erpel.parallaxcompare.yml
+#
+# The system's git, gh, mergiraf and flatc run on the host through
+# flatpak-spawn (see parallax_core::process), so the user's Git settings, SSH
+# keys, credential helpers and gh sign-in work as without the sandbox. That is
+# what --talk-name=org.freedesktop.Flatpak allows. A compare tool opens any
+# folder, so the app sees the host's files (--filesystem=host).
+#
+# The build fetches crates and npm packages over the network, which a
+# downloadable bundle allows; Flathub would need them listed as sources.
+id: dev.erpel.parallaxcompare
+runtime: org.gnome.Platform
+runtime-version: '49'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+  - org.freedesktop.Sdk.Extension.node22
+command: parallax-compare
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --filesystem=host
+  - --talk-name=org.freedesktop.Flatpak
+  # "Show in file manager".
+  - --talk-name=org.freedesktop.FileManager1
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/node22/bin
+  build-args:
+    - --share=network
+  env:
+    CARGO_HOME: /run/build/parallax-compare/cargo-home
+    CARGO_TERM_COLOR: always
+modules:
+  - name: parallax-compare
+    buildsystem: simple
+    sources:
+      - type: dir
+        path: ..
+        skip:
+          - target
+          - app/node_modules
+          - .flatpak-builder
+          - flatpak-build
+          - repo
+    build-commands:
+      - cd app && npm ci && npm run build
+      - cargo build --release --locked -p parallax-compare --features tauri/custom-protocol
+      - install -Dm755 target/release/parallax-compare /app/bin/parallax-compare
+      - install -Dm644 flatpak/dev.erpel.parallaxcompare.desktop /app/share/applications/dev.erpel.parallaxcompare.desktop
+      - install -Dm644 flatpak/dev.erpel.parallaxcompare.metainfo.xml /app/share/metainfo/dev.erpel.parallaxcompare.metainfo.xml
+      - install -Dm644 app/src-tauri/icons/32x32.png /app/share/icons/hicolor/32x32/apps/dev.erpel.parallaxcompare.png
+      - install -Dm644 app/src-tauri/icons/128x128.png /app/share/icons/hicolor/128x128/apps/dev.erpel.parallaxcompare.png
+      - install -Dm644 app/src-tauri/icons/128x128@2x.png /app/share/icons/hicolor/256x256/apps/dev.erpel.parallaxcompare.png

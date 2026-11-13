@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>dev.erpel.parallaxcompare</id>
+  <name>ParallaxCompare</name>
+  <summary>Compare folders, archives and Git revisions side by side</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>
+      A fast side-by-side compare tool for folders, files, archives and Git
+      revisions, with views that make structured formats comparable and a
+      three-way merge.
+    </p>
+    <p>
+      Pull requests open with their merge base and head, their review threads
+      and CI findings; comments and reviews can be written from the app with
+      the GitHub CLI.
+    </p>
+  </description>
+  <launchable type="desktop-id">dev.erpel.parallaxcompare.desktop</launchable>
+  <url type="homepage">https://github.com/erpel-dev/ParallaxCompare</url>
+  <url type="bugtracker">https://github.com/erpel-dev/ParallaxCompare/issues</url>
+  <developer id="dev.erpel">
+    <name>erpel-dev</name>
+  </developer>
+  <content_rating type="oars-1.1"/>
+  <categories>
+    <category>Development</category>
+  </categories>
+</component>

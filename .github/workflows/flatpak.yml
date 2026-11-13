@@ -1,0 +1,58 @@
+name: Flatpak
+
+# Builds the desktop app as a Flatpak bundle (flatpak/dev.erpel.parallaxcompare.yml)
+# and runs its self-test: git and gh must run on the host through flatpak-spawn.
+# Releases call this workflow and attach the bundle.
+on:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      bundle:
+        description: File name of the bundle, e.g. ParallaxCompare-v0.0.19-x86_64.flatpak
+        type: string
+        required: true
+
+env:
+  APP_ID: dev.erpel.parallaxcompare
+  BUNDLE: ${{ inputs.bundle || 'ParallaxCompare-dev-x86_64.flatpak' }}
+
+jobs:
+  flatpak:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install flatpak-builder
+        run: |
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y flatpak flatpak-builder dbus-daemon
+          # Ubuntu 24.04 restricts unprivileged user namespaces, which bubblewrap needs.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+
+      - uses: actions/cache@v4
+        with:
+          path: .flatpak-builder
+          key: flatpak-builder-${{ hashFiles('flatpak/*.yml') }}-${{ hashFiles('Cargo.lock', 'app/package-lock.json') }}
+          restore-keys: flatpak-builder-${{ hashFiles('flatpak/*.yml') }}-
+
+      - name: Build
+        run: |
+          flatpak-builder --user --install-deps-from=flathub --disable-rofiles-fuse --force-clean \
+            --repo=repo --install flatpak-build flatpak/$APP_ID.yml
+          flatpak build-bundle repo "$BUNDLE" $APP_ID \
+            --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo
+
+      # flatpak-spawn --host talks to the Flatpak session helper on the session
+      # bus, which a desktop has and a runner does not: start one for the test.
+      - name: Self-test
+        run: |
+          dbus-run-session -- flatpak run --command=parallax-compare $APP_ID \
+            --self-test https://github.com/octocat/Hello-World
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flatpak
+          path: ${{ env.BUNDLE }}
+          if-no-files-found: error
