@@ -113,7 +113,11 @@ fn add_ignored(root: &Path, snapshot: &mut Snapshot, dirs: Vec<String>) {
         let Some(listed) = snapshot.dirs.get_mut(&dir) else { continue };
         let present: HashSet<String> = listed.iter().map(|e| e.name.clone()).collect();
         for dent in read.flatten() {
-            let name = dent.file_name().to_string_lossy().into_owned();
+            let Some(name) = dent.file_name().to_str().map(str::to_owned) else {
+                let error = (std::io::ErrorKind::InvalidData, unusable_name(&dent.file_name()));
+                snapshot.unreadable.insert(dir.clone(), error);
+                break;
+            };
             if name == ".git" || present.contains(&name) {
                 continue;
             }
@@ -187,7 +191,12 @@ fn walk(root: &Path, start: &Path, max_depth: Option<usize>, index: &IndexInfo) 
             let Ok(rel) = dent.path().strip_prefix(root) else {
                 return ignore::WalkState::Continue;
             };
-            let name = dent.file_name().to_string_lossy().into_owned();
+            let Some(name) = dent.file_name().to_str().map(str::to_owned) else {
+                // Its folder cannot be compared faithfully: an error, not a lossy name.
+                let parent = rel.parent().map(path_to_rel).unwrap_or_default();
+                found.lock().errors.push((parent, std::io::ErrorKind::InvalidData, unusable_name(dent.file_name())));
+                return ignore::WalkState::Skip;
+            };
             if let Some((mut entry, meta)) = entry_and_meta(dent.path(), name) {
                 let rel = path_to_rel(rel);
                 entry.quick_id = index.clean_id(&rel, &meta).map(QuickId::GitOid);
@@ -256,11 +265,10 @@ fn entry_from_path(path: &Path, name: String) -> Option<Entry> {
 }
 
 fn entry_and_meta(path: &Path, name: String) -> Option<(Entry, fs::Metadata)> {
-    // A write in progress, or one cut off: not part of the folder.
-    if let Some(alive) = temp_owner_alive(&name) {
-        if !alive && untouched_for(path, std::time::Duration::from_secs(600)) {
-            let _ = fs::remove_file(path);
-        }
+    // A write of this process in progress: not part of the folder yet. Those of
+    // other processes, finished or cut off, are listed like any file: a
+    // comparison never removes anything, and a leftover stays visible.
+    if own_temp(&name) {
         return None;
     }
     let meta = fs::symlink_metadata(path).ok()?;
@@ -351,6 +359,17 @@ impl Vfs for LocalFs {
         self.read_disk(path)
     }
 
+    /// Files as a plain reader, not mapped: a file that another program
+    /// truncates while it is read ends early instead of faulting the process.
+    fn open(&self, path: &str) -> Result<Box<dyn std::io::Read + Send>> {
+        let abs = self.abs_checked(path)?;
+        let err = |e| Error::io(abs.display().to_string(), e);
+        if fs::symlink_metadata(&abs).map_err(err)?.file_type().is_file() {
+            return Ok(Box::new(fs::File::open(&abs).map_err(err)?));
+        }
+        Ok(Box::new(std::io::Cursor::new(self.read_disk(path)?)))
+    }
+
     fn local_path(&self, path: &str) -> Option<PathBuf> {
         self.abs(path)
     }
@@ -376,7 +395,10 @@ impl LocalFs {
         let mut out = Vec::new();
         for dent in rd {
             let dent = dent.map_err(|e| Error::io(abs.display().to_string(), e))?;
-            let name = dent.file_name().to_string_lossy().into_owned();
+            let Some(name) = dent.file_name().to_str().map(str::to_owned) else {
+                let error = std::io::Error::new(std::io::ErrorKind::InvalidData, unusable_name(&dent.file_name()));
+                return Err(Error::io(abs.display().to_string(), error));
+            };
             if let Some(entry) = entry_from_path(&dent.path(), name) {
                 out.push(entry);
             }
@@ -565,38 +587,19 @@ pub(crate) fn replace_file_at(
     result
 }
 
-/// For the temporary file of a write ([`replace_file_at`], named
-/// `.{name}.{pid}-{n}.parallax-tmp`): whether the process writing it may still
-/// run. `None` for any other name. Only Linux can tell a finished process
-/// apart; elsewhere every such file counts as in use and is only left out.
-fn temp_owner_alive(name: &str) -> Option<bool> {
-    let stem = name.strip_prefix('.')?.strip_suffix(".parallax-tmp")?;
-    let (_, tail) = stem.rsplit_once('.')?;
-    let (pid, n) = tail.split_once('-')?;
-    let pid: u32 = pid.parse().ok()?;
-    n.parse::<u64>().ok()?;
-    if pid == std::process::id() || !cfg!(target_os = "linux") {
-        return Some(true);
-    }
-    Some(Path::new("/proc").join(pid.to_string()).exists())
+/// Why a folder holding a name that is not valid Unicode is not compared: shown
+/// with replacement characters, two such names could look like one, and a
+/// changed file would hide behind an unchanged one.
+fn unusable_name(name: &std::ffi::OsStr) -> String {
+    format!("holds a name that is not valid UTF-8 ({}), so this folder is not compared", name.to_string_lossy())
 }
 
-/// Whether nothing changed `path` (its data or its attributes) for `age`. A
-/// process in another sandbox is not in this one's `/proc`, but its write keeps
-/// changing the file until it is renamed into place.
-fn untouched_for(path: &Path, age: std::time::Duration) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let Ok(meta) = fs::symlink_metadata(path) else { return false };
-        let changed = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(meta.ctime().max(0) as u64);
-        SystemTime::now().duration_since(changed).is_ok_and(|d| d >= age)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (path, age);
-        false
-    }
+/// Whether `name` is the temporary file of a write of this process
+/// ([`replace_file_at`] names them `.{name}.{pid}-{n}.parallax-tmp`).
+fn own_temp(name: &str) -> bool {
+    let Some(stem) = name.strip_prefix('.').and_then(|n| n.strip_suffix(".parallax-tmp")) else { return false };
+    let Some((pid, n)) = stem.rsplit_once('.').and_then(|(_, tail)| tail.split_once('-')) else { return false };
+    pid.parse::<u32>().is_ok_and(|pid| pid == std::process::id()) && n.parse::<u64>().is_ok()
 }
 
 /// Whether `a` and `b` are the same file on disk, also through hard links,
@@ -640,30 +643,24 @@ mod tests {
     use super::*;
     use crate::progress::Progress;
 
-    /// The temporary files of writes are not part of a folder; those of a
-    /// process that has ended are removed once they are old enough.
+    /// Only this process's own writes in progress are left out of a folder;
+    /// other temporary files are listed and never removed by reading.
     #[test]
-    fn temporary_files_of_writes_are_left_out() {
-        assert_eq!(temp_owner_alive("a.txt"), None);
-        assert_eq!(temp_owner_alive(".a.txt.x-1.parallax-tmp"), None);
-        assert_eq!(temp_owner_alive(&format!(".a.txt.{}-3.parallax-tmp", std::process::id())), Some(true));
+    fn only_own_writes_in_progress_are_left_out() {
+        assert!(!own_temp("a.txt"));
+        assert!(!own_temp(".a.txt.x-1.parallax-tmp"));
+        assert!(own_temp(&format!(".a.txt.{}-3.parallax-tmp", std::process::id())));
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("a.txt"), "a").unwrap();
         let mine = format!(".a.txt.{}-0.parallax-tmp", std::process::id());
         fs::write(dir.path().join(&mine), "partial").unwrap();
-        // No process has this id: Linux limits them to 2^22.
-        let gone = ".b.txt.4999999-0.parallax-tmp";
-        fs::write(dir.path().join(gone), "partial").unwrap();
+        let other = ".b.txt.4999999-0.parallax-tmp";
+        fs::write(dir.path().join(other), "recovered").unwrap();
         let fs_ = LocalFs::new(dir.path());
-        let names: Vec<_> = fs_.list("").unwrap().into_iter().map(|e| e.name).collect();
-        assert_eq!(names, ["a.txt"]);
-        // Too recent to be removed, even with its process gone.
-        assert!(dir.path().join(gone).exists() && dir.path().join(&mine).exists());
-        if cfg!(target_os = "linux") {
-            assert_eq!(temp_owner_alive(gone), Some(false));
-            assert!(untouched_for(&dir.path().join(gone), std::time::Duration::ZERO));
-            assert!(!untouched_for(&dir.path().join(gone), std::time::Duration::from_secs(600)));
-        }
+        let mut names: Vec<_> = fs_.list("").unwrap().into_iter().map(|e| e.name).collect();
+        names.sort();
+        assert_eq!(names, [other, "a.txt"]);
+        assert!(dir.path().join(other).exists() && dir.path().join(&mine).exists());
     }
 
     /// Two writers at once each get their own temporary file: both succeed, and the

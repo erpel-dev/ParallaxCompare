@@ -61,6 +61,9 @@ struct Index {
     /// Where each file sits in its folder's list, to replace a repeated entry
     /// without searching the folder (which made large flat archives quadratic).
     file_at: HashMap<String, usize>,
+    /// Paths that several entries share, with how many: extraction would keep
+    /// the last, so the earlier ones would go unseen in a comparison.
+    repeated: HashMap<String, u32>,
 }
 
 impl Index {
@@ -103,6 +106,18 @@ impl Index {
         }
     }
 
+    /// Records that `n` entries share the file `path`, which [`add_file`](Self::add_file)
+    /// was given once; its id then proves nothing.
+    fn mark_repeated(&mut self, path: &str, n: u32) {
+        let Some(&at) = self.file_at.get(path) else { return };
+        let (parent, _) = split_parent(path);
+        if let Some(entry) = self.dirs.get_mut(parent).and_then(|list| list.get_mut(at)) {
+            entry.quick_id = None;
+        }
+        let count = self.repeated.entry(path.to_string()).or_insert(1);
+        *count = (*count).max(n);
+    }
+
     fn add_file(&mut self, path: &str, kind: EntryKind, size: u64, mtime: Option<i64>, quick_id: Option<QuickId>) {
         let (parent, name) = split_parent(path);
         self.ensure_dir(parent, None);
@@ -112,9 +127,11 @@ impl Index {
         }
         let list = self.dirs.get_mut(parent).expect("parent dir exists");
         let entry = Entry { name: name.to_string(), kind, size, mtime, quick_id, ignored: false };
-        // Later entries win, like extraction would behave.
+        // Later entries win, like extraction would behave; the path is then
+        // ambiguous, and reading it fails rather than compare one of them.
         if let Some(&at) = self.file_at.get(path) {
-            list[at] = entry;
+            *self.repeated.entry(path.to_string()).or_insert(1) += 1;
+            list[at] = Entry { quick_id: None, ..entry };
         } else if let Some(at) =
             self.known_dirs.contains(path).then(|| list.iter().position(|e| e.name == name)).flatten()
         {
@@ -169,11 +186,20 @@ const MAX_DEPTH: usize = 512;
 pub(super) fn entry_hint(size: u64) -> Result<usize> {
     if size > MAX_ENTRY {
         return Err(Error::Unsupported(format!(
-            "an entry of this archive expands to {} MiB, more than a comparison reads",
-            size >> 20
+            "an entry of this archive expands to {} MiB; entries are decompressed up to {} MiB",
+            size >> 20,
+            MAX_ENTRY >> 20
         )));
     }
     Ok(size.min(READ_HINT as u64) as usize)
+}
+
+/// An error about one entry, naming it.
+fn in_entry(path: &str, e: Error) -> Error {
+    match e {
+        Error::Unsupported(m) => Error::Unsupported(format!("{path}: {m}")),
+        e => e,
+    }
 }
 
 /// Reads the `size` bytes of an entry whose header says so.
@@ -424,7 +450,36 @@ fn open_zip(data: ArchiveData, index: &mut Index) -> Result<Backend> {
             index_of.insert(path, i);
         }
     }
+    // The zip crate keeps one entry per name: entries that share a name are found
+    // in the central directory itself, so the earlier ones do not go unseen.
+    let start = archive.offset() + archive.central_directory_start();
+    for (path, n) in repeated_zip_names(&data, start) {
+        index.mark_repeated(&path, n);
+    }
     Ok(Backend::Zip { archive, index_of })
+}
+
+/// Names that several records of a zip's central directory (at `start`) share,
+/// with how many. A damaged directory yields what was read up to the damage.
+fn repeated_zip_names(data: &ArchiveData, start: u64) -> Vec<(String, u32)> {
+    let mut reader = std::io::BufReader::with_capacity(64 << 10, data.reader());
+    if reader.seek(SeekFrom::Start(start)).is_err() {
+        return Vec::new();
+    }
+    let mut seen: HashMap<String, u32> = HashMap::new();
+    let mut header = [0u8; 46];
+    let mut name = Vec::new();
+    while reader.read_exact(&mut header).is_ok() && header[..4] == [0x50, 0x4b, 0x01, 0x02] {
+        let len = |at: usize| u16::from_le_bytes([header[at], header[at + 1]]) as usize;
+        name.resize(len(28), 0);
+        if reader.read_exact(&mut name).is_err() || reader.seek_relative((len(30) + len(32)) as i64).is_err() {
+            break;
+        }
+        if let Some(path) = normalize(&String::from_utf8_lossy(&name)).filter(|p| !p.is_empty() && !p.ends_with('/')) {
+            *seen.entry(path).or_default() += 1;
+        }
+    }
+    seen.into_iter().filter(|(_, n)| *n > 1).collect()
 }
 
 fn open_7z(data: ArchiveData, index: &mut Index, label: &str) -> Result<Backend> {
@@ -513,11 +568,12 @@ fn open_tar(data: ArchiveData, format: ArchiveFormat, index: &mut Index) -> Resu
             }
             tar::EntryType::Regular | tar::EntryType::Continuous | tar::EntryType::GNUSparse => {
                 let size = entry.size();
-                entry_hint(size)?;
                 if !compressed && !kind.is_gnu_sparse() {
-                    // The entry is already in the archive: read it from there.
+                    // The entry is already in the archive: read it from there, as a
+                    // stream, so no size limit applies to comparing it.
                     TarContent::Direct(Span { at: entry.raw_file_position(), len: size })
                 } else {
+                    entry_hint(size).map_err(|e| in_entry(&path, e))?;
                     count(&mut expanded, size, limit)?;
                     let spool = match &mut spool {
                         Some(spool) => spool,
@@ -603,15 +659,23 @@ fn decode_7z_file(
     let password = sevenz_rust2::Password::empty();
     let mut source = data.reader();
     let mut found = None;
+    // Kept as it is, not wrapped in the decoder's error, whose text is a debug dump.
+    let mut failed = None;
     sevenz_rust2::BlockDecoder::new(threads, block, archive, &password, &mut source)
         .for_each_entries(&mut |entry, r| {
             if !entry.is_directory && normalize(&entry.name).as_deref() == Some(path) {
-                found = Some(read_entry(r, entry.size).map_err(std::io::Error::other)?);
+                match read_entry(r, entry.size) {
+                    Ok(data) => found = Some(data),
+                    Err(e) => failed = Some(e),
+                }
                 return Ok(false);
             }
             Ok(true)
         })
         .map_err(Error::archive)?;
+    if let Some(e) = failed {
+        return Err(in_entry(path, e));
+    }
     Ok(found)
 }
 
@@ -883,6 +947,18 @@ impl ArchiveFs {
         block.get(data, archive, b, path, threads)
     }
 
+    /// Fails for a path that several entries of the archive share: which one
+    /// counts is not clear, and comparing only one would hide the others.
+    fn unambiguous(&self, path: &str) -> Result<()> {
+        match self.index.repeated.get(path) {
+            Some(n) => Err(Error::Unsupported(format!(
+                "{} holds {n} entries named {path}; they are not compared, as only one of them could be",
+                self.label
+            ))),
+            None => Ok(()),
+        }
+    }
+
     /// The solid 7z block holding `path`, if it is in one.
     fn solid_block_of(&self, path: &str) -> Option<&Arc<SolidBlock>> {
         let Backend::SevenZ { archive, index_of, solid, .. } = &self.backend else { return None };
@@ -911,6 +987,7 @@ impl Vfs for ArchiveFs {
 
     fn open(&self, path: &str) -> Result<Box<dyn Read + Send>> {
         check_rel(path)?;
+        self.unambiguous(path)?;
         if let Backend::SevenZ { index_of, .. } = &self.backend
             && let Some(block) = self.solid_block_of(path)
         {
@@ -975,6 +1052,7 @@ impl Vfs for ArchiveFs {
 
     fn read(&self, path: &str) -> Result<Data> {
         check_rel(path)?;
+        self.unambiguous(path)?;
         let not_found = || Error::NotFound(join(&self.label, path));
         match &self.backend {
             Backend::Zip { archive, index_of } => {

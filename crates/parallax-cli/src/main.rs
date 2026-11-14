@@ -72,7 +72,8 @@ struct Cli {
     #[arg(long, value_name = "GLOB")]
     include: Vec<String>,
 
-    /// Show archives as files instead of expanding them
+    /// Show archives inside the compared folders as files instead of expanding
+    /// them; an archive given as LEFT or RIGHT is still opened
     #[arg(long)]
     no_archives: bool,
 
@@ -246,8 +247,11 @@ fn compare_folders(cli: &Cli, left: &Source, right: &Source, paint: &Paint) -> R
     let identical = matches!(result.root.status, Status::Same | Status::Similar);
     // Entries that could not be read make the comparison incomplete: exit status 2,
     // after the result is printed.
+    // When the compared roots themselves could not be read, that is the reason.
+    let root_error = (result.root.status == Status::Error).then(|| result.root.message.clone()).flatten();
     let complete = |errors: u64| match errors {
         0 => Ok(identical),
+        _ if root_error.is_some() => anyhow::bail!("{}", root_error.clone().unwrap_or_default()),
         1 => anyhow::bail!("1 entry could not be compared"),
         n => anyhow::bail!("{n} entries could not be compared"),
     };
