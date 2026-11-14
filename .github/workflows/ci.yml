@@ -45,6 +45,13 @@ jobs:
           npm test
           npm run build
 
+      - name: UI smoke tests
+        if: runner.os == 'Linux'
+        working-directory: app
+        run: |
+          npx playwright install --with-deps chromium
+          npm run e2e
+
       - name: Rustfmt
         if: runner.os == 'Linux'
         run: cargo fmt --all --check
