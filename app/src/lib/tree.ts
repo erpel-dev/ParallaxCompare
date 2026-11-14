@@ -243,6 +243,9 @@ export function countFiles(root: Node): Counts {
     for (const child of node.children ?? []) {
       if (child.status === "pending") continue;
       if (isContainer(child) && child.status !== "error" && !closedArchive(child)) {
+        // An identical folder without its entries says how many files it has.
+        c.files += child.sameFiles ?? 0;
+        c.same += child.sameFiles ?? 0;
         walk(child);
         continue;
       }

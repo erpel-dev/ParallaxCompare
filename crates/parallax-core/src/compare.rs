@@ -447,10 +447,16 @@ pub struct Control {
     /// [`PARTIAL_DEPTH`] levels, for showing the result while it is computed.
     /// The caller takes them out as it shows them.
     pub partial: Option<parking_lot::Mutex<Partial>>,
+    /// Entries reported through [`Control::partial`] so far, against [`PARTIAL_ENTRIES`].
+    partial_entries: AtomicU64,
 }
 
 /// How deep [`Control::partial`] reports: the levels a user sees first.
 pub const PARTIAL_DEPTH: usize = 4;
+
+/// How many entries [`Control::partial`] reports below the top level: enough to
+/// show a tree growing, without sending a large tree a second time.
+pub const PARTIAL_ENTRIES: u64 = 20_000;
 
 /// A compare in progress: what is known of the result so far.
 #[derive(Debug, Clone, Default, Serialize)]
@@ -549,7 +555,7 @@ pub fn compare_path(
         return Err(Error::NotFound(rel.to_string()));
     }
     let name = rel.rsplit('/').next().unwrap_or_default().to_string();
-    let mut root = engine.node(rel, name, l.map(as_container), r.map(as_container), true);
+    let mut root = engine.node(rel, name, l.map(as_container), r.map(as_container), true, false);
     if control.cancel.load(Ordering::Relaxed) {
         return Err(Error::Cancelled);
     }
@@ -643,7 +649,9 @@ impl<'a> Engine<'a> {
         self.excludes.matches(rel, name)
     }
 
-    fn node(&self, rel: &str, name: String, l: Option<Entry>, r: Option<Entry>, is_root: bool) -> Node {
+    /// `report`: the folder holding this entry was reported as listed, so its
+    /// outcome is reported too.
+    fn node(&self, rel: &str, name: String, l: Option<Entry>, r: Option<Entry>, is_root: bool, report: bool) -> Node {
         let mut node = Node::new(&name, l.as_ref().map(Side::from), r.as_ref().map(Side::from));
         let result = match (&l, &r) {
             (Some(l), Some(r)) => self.fill_both(&mut node, rel, l, r, is_root),
@@ -658,7 +666,7 @@ impl<'a> Engine<'a> {
         }
         if let Some(partial) = &self.control.partial
             && !is_root
-            && depth(rel) <= PARTIAL_DEPTH
+            && report
         {
             partial.lock().done.push(Finished {
                 path: rel.to_string(),
@@ -765,8 +773,14 @@ impl<'a> Engine<'a> {
         let files =
             pairs.iter().filter(|(_, (l, r))| l.as_ref().or(r.as_ref()).is_some_and(|e| e.kind != EntryKind::Dir));
         self.control.files_listed.fetch_add(files.count() as u64, Ordering::Relaxed);
-        if let Some(partial) = &self.control.partial
+        // The top level always; below it while the budget lasts.
+        let report = self.control.partial.is_some()
             && depth(rel) < PARTIAL_DEPTH
+            && (depth(rel) == 0
+                || self.control.partial_entries.fetch_add(pairs.len() as u64, Ordering::Relaxed) + pairs.len() as u64
+                    <= PARTIAL_ENTRIES);
+        if let Some(partial) = &self.control.partial
+            && report
         {
             let entries = pairs
                 .iter()
@@ -783,7 +797,7 @@ impl<'a> Engine<'a> {
             .into_par_iter()
             .filter_map(|(name, (l, r))| {
                 let child = join(rel, &name);
-                let node = self.node(&child, name, l, r, false);
+                let node = self.node(&child, name, l, r, false, report);
                 // With include patterns, folders without matching files are left out.
                 let empty = node.children().is_empty() && !node.unexpanded() && node.status != Status::Error;
                 let container = node.is_container();
@@ -1146,7 +1160,7 @@ fn kind_change(l: EntryKind, r: EntryKind) -> &'static str {
     }
 }
 
-fn folder_status(children: &[Node]) -> Status {
+pub(crate) fn folder_status(children: &[Node]) -> Status {
     if children.iter().all(|c| c.status == Status::Same) {
         Status::Same
     } else if children.iter().all(|c| matches!(c.status, Status::Same | Status::Similar)) {
