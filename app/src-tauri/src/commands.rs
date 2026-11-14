@@ -654,6 +654,9 @@ pub async fn run_compare(
         start_watching(app.clone(), id, &session);
     }
     let control = Arc::new(Control::with_partial());
+    // Until this compare is done there is no result to answer from: what the
+    // view asks for meanwhile is compared on the spot.
+    *session.tree.lock() = None;
     {
         let mut slot = session.control.lock();
         slot.cancel.store(true, Ordering::Relaxed);
