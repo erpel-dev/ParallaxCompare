@@ -210,11 +210,17 @@ const SECTIONS: &[&str] = &[
 /// Sections whose entries are a set.
 const UNORDERED: &[&str] = &["generators"];
 
-/// Whether a file of this name can be a profile: they have no extension, and
-/// only their content tells them from other such files.
-pub fn may_be_profile(name: &str) -> bool {
-    !base_name(name).contains('.')
+/// No profile is larger than this.
+const PROFILE_LIMIT: u64 = 256 * 1024;
+
+/// Whether a file of this name and size can be a profile: they have no
+/// extension, and only their content tells them from other such files.
+pub fn may_be_profile(name: &str, size: u64) -> bool {
+    size <= PROFILE_LIMIT && !base_name(name).contains('.')
 }
+
+/// How much of a file [`is_ini`] reads to tell a profile.
+pub const SNIFF: u64 = 4096;
 
 /// Whether a file is one of Conan's INI-like files: by name, or a profile (no
 /// extension) by its first entry.
@@ -223,10 +229,10 @@ pub fn is_ini(name: &str, data: &[u8]) -> bool {
     if matches!(base.as_str(), "conanfile.txt" | "conaninfo.txt" | "conanbuildinfo.txt") {
         return true;
     }
-    if !may_be_profile(name) || data.len() > 256 * 1024 {
+    if !may_be_profile(name, data.len() as u64) {
         return false;
     }
-    let Ok(text) = std::str::from_utf8(&data[..data.len().min(4096)]) else { return false };
+    let Ok(text) = std::str::from_utf8(&data[..data.len().min(SNIFF as usize)]) else { return false };
     let first = text.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with("{%"));
     first.is_some_and(|l| {
         l.starts_with("include(")

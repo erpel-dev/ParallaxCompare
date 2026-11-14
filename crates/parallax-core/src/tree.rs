@@ -6,7 +6,9 @@
 
 use serde::Serialize;
 
-use crate::compare::{Node, Side, Status, folder_status};
+use crate::Result;
+use crate::compare::{self, CompareOptions, Control, Includes, Node, Side, Status, folder_status};
+use crate::source::Source;
 use crate::vfs::EntryKind;
 
 /// A node as a view shows it. An identical folder is sent without its entries
@@ -181,6 +183,60 @@ pub fn replace(root: &mut Node, path: &str, replacement: Option<Node>) -> bool {
         done
     }
     place(root, parents, name, replacement, true)
+}
+
+/// Brings `root` up to date after changes at `changed`, comparing each where
+/// the tree has it (see [`refresh_target`]) rather than a folder above it. The
+/// result is what a fresh comparison would hold: with include patterns, a folder
+/// left without matching files goes too. Returns `false`, with nothing done,
+/// when a change needs the root itself compared again.
+pub fn refresh_changed(
+    root: &mut Node,
+    left: &Source,
+    right: &Source,
+    changed: &[String],
+    opts: &CompareOptions,
+) -> Result<bool> {
+    let mut targets: Vec<String> = changed.iter().map(|p| refresh_target(root, p)).collect();
+    targets.sort();
+    targets.dedup();
+    if targets.iter().any(String::is_empty) {
+        return Ok(false);
+    }
+    // Only the outermost of nested targets.
+    let all = targets.clone();
+    targets.retain(|p| !all.iter().any(|q| p.starts_with(&format!("{q}/"))));
+    let includes = Includes::new(&opts.includes)?;
+    for target in &targets {
+        let node = compare::refresh_path(left, right, target, opts, &Control::default()).ok().flatten();
+        let gone = node.is_none();
+        replace(root, target, node);
+        if gone {
+            drop_emptied(root, target, &includes);
+        }
+    }
+    Ok(true)
+}
+
+/// After the entry at `path` went: removes the folders above it that a
+/// comparison with these include patterns leaves out, those without an entry
+/// that no pattern names themselves.
+fn drop_emptied(root: &mut Node, path: &str, includes: &Includes) {
+    if includes.is_empty() {
+        return;
+    }
+    let parent = |path: &str| path.rsplit_once('/').map_or(String::new(), |(dir, _)| dir.to_string());
+    let mut at = parent(path);
+    while !at.is_empty() {
+        let Some(node) = find(root, &at) else { break };
+        let empty =
+            node.is_container() && node.children().is_empty() && !node.unexpanded() && node.status != Status::Error;
+        if !empty || includes.covers(&at) {
+            break;
+        }
+        replace(root, &at, None);
+        at = parent(&at);
+    }
 }
 
 #[cfg(test)]

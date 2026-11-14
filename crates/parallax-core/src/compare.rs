@@ -865,7 +865,15 @@ impl<'a> Engine<'a> {
             && convert::flatbuffers::has_schema(self.right, rrel);
         let content = file && self.opts.compare_contents && (convert::has_content_rule(&l.name) || flatbuffers);
         // Without content rules, differing ids or sizes settle it without reading.
-        let must_read = eol || content;
+        // A format told only by its data (small, without extension): the start of
+        // both files decides whether they are read whole, so that any other such
+        // file is still compared as a stream.
+        let sniff = file
+            && self.opts.compare_contents
+            && !content
+            && convert::may_sniff_content_rule(&l.name, l.size)
+            && convert::may_sniff_content_rule(&r.name, r.size);
+        let must_read = eol || content || sniff;
         if let (Some(a), Some(b)) = (&l.quick_id, &r.quick_id)
             && let Some(equal) = a.matches(b)
         {
@@ -936,8 +944,9 @@ impl<'a> Engine<'a> {
                 }
             };
             let io = |e| Error::io(lrel, e);
-            let (left_head, left_stream) = peek(open(self.left, lrel, left_data)?, 4).map_err(io)?;
-            let (right_head, right_stream) = peek(open(self.right, rrel, right_data)?, 4).map_err(io)?;
+            let head = if sniff { convert::SNIFF } else { 4 };
+            let (left_head, left_stream) = peek(open(self.left, lrel, left_data)?, head).map_err(io)?;
+            let (right_head, right_stream) = peek(open(self.right, rrel, right_data)?, head).map_err(io)?;
             return match compare_streams(left_stream, right_stream, eol, &self.control.cancel)
                 .map_err(|e| self.stream_error(lrel, e))?
             {
@@ -950,6 +959,16 @@ impl<'a> Engine<'a> {
                     Ok(match same_text(&read_left()?, &read_right()?, eol) {
                         true => (Status::Similar, Some(ENCODING_ONLY)),
                         false => (Status::Different, None),
+                    })
+                }
+                Streams::Different
+                    if sniff
+                        && convert::sniffs_content_rule(&l.name, &left_head)
+                        && convert::sniffs_content_rule(&r.name, &right_head) =>
+                {
+                    Ok(match convert::content_equal(&l.name, &read_left()?, &read_right()?) {
+                        Some(reason) => (Status::Similar, Some(reason)),
+                        None => (Status::Different, None),
                     })
                 }
                 Streams::Different => DIFFERENT,
@@ -972,7 +991,9 @@ impl<'a> Engine<'a> {
         if file && self.opts.compare_contents && same_text(&left_data, &right_data, eol) {
             return Ok((Status::Similar, Some(ENCODING_ONLY)));
         }
-        if content && let Some(reason) = convert::content_equal(&l.name, &left_data, &right_data) {
+        if (content || sniff)
+            && let Some(reason) = convert::content_equal(&l.name, &left_data, &right_data)
+        {
             return Ok((Status::Similar, Some(reason)));
         }
         if flatbuffers

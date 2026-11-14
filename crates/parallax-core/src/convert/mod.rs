@@ -856,7 +856,6 @@ pub fn has_content_rule(name: &str) -> bool {
                 .any(|n| f.eq_ignore_ascii_case(n))
         })
         || conan::is_graph_name(name)
-        || conan::may_be_profile(name)
         || office::has_native_reader(&extension(name))
         || visio::XML_EXTENSIONS.contains(&extension(name).as_str())
         || visio::BINARY_EXTENSIONS.contains(&extension(name).as_str())
@@ -945,6 +944,22 @@ pub fn has_content_rule(name: &str) -> bool {
                 | "yaml"
                 | "yml"
         )
+}
+
+/// For names [`has_content_rule`] does not cover: whether a file of this name
+/// and size may still have a content rule that only its data tells (a Conan
+/// profile has no extension). [`sniffs_content_rule`] decides from its start.
+pub fn may_sniff_content_rule(name: &str, size: u64) -> bool {
+    conan::may_be_profile(name, size)
+}
+
+/// How much of a file [`sniffs_content_rule`] needs.
+pub const SNIFF: u64 = conan::SNIFF;
+
+/// Whether the start of a file ([`SNIFF`] bytes of it, or all) shows a format
+/// with a content rule, for a file [`may_sniff_content_rule`] let through.
+pub fn sniffs_content_rule(name: &str, head: &[u8]) -> bool {
+    conan::is_ini(name, head)
 }
 
 /// Whether two byte-different files have equal content, for formats where

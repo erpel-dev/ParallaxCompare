@@ -88,3 +88,96 @@ fn metadata_is_bounded_per_comparison_and_local_archives_are_not_read_whole() {
     assert!(result.root.children().iter().any(|n| n.name() == "only.txt"));
     assert!(!result.root.children().iter().any(|n| n.name() == "0.txt" && n.left().is_some()));
 }
+
+/// Counts, per path, the whole-file reads and the stream opens of a folder.
+struct Traced {
+    inner: LocalFs,
+    reads: Arc<parking_lot::Mutex<Vec<String>>>,
+    opens: Arc<parking_lot::Mutex<Vec<String>>>,
+}
+impl Vfs for Traced {
+    fn label(&self) -> String {
+        self.inner.label()
+    }
+    fn stat(&self, p: &str) -> Result<Entry> {
+        self.inner.stat(p)
+    }
+    fn list(&self, p: &str) -> Result<Vec<Entry>> {
+        self.inner.list(p)
+    }
+    fn read(&self, p: &str) -> Result<Data> {
+        self.reads.lock().push(p.to_string());
+        self.inner.read(p)
+    }
+    fn open(&self, p: &str) -> Result<Box<dyn std::io::Read + Send>> {
+        self.opens.lock().push(p.to_string());
+        self.inner.open(p)
+    }
+    fn local_path(&self, p: &str) -> Option<PathBuf> {
+        self.inner.local_path(p)
+    }
+}
+
+/// A file without an extension may be a Conan profile, which only its data
+/// tells. That must not make every such file be read whole: a large binary
+/// without an extension is compared as a stream, like one with an extension,
+/// and a small one is read whole only when its start shows a profile.
+#[test]
+fn files_without_extension_are_streamed_unless_they_are_profiles() {
+    let dir = tempfile::tempdir().unwrap();
+    let profile = "[settings]\nos=Linux\narch=x86_64\n[options]\nshared=True\n";
+    for (side, first, spaced) in [("l", 0u8, false), ("r", 1u8, true)] {
+        let root = dir.path().join(side);
+        std::fs::create_dir(&root).unwrap();
+        let mut blob = vec![first];
+        blob.resize(1 << 20, 7);
+        std::fs::write(root.join("backup"), &blob).unwrap();
+        std::fs::write(root.join("backup.blob"), &blob).unwrap();
+        // Small, without extension, not a profile: its start is looked at, no more.
+        blob.truncate(200 * 1024);
+        blob.extend_from_slice(if spaced { b"more" } else { b"" });
+        std::fs::write(root.join("small"), &blob).unwrap();
+        let text = if spaced { profile.replace('=', " = ") } else { profile.to_string() };
+        // Padded with comments past the size files on disk are read whole at anyway.
+        std::fs::write(root.join("profile"), format!("{text}{}", "# note\n".repeat(20_000))).unwrap();
+    }
+    let reads = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let opens = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let source = |side: &str| Source {
+        spec: SourceSpec::Local { path: dir.path().join(side).display().to_string() },
+        vfs: Arc::new(Traced {
+            inner: LocalFs::new(dir.path().join(side)),
+            reads: reads.clone(),
+            opens: opens.clone(),
+        }),
+        root: String::new(),
+        watch: None,
+        info: SourceInfo {
+            kind: SourceKind::Folder,
+            display: side.into(),
+            rev: None,
+            commit: None,
+            commit_summary: None,
+            writable: false,
+        },
+    };
+    for strict in [false, true] {
+        reads.lock().clear();
+        opens.lock().clear();
+        let options = CompareOptions { ignore_line_endings: !strict, ..Default::default() };
+        let result = compare::compare(&source("l"), &source("r"), &options, &Control::default()).unwrap();
+        let status = |name: &str| {
+            compare::flatten(&result.root).into_iter().find(|(p, _)| p == name).unwrap_or_else(|| panic!("{name}")).1
+        };
+        let count =
+            |log: &Arc<parking_lot::Mutex<Vec<String>>>, name: &str| log.lock().iter().filter(|p| *p == name).count();
+        for name in ["backup", "backup.blob", "small"] {
+            assert_eq!(status(name), compare::Status::Different, "{name}, strict: {strict}");
+            assert_eq!(count(&reads, name), 0, "whole reads of {name}, strict: {strict}");
+        }
+        // Equal size: both are opened and compared up to the first difference.
+        assert_eq!((count(&opens, "backup"), count(&opens, "backup.blob")), (2, 2), "strict: {strict}");
+        assert_eq!(status("profile"), compare::Status::Similar, "strict: {strict}");
+        assert_eq!(count(&reads, "profile"), 2, "strict: {strict}");
+    }
+}

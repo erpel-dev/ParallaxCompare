@@ -955,23 +955,19 @@ pub async fn refresh_paths(
             session.left.vfs.changed(&session.left.path(path));
             session.right.vfs.changed(&session.right.path(path));
         }
-        let targets: Option<Vec<String>> = session.tree.lock().as_ref().filter(|_| !changed.is_empty()).map(|root| {
-            let mut targets: Vec<String> = changed.iter().map(|p| tree::refresh_target(root, p)).collect();
-            targets.sort();
-            targets.dedup();
-            // Only the outermost of nested targets.
-            let all = targets.clone();
-            targets.retain(|p| !all.iter().any(|q| p.starts_with(&format!("{q}/"))));
-            targets
-        });
-        match targets {
-            Some(targets) if !targets.iter().any(String::is_empty) => {
-                refresh(&session, &targets, &options);
-                let slot = session.tree.lock();
-                Ok(paths.iter().map(|p| slot.as_ref().and_then(|root| tree::find(root, p)).map(tree::entry)).collect())
-            }
-            _ => Ok(refresh(&session, &paths, &options)),
+        // Where the changes are, in the kept result; the view's paths are answered from it.
+        let updated = !changed.is_empty()
+            && match session.tree.lock().as_mut() {
+                Some(root) => {
+                    tree::refresh_changed(root, &session.left, &session.right, &changed, &options).unwrap_or(false)
+                }
+                None => false,
+            };
+        if !updated {
+            return Ok(refresh(&session, &paths, &options));
         }
+        let slot = session.tree.lock();
+        Ok(paths.iter().map(|p| slot.as_ref().and_then(|root| tree::find(root, p)).map(tree::entry)).collect())
     })
     .await
 }

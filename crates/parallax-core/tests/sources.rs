@@ -2066,7 +2066,8 @@ fn names_that_are_not_utf8_are_errors() {
 /// The folder compare decides by name alone whether a file may be "similar"
 /// (`has_content_rule`), before reading it; what the content says is decided
 /// elsewhere, by the data. Every fixture whose data has such a rule must be
-/// covered by its name, or the rule never runs for files of differing size.
+/// covered by its name (or, without an extension, be small enough to have its
+/// start looked at), or the rule never runs for files of differing size.
 #[test]
 fn content_rules_by_name_cover_the_rules_by_data() {
     fn files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
@@ -2085,11 +2086,58 @@ fn content_rules_by_name_cover_the_rules_by_data() {
         // A file has the same content as itself wherever content is defined.
         if parallax_core::convert::content_equal(&name, &data, &data).is_some() {
             with_rule += 1;
-            if !parallax_core::convert::has_content_rule(&name) {
+            if !parallax_core::convert::has_content_rule(&name)
+                && !parallax_core::convert::may_sniff_content_rule(&name, data.len() as u64)
+            {
                 missing.push(name);
             }
         }
     }
     assert!(with_rule > 20, "{with_rule} fixtures with a content rule");
     assert_eq!(missing, Vec::<String>::new());
+}
+
+/// After changes on disk, the kept result is updated where the changes are. It
+/// must then hold what a fresh comparison holds, also with include patterns: a
+/// folder left without matching files goes, unless a pattern names the folder.
+#[test]
+fn incremental_refresh_agrees_with_a_fresh_comparison() {
+    use parallax_core::tree;
+    for (includes, folder_stays) in [(vec!["*.txt"], false), (vec!["*.txt", "folder"], true), (vec![], true)] {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+        for side in [&a, &b] {
+            write(side, &[("folder/deep/a.txt", "same"), ("folder/deep/skip.bin", "same"), ("keep/k.txt", "same")]);
+        }
+        write(&b, &[("keep/k.txt", "changed")]);
+        let opts = CompareOptions { includes: includes.iter().map(|s| s.to_string()).collect(), ..Default::default() };
+        let open = || {
+            open_pair(
+                &SourceSpec::parse(a.to_str().unwrap()),
+                &SourceSpec::parse(b.to_str().unwrap()),
+                SourceOptions::default(),
+                false,
+            )
+            .unwrap()
+        };
+        let (l, r) = open();
+        let mut root = compare::compare(&l, &r, &opts, &Control::default()).unwrap().root;
+        assert!(tree::find(&root, "folder/deep/a.txt").is_some(), "{includes:?}");
+        // The files go on both sides, their folders stay; one file changes back.
+        for side in [&a, &b] {
+            fs::remove_file(side.join("folder/deep/a.txt")).unwrap();
+        }
+        write(&b, &[("keep/k.txt", "same")]);
+        let changed = ["folder/deep/a.txt".to_string(), "keep/k.txt".to_string()];
+        for path in &changed {
+            l.vfs.changed(&l.path(path));
+            r.vfs.changed(&r.path(path));
+        }
+        assert!(tree::refresh_changed(&mut root, &l, &r, &changed, &opts).unwrap());
+        let (l, r) = open();
+        let fresh = compare::compare(&l, &r, &opts, &Control::default()).unwrap().root;
+        assert_eq!(compare::flatten(&root), compare::flatten(&fresh), "{includes:?}");
+        assert_eq!(tree::find(&root, "folder").is_some(), folder_stays, "{includes:?}");
+        assert_eq!(tree::find(&root, "keep").unwrap().status, Status::Same, "{includes:?}");
+    }
 }
