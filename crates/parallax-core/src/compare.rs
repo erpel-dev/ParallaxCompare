@@ -687,10 +687,15 @@ impl<'a> Engine<'a> {
         }
         let left = self.left.vfs.open(&self.left.path(rel))?;
         let right = self.right.vfs.open(&self.right.path(rel))?;
-        Ok(match compare_streams(left, right, false).map_err(|e| Error::io(rel, e))? {
+        Ok(match compare_streams(left, right, false, &self.control.cancel).map_err(|e| self.stream_error(rel, e))? {
             Streams::Same => Status::Same,
             _ => Status::Different,
         })
+    }
+
+    /// A failed stream comparison: cancelled, or the read error.
+    fn stream_error(&self, rel: &str, e: std::io::Error) -> Error {
+        if self.control.cancel.load(Ordering::Relaxed) { Error::Cancelled } else { Error::io(rel, e) }
     }
 
     /// Whether equal ids settle equal content: Git ids always, CRC32 unless verifying.
@@ -712,18 +717,21 @@ impl<'a> Engine<'a> {
         {
             return if l.size == r.size && a == b { SAME } else { DIFFERENT };
         }
-        let eol = self.opts.ignore_line_endings;
-        let flatbuffers = self.opts.compare_contents
+        // A symlink's target is a path: every byte of it counts, line endings too.
+        let file = l.kind == EntryKind::File;
+        let eol = self.opts.ignore_line_endings && file;
+        let flatbuffers = file
+            && self.opts.compare_contents
             && convert::flatbuffers::has_schema(self.left, lrel)
             && convert::flatbuffers::has_schema(self.right, rrel);
-        let content = self.opts.compare_contents && (convert::has_content_rule(&l.name) || flatbuffers);
+        let content = file && self.opts.compare_contents && (convert::has_content_rule(&l.name) || flatbuffers);
         // Without content rules, differing ids or sizes settle it without reading.
         let must_read = eol || content;
         if let (Some(a), Some(b)) = (&l.quick_id, &r.quick_id)
             && let Some(equal) = a.matches(b)
         {
             if equal && l.size == r.size && self.trusts(a) {
-                return SAME;
+                return Ok(by_id(a));
             }
             if !equal && !must_read {
                 return DIFFERENT;
@@ -742,7 +750,7 @@ impl<'a> Engine<'a> {
                 if l.size == r.size && id.matches_data(&data) {
                     // A CRC match still needs the bytes compared below.
                     if self.trusts(id) {
-                        return SAME;
+                        return Ok(by_id(id));
                     }
                 } else if !must_read {
                     return DIFFERENT;
@@ -754,7 +762,7 @@ impl<'a> Engine<'a> {
                 if l.size == r.size && id.matches_data(&data) {
                     // A CRC match still needs the bytes compared below.
                     if self.trusts(id) {
-                        return SAME;
+                        return Ok(by_id(id));
                     }
                 } else if !must_read {
                     return DIFFERENT;
@@ -773,11 +781,14 @@ impl<'a> Engine<'a> {
                 (None, None)
             }
         };
-        // Entries that are decompressed to be read (archives) are compared as streams
-        // that stop at the first difference; files on disk are mapped, which already
-        // reads only as far as the comparison goes. Content rules need all of both.
+        // Compared as streams that stop at the first difference and hold one chunk
+        // at a time: decompressed entries, and large files on disk too, which are
+        // not mapped, so a file truncated meanwhile reads short instead of crashing
+        // the process. Small files on disk are read whole, which is quicker (and
+        // never mapped either). Content rules need all of both.
         let on_disk = |source: &Source, rel: &str| source.vfs.local_path(&source.path(rel)).is_some();
-        let streamed = !content && !(on_disk(self.left, lrel) && on_disk(self.right, rrel));
+        let small = l.size < READ_WHOLE && r.size < READ_WHOLE && on_disk(self.left, lrel) && on_disk(self.right, rrel);
+        let streamed = !content && !small;
         if streamed {
             let open = |source: &Source, rel: &str, data: Option<Data>| -> Result<Box<dyn std::io::Read + Send>> {
                 match data {
@@ -788,11 +799,15 @@ impl<'a> Engine<'a> {
             let io = |e| Error::io(lrel, e);
             let (left_head, left_stream) = peek(open(self.left, lrel, left_data)?, 4).map_err(io)?;
             let (right_head, right_stream) = peek(open(self.right, rrel, right_data)?, 4).map_err(io)?;
-            return match compare_streams(left_stream, right_stream, eol).map_err(io)? {
+            return match compare_streams(left_stream, right_stream, eol, &self.control.cancel)
+                .map_err(|e| self.stream_error(lrel, e))?
+            {
                 Streams::Same => SAME,
                 Streams::LineEndings => Ok((Status::Similar, Some("only line endings differ"))),
                 // Text with a byte order mark is compared as the text view shows it, whole.
-                Streams::Different if self.opts.compare_contents && (has_bom(&left_head) || has_bom(&right_head)) => {
+                Streams::Different
+                    if file && self.opts.compare_contents && (has_bom(&left_head) || has_bom(&right_head)) =>
+                {
                     Ok(match same_text(&read_left()?, &read_right()?, eol) {
                         true => (Status::Similar, Some(ENCODING_ONLY)),
                         false => (Status::Different, None),
@@ -815,7 +830,7 @@ impl<'a> Engine<'a> {
         if eol && !is_binary(&left_data) && !is_binary(&right_data) && equal_ignoring_cr(&left_data, &right_data) {
             return Ok((Status::Similar, Some("only line endings differ")));
         }
-        if self.opts.compare_contents && same_text(&left_data, &right_data, eol) {
+        if file && self.opts.compare_contents && same_text(&left_data, &right_data, eol) {
             return Ok((Status::Similar, Some(ENCODING_ONLY)));
         }
         if content && let Some(reason) = convert::content_equal(&l.name, &left_data, &right_data) {
@@ -832,6 +847,16 @@ impl<'a> Engine<'a> {
         }
         DIFFERENT
     }
+}
+
+/// Files on disk smaller than this are read whole for a comparison, larger ones
+/// as streams. Below the size from which `LocalFs` maps files.
+const READ_WHOLE: u64 = 128 * 1024;
+
+/// `Same` by equal ids: a Git id proves it; a stored CRC32 is taken as proof
+/// without decompressing, which the result says (`--verify-archives` reads them).
+fn by_id(id: &QuickId) -> (Status, Option<&'static str>) {
+    (Status::Same, (!id.proves_equality()).then_some("same size and stored CRC32; contents not decompressed"))
 }
 
 const ENCODING_ONLY: &str = "same text, only the encoding or byte order mark differs";
@@ -875,7 +900,14 @@ fn compare_streams(
     a: Box<dyn std::io::Read + Send>,
     b: Box<dyn std::io::Read + Send>,
     ignore_cr: bool,
+    cancel: &AtomicBool,
 ) -> std::io::Result<Streams> {
+    let cancelled = || {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled"));
+        }
+        Ok(())
+    };
     use std::io::{BufRead, BufReader, Cursor, Read};
     const HEAD: u64 = 8000;
     let head = |r: &mut Box<dyn Read + Send>| -> std::io::Result<Vec<u8>> {
@@ -891,6 +923,7 @@ fn compare_streams(
     // Byte for byte while both are equal.
     let mut ends_with_cr = false;
     loop {
+        cancelled()?;
         let (x, y) = (a.fill_buf()?, b.fill_buf()?);
         if x.is_empty() && y.is_empty() {
             return Ok(Streams::Same);
@@ -914,6 +947,7 @@ fn compare_streams(
     let pending = ends_with_cr;
     let (mut a, mut b) = (Stripped::new(a, pending), Stripped::new(b, pending));
     loop {
+        cancelled()?;
         let (x, y) = (a.available()?, b.available()?);
         if x.is_empty() || y.is_empty() {
             return Ok(if x.is_empty() && y.is_empty() { Streams::LineEndings } else { Streams::Different });
@@ -1082,6 +1116,7 @@ mod tests {
                     Box::new(Trickle(a.clone(), 0, round)),
                     Box::new(Trickle(b.clone(), 0, round + 1)),
                     ignore_cr,
+                    &AtomicBool::new(false),
                 )
                 .unwrap();
                 assert_eq!(got, expected(ignore_cr), "{a:?} vs {b:?}, ignore_cr: {ignore_cr}");
@@ -1092,8 +1127,35 @@ mod tests {
         a.extend_from_slice(b"\0\r\n");
         let b: Vec<u8> = a.iter().copied().filter(|&c| c != b'\r').collect();
         assert_eq!(
-            compare_streams(Box::new(std::io::Cursor::new(a)), Box::new(std::io::Cursor::new(b)), true).unwrap(),
+            compare_streams(
+                Box::new(std::io::Cursor::new(a)),
+                Box::new(std::io::Cursor::new(b)),
+                true,
+                &AtomicBool::new(false)
+            )
+            .unwrap(),
             Streams::LineEndings
         );
+    }
+
+    /// A cancelled comparison stops between chunks, not at the end of a slow stream.
+    #[test]
+    fn stream_comparison_stops_when_cancelled() {
+        struct Endless;
+        impl std::io::Read for Endless {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                buf.fill(b'x');
+                Ok(buf.len())
+            }
+        }
+        let cancel = AtomicBool::new(false);
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                cancel.store(true, Ordering::Relaxed);
+            });
+            let got = compare_streams(Box::new(Endless), Box::new(Endless), false, &cancel);
+            assert_eq!(got.unwrap_err().kind(), std::io::ErrorKind::Interrupted);
+        });
     }
 }

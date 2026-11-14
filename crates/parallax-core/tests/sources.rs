@@ -1543,7 +1543,7 @@ fn zip_entries_claiming_huge_sizes_are_refused() {
     let source = spec.open(SourceOptions::default()).expect("the archive opens");
     // Listing reads only headers; reading the entry is refused.
     let error = source.vfs.read(&source.path("a.txt")).unwrap_err().to_string();
-    assert!(error.contains("more than a comparison reads"), "{error}");
+    assert!(error.contains("entries are decompressed up to 2048 MiB"), "{error}");
 }
 
 /// A compressed tar that expands past the limit is refused instead of being
@@ -1998,4 +1998,67 @@ fn text_that_differs_only_in_encoding_is_similar() {
     fs::write(&azip, zip(text.as_bytes())).unwrap();
     fs::write(&bzip, zip(&utf16)).unwrap();
     assert_eq!(status_of(&statuses(azip.to_str().unwrap(), bzip.to_str().unwrap(), &opts), "t.txt"), Status::Similar);
+}
+
+/// Entries of a zip that share a name are an error, not one of them compared,
+/// with or without verification.
+#[test]
+fn repeated_zip_entries_are_not_compared() {
+    let dir = tempfile::tempdir().unwrap();
+    let zip = |first: &str| {
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        let mut zip = zip::ZipWriter::new(&mut cursor);
+        // The writer refuses a repeated name: written apart, then renamed in place.
+        for (name, data) in [("config.txt", first), ("config.tx_", "same")] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(data.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+        let mut bytes = cursor.into_inner();
+        while let Some(at) = bytes.windows(10).position(|w| w == b"config.tx_") {
+            bytes[at + 9] = b't';
+        }
+        bytes
+    };
+    let (a, b) = (dir.path().join("a.zip"), dir.path().join("b.zip"));
+    fs::write(&a, zip("AAA")).unwrap();
+    fs::write(&b, zip("BBB")).unwrap();
+    for verify in [false, true] {
+        let opts = CompareOptions { verify_checksums: verify, ..Default::default() };
+        let result = statuses(a.to_str().unwrap(), b.to_str().unwrap(), &opts);
+        assert_eq!(status_of(&result, "config.txt"), Status::Error, "verify: {verify}");
+    }
+}
+
+/// A symlink's target is a path: line endings in it count.
+#[cfg(unix)]
+#[test]
+fn symlink_targets_compare_exactly() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+    fs::create_dir(&a).unwrap();
+    fs::create_dir(&b).unwrap();
+    std::os::unix::fs::symlink("alpha\nbeta", a.join("link")).unwrap();
+    std::os::unix::fs::symlink("alpha\r\nbeta", b.join("link")).unwrap();
+    let result = statuses(a.to_str().unwrap(), b.to_str().unwrap(), &CompareOptions::default());
+    assert_eq!(status_of(&result, "link"), Status::Different);
+}
+
+/// A name that is not valid UTF-8 makes its folder an error: shown lossily it
+/// could merge with another name and hide a change.
+#[cfg(target_os = "linux")]
+#[test]
+fn names_that_are_not_utf8_are_errors() {
+    use std::os::unix::ffi::OsStrExt;
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+    for (side, data) in [(&a, "x"), (&b, "y")] {
+        fs::create_dir_all(side.join("sub")).unwrap();
+        fs::write(side.join("sub").join(std::ffi::OsStr::from_bytes(b"\xff.dat")), data).unwrap();
+        fs::write(side.join("sub").join("\u{fffd}.dat"), "same").unwrap();
+        fs::write(side.join("ok.txt"), "same").unwrap();
+    }
+    let result = statuses(a.to_str().unwrap(), b.to_str().unwrap(), &CompareOptions::default());
+    assert_eq!(status_of(&result, "sub"), Status::Error);
+    assert_eq!(status_of(&result, "ok.txt"), Status::Same);
 }

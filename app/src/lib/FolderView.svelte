@@ -1479,7 +1479,7 @@
       {#if n.message}<span>{n.message}</span>{/if}
       {#if n.status === "similar"}
         <span class="dim">rule: {n.message === "only line endings differ" ? "Ignore CRLF/LF differences" : "Equal content counts as similar"}</span>
-      {:else if n.status === "same" && !selectedRow.container}
+      {:else if n.status === "same" && !selectedRow.container && !n.message}
         <span class="dim">{options.mode === "quick" ? "same size and date" : "same bytes"}</span>
       {/if}
       <span class="grow"></span>
