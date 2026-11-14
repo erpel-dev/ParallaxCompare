@@ -54,3 +54,9 @@ jobs:
 
       - name: Tests
         run: cargo test --workspace
+
+      - name: Real disk-full extraction and save recovery (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 10
+        run: ./.github/scripts/windows-disk-full.ps1

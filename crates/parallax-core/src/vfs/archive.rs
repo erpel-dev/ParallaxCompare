@@ -241,8 +241,7 @@ struct SpoolContext {
 
 impl SpoolContext {
     fn error(&self, e: std::io::Error) -> Error {
-        let full = e.kind() == std::io::ErrorKind::StorageFull
-            || (cfg!(windows) && matches!(e.raw_os_error(), Some(39 | 112)));
+        let full = crate::error::storage_full(&e);
         let reason = if full { "Temporary drive is full" } else { "Could not use temporary storage" };
         Error::ArchiveResource(format!(
             "{reason} while decompressing {}. Temporary directory: {}. Free space or choose another temporary directory, then retry. ({e})",
@@ -1029,6 +1028,24 @@ fn civil_to_unix(y: i64, m: i64, d: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn actual_spool_write_enospc_keeps_archive_and_recovery_context() {
+        let mut spool = Spool {
+            file: Arc::new(Mutex::new(std::fs::OpenOptions::new().write(true).open("/dev/full").unwrap())),
+            len: 0,
+            context: Arc::new(SpoolContext { archive: "left.7z".into(), directory: std::env::temp_dir() }),
+        };
+        let error = spool.append(&mut Cursor::new(vec![42; 8192]), 8192).unwrap_err();
+        assert!(matches!(error, Error::ArchiveResource(_)));
+        let message = error.to_string();
+        assert!(
+            message.contains("Temporary drive is full") && message.contains("left.7z") && message.contains("retry"),
+            "{message}"
+        );
+        assert_eq!(spool.len, 0, "failed appends cannot publish a complete entry");
+    }
 
     #[test]
     fn temporary_storage_errors_identify_the_archive_and_directory() {

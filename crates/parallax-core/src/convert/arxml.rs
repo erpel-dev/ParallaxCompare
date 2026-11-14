@@ -4,15 +4,18 @@ use quick_xml::{
     events::{BytesStart, Event},
 };
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 #[derive(Default)]
 struct Node {
     tag: String,
     attrs: BTreeMap<String, String>,
     content: Vec<Item>,
     preserve_space: bool,
-    namespaces: BTreeMap<String, String>,
-    namespace: String,
+    namespaces: Arc<BTreeMap<String, Arc<str>>>,
+    namespace: Arc<str>,
 }
 enum Item {
     Element(Node),
@@ -45,9 +48,9 @@ impl Node {
             .collect::<Result<Vec<_>, String>>()?;
         for (key, value) in &attributes {
             if key == "xmlns" {
-                n.namespaces.insert(String::new(), value.clone());
+                Arc::make_mut(&mut n.namespaces).insert(String::new(), Arc::from(value.as_str()));
             } else if let Some(prefix) = key.strip_prefix("xmlns:") {
-                n.namespaces.insert(prefix.to_owned(), value.clone());
+                Arc::make_mut(&mut n.namespaces).insert(prefix.to_owned(), Arc::from(value.as_str()));
             }
         }
         let qname = e.name();
@@ -59,7 +62,7 @@ impl Node {
         }
         n.tag = name.to_owned();
         if n.namespace != parent.namespace {
-            n.attrs.insert("@namespace".into(), n.namespace.clone());
+            n.attrs.insert("@namespace".into(), n.namespace.to_string());
         }
         for (key, value) in attributes {
             if key == "xmlns" || key.starts_with("xmlns:") {
@@ -80,7 +83,7 @@ impl Node {
             // a changed binding or report equivalent namespace aliases as different.
             let value = if key == "{http://www.w3.org/2001/XMLSchema-instance}type" {
                 let (prefix, name) = value.split_once(':').unwrap_or(("", &value));
-                let uri = n.namespaces.get(prefix).map(String::as_str).unwrap_or("");
+                let uri = n.namespaces.get(prefix).map(|s| s.as_ref()).unwrap_or("");
                 if !prefix.is_empty() && uri.is_empty() {
                     return Err(format!("ARXML: unbound type prefix {prefix}"));
                 }
@@ -118,18 +121,18 @@ impl Node {
         let text = text.trim();
         (!text.is_empty()).then(|| text.to_owned())
     }
-    fn value(&self) -> Value {
+    fn value(mut self) -> Value {
         if self.attrs.is_empty() && self.content.iter().all(|c| matches!(c, Item::Text(_))) {
             return Value::String(
-                self.content
-                    .iter()
-                    .filter_map(|c| if let Item::Text(t) = c { Some(t.as_str()) } else { None })
-                    .collect(),
+                self.content.into_iter().filter_map(|c| if let Item::Text(t) = c { Some(t) } else { None }).collect(),
             );
         }
         let mut out = BTreeMap::<String, Value>::new();
         if !self.attrs.is_empty() {
-            out.insert("@attributes".into(), json!(self.attrs));
+            out.insert(
+                "@attributes".into(),
+                serde_json::to_value(std::mem::take(&mut self.attrs)).expect("string attributes"),
+            );
         }
         let mixed =
             self.preserve_space || self.content.iter().any(|c| matches!(c,Item::Text(t) if !t.trim().is_empty()));
@@ -140,19 +143,25 @@ impl Node {
                 match n.short_name() {
                     Some(name) if names.entry(&n.tag).or_default().insert(name.clone()) => {}
                     _ => {
-                        ambiguous.insert(n.tag.as_str());
+                        ambiguous.insert(n.tag.clone());
                     }
                 }
             }
         }
-        let mut named = BTreeMap::<&str, BTreeMap<String, Value>>::new();
+        let mut named = BTreeMap::<String, BTreeMap<String, Value>>::new();
         let mut ordered = Vec::new();
-        for c in &self.content {
+        drop(names);
+        for c in self.content {
             match c {
-                Item::Element(n) if !mixed && !ambiguous.contains(n.tag.as_str()) => {
-                    named.entry(&n.tag).or_default().insert(n.short_name().expect("unique name"), n.value());
+                Item::Element(mut n) if !mixed && !ambiguous.contains(n.tag.as_str()) => {
+                    let name = n.short_name().expect("unique name");
+                    let tag = std::mem::take(&mut n.tag);
+                    named.entry(tag).or_default().insert(name, n.value());
                 }
-                Item::Element(n) => ordered.push(element(&n.tag, n.value())),
+                Item::Element(mut n) => {
+                    let tag = std::mem::take(&mut n.tag);
+                    ordered.push(element(&tag, n.value()));
+                }
                 Item::Text(t) if mixed => ordered.push(json!({"@text":t})),
                 Item::Text(_) => {}
                 Item::Comment(t) => ordered.push(json!({"@comment":t})),
@@ -243,14 +252,17 @@ pub fn render(text: &str) -> Result<String, String> {
     {
         return Err("ARXML: expected one AUTOSAR root element".into());
     }
-    let mut value = element(&roots[0].tag, roots[0].value());
+    drop(roots);
+    let mut root = None;
     let mut before = Vec::new();
     let mut after = Vec::new();
     let mut seen_root = false;
-    for item in &d.content {
+    for item in d.content {
         let entry = match item {
-            Item::Element(_) => {
+            Item::Element(mut n) => {
                 seen_root = true;
+                let tag = std::mem::take(&mut n.tag);
+                root = Some(element(&tag, n.value()));
                 continue;
             }
             Item::Comment(t) => json!({"@comment": t}),
@@ -263,6 +275,7 @@ pub fn render(text: &str) -> Result<String, String> {
             before.push(entry);
         }
     }
+    let mut value = root.expect("validated root element");
     let object = value.as_object_mut().expect("document object");
     if !before.is_empty() {
         object.insert("@before".into(), Value::Array(before));
