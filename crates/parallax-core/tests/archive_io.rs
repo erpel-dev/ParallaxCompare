@@ -85,6 +85,6 @@ fn metadata_is_bounded_per_comparison_and_local_archives_are_not_read_whole() {
     std::fs::write(dir.path().join("left.zip/only.txt"), "new").unwrap();
     left.vfs.changed("left.zip");
     let result = compare::compare(&left, &right, &CompareOptions::default(), &Control::default()).unwrap();
-    assert!(result.root.children.iter().any(|n| n.name == "only.txt"));
-    assert!(!result.root.children.iter().any(|n| n.name == "0.txt" && n.left.is_some()));
+    assert!(result.root.children().iter().any(|n| n.name() == "only.txt"));
+    assert!(!result.root.children().iter().any(|n| n.name() == "0.txt" && n.left().is_some()));
 }

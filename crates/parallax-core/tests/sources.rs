@@ -343,7 +343,7 @@ fn git_branches() {
 
     // ...and can be expanded on demand.
     let sub = compare::compare_path(&l, &r, "vendor", &CompareOptions::default(), &Control::default()).unwrap();
-    assert_eq!(sub.root.children[0].name, "big");
+    assert_eq!(sub.root.children()[0].name(), "big");
 
     // Compared against the merge-base, main's own README change disappears.
     let (l, r) = open_pair(&left, &right, SourceOptions::default(), true).unwrap();
@@ -577,7 +577,7 @@ fn copy_into_folder_with_gitignore_updates_the_tree() {
     assert!(repo.join("x.log").exists());
     let node = compare::compare_path(&l, &r, "x.log", &CompareOptions::default(), &Control::default()).unwrap().root;
     assert_eq!(node.status, Status::Same);
-    assert!(node.right.unwrap().ignored);
+    assert!(node.right().unwrap().ignored);
     delete(&r, "new").unwrap();
     assert_eq!(refresh("new"), Status::LeftOnly);
     // Asked to, ignore rules hide what they match.
@@ -828,22 +828,22 @@ fn archives_on_demand() {
     let (l, r) = open_pair(&open(a.path()), &open(b.path()), SourceOptions::default(), false).unwrap();
     let opts = CompareOptions { open_archives: false, ..Default::default() };
     let result = compare::compare(&l, &r, &opts, &Control::default()).unwrap();
-    let node = |name: &str| result.root.children.iter().find(|c| c.name == name).unwrap();
-    assert!(node("same.zip").unexpanded && node("same.zip").status == Status::Same);
-    assert!(node("app.zip").unexpanded && node("app.zip").status == Status::Different);
-    assert!(node("only.zip").unexpanded && node("only.zip").status == Status::LeftOnly);
+    let node = |name: &str| result.root.children().iter().find(|c| c.name() == name).unwrap();
+    assert!(node("same.zip").unexpanded() && node("same.zip").status == Status::Same);
+    assert!(node("app.zip").unexpanded() && node("app.zip").status == Status::Different);
+    assert!(node("only.zip").unexpanded() && node("only.zip").status == Status::LeftOnly);
     assert_eq!(result.summary.files, 3);
     // Opened: its entries, with the nested archive closed again.
     let app = compare::compare_path(&l, &r, "app.zip", &opts, &Control::default()).unwrap().root;
     assert_eq!(app.status, Status::Different);
-    let lib = app.children.iter().find(|c| c.name == "lib").unwrap();
-    assert!(lib.children[0].unexpanded && lib.children[0].status == Status::Different);
+    let lib = app.children().iter().find(|c| c.name() == "lib").unwrap();
+    assert!(lib.children()[0].unexpanded() && lib.children()[0].status == Status::Different);
     let inner = compare::compare_path(&l, &r, "app.zip/lib/inner.jar", &opts, &Control::default()).unwrap().root;
-    assert_eq!(inner.children[0].status, Status::Different);
+    assert_eq!(inner.children()[0].status, Status::Different);
     // Patterns that need to look inside open the archives.
     let txt = CompareOptions { includes: vec!["*.txt".into()], ..opts.clone() };
     let result = compare::compare(&l, &r, &txt, &Control::default()).unwrap();
-    assert!(!node_of(&result.root, "app.zip").unexpanded);
+    assert!(!node_of(&result.root, "app.zip").unexpanded());
 }
 
 /// A compare reports the folders it listed and the entries it finished as it goes.
@@ -869,7 +869,7 @@ fn partial_results() {
 }
 
 fn node_of<'a>(root: &'a compare::Node, name: &str) -> &'a compare::Node {
-    root.children.iter().find(|c| c.name == name).unwrap()
+    root.children().iter().find(|c| c.name() == name).unwrap()
 }
 
 /// A tar hard link has the content of the file it names from the archive root.
