@@ -108,14 +108,9 @@ fn bad(message: impl std::fmt::Display) -> Error {
     Error::Unsupported(format!("GitHub PR: {}", plain(&message.to_string())))
 }
 
-/// A message without the prefixes of the errors it went through ("not supported: GitHub PR: …").
+/// A message without the prefix of the errors it went through ("GitHub PR: …").
 fn plain(message: &str) -> String {
-    message
-        .replace(": not supported: GitHub PR: ", ": ")
-        .replace(": not supported: ", ": ")
-        .trim_start_matches("not supported: ")
-        .trim_start_matches("GitHub PR: ")
-        .to_string()
+    message.replace(": GitHub PR: ", ": ").trim_start_matches("GitHub PR: ").to_string()
 }
 
 /// Sign-in advice, unless the program could not start at all (then it would mislead).

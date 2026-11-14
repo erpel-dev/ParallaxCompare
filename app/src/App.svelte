@@ -374,7 +374,7 @@
     const parent = parentOf(tab);
     return {
       back: back ? () => replace(tab, back, "back") : null,
-      backTitle: back ? `Back to ${describe(back)}` : "Back",
+      backTitle: back ? `Back to ${describe(back)} (mouse back button)` : "Back",
       forward: forward ? () => replace(tab, forward, "forward") : null,
       forwardTitle: forward ? `Forward to ${describe(forward)}` : "Forward",
       up: parent || tab.up ? () => goUp(tab) : null,

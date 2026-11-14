@@ -21,3 +21,8 @@ export function baseName(path: string): string {
   const parts = path.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] ?? path;
 }
+
+/** Control characters in a name as their visible symbols (␊ for a line break, ␉ for a tab), so different names never look alike. */
+export function shown(name: string): string {
+  return name.replace(/[\u0000-\u001f\u007f]/g, (c) => String.fromCharCode(c === "\u007f" ? 0x2421 : 0x2400 + c.charCodeAt(0)));
+}

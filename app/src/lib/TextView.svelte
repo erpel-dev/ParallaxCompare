@@ -2231,8 +2231,8 @@
                   <div class="mid">
                     {#if sectionStarts.has(index) && (editable[0] || editable[1])}
                       {@const i = sectionStarts.get(index)!}
-                      {#if editable[0]}<button class="arrow" onclick={(e) => { e.stopPropagation(); copySection(i, 0); }} title="Copy this difference to the left">←<span class="cp"> Copy</span></button>{/if}
-                      {#if editable[1]}<button class="arrow" onclick={(e) => { e.stopPropagation(); copySection(i, 1); }} title="Copy this difference to the right"><span class="cp">Copy </span>→</button>{/if}
+                      {#if editable[0]}<button class="arrow" onclick={(e) => { e.stopPropagation(); copySection(i, 0); }} title="Copy this difference to the left" aria-label="Copy this difference to the left">←</button>{/if}
+                      {#if editable[1]}<button class="arrow" onclick={(e) => { e.stopPropagation(); copySection(i, 1); }} title="Copy this difference to the right" aria-label="Copy this difference to the right">→</button>{/if}
                     {:else}
                       {row && row.k !== "equal" ? { minor: "≈", changed: "≠", removed: "−", added: "+" }[row.k] : ""}
                     {/if}
@@ -2535,11 +2535,8 @@
     color: var(--dim);
     font-size: 11px;
   }
-  /* On the current row the copy arrows are labelled buttons, laid over the panes' edges. */
-  .arrow .cp { display: none; }
-  .row.cur .mid:has(.arrow) { position: relative; z-index: 3; overflow: visible; white-space: nowrap; gap: 3px; }
-  .row.cur .arrow { padding: 0 6px; font-family: var(--ui); border-color: var(--accent); color: var(--accent); background: var(--panel); flex-shrink: 0; }
-  .row.cur .arrow .cp { display: inline; }
+  /* Highlighted on the current row, within the gutter: wider labels would cover the line numbers. */
+  .row.cur .arrow { font-family: var(--ui); border-color: var(--accent); color: var(--accent); background: var(--panel); }
   .arrow {
     padding: 0 3px;
     min-width: 0;
