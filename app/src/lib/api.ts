@@ -248,7 +248,14 @@ export interface Node {
   right: Side | null;
   status: Status;
   children?: Node[];
+  /**
+   * The entries are not here and are loaded when the folder is opened: an
+   * identical folder (the app holds only what differs), one skipped by its Git
+   * tree id, or an archive not opened yet.
+   */
   unexpanded?: boolean;
+  /** For an identical folder sent without its entries: the files in it. */
+  sameFiles?: number;
   message?: string;
 }
 
@@ -740,14 +747,17 @@ export const api = {
   runCompare: (id: number, options: CompareOptions, invalidate = false) =>
     invoke<CompareResult>("run_compare", { id, options, invalidate }),
   cancelCompare: (id: number) => invoke<void>("cancel_compare", { id }),
-  expand: (id: number, path: string, options: CompareOptions) => invoke<Node>("expand", { id, path, options }),
+  /** The entries of a folder that came without them; `deep`: with everything below it. */
+  expand: (id: number, path: string, options: CompareOptions, deep = false) =>
+    invoke<Node>("expand", { id, path, options, deep }),
   copyEntries: (id: number, paths: string[], toRight: boolean, options: CompareOptions) =>
     invoke<OpResult>("copy_entries", { id, paths, toRight, options }),
   deleteEntries: (id: number, paths: string[], left: boolean, permanent: boolean, options: CompareOptions) =>
     invoke<OpResult>("delete_entries", { id, paths, left, permanent, options }),
   cancelOp: (id: number) => invoke<void>("cancel_op", { id }),
-  refreshPaths: (id: number, paths: string[], options: CompareOptions) =>
-    invoke<(Node | null)[]>("refresh_paths", { id, paths, options }),
+  /** `changed`: the changes themselves, which may lie inside folders whose entries are not loaded. */
+  refreshPaths: (id: number, paths: string[], options: CompareOptions, changed: string[] = []) =>
+    invoke<(Node | null)[]>("refresh_paths", { id, paths, options, changed }),
   openFileDiff: (id: number, path: string, options: DiffOptions, syntax: string | null, view: View | null, flatbufferSchemas: [string | null, string | null] | null = null) =>
     invoke<FileDiffInfo>("open_file_diff", { id, path, options, syntax, view, flatbufferSchemas }),
   fileRows: (id: number, start: number, count: number, theme: "dark" | "light", focus: Hit | null = null) =>

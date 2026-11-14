@@ -90,7 +90,8 @@ pub enum Status {
     Error,
 }
 
-#[derive(Debug, Clone, Serialize)]
+/// One side of a compared entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Side {
     pub kind: EntryKind,
     pub size: u64,
@@ -106,20 +107,152 @@ impl From<&Entry> for Side {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
+/// A compared entry and, for a folder, the entries below it.
+///
+/// A large comparison holds millions of these, so the layout is compact: 72
+/// bytes, with short names stored inline and no allocation for a file without
+/// a message. Read it through the accessors.
+#[derive(Debug, Clone)]
 pub struct Node {
-    pub name: String,
-    pub left: Option<Side>,
-    pub right: Option<Side>,
+    name: smol_str::SmolStr,
+    sizes: [u64; 2],
+    /// [`NO_MTIME`] where the side has none.
+    mtimes: [i64; 2],
+    /// Per side: present, kind, ignored; and whether the node is unexpanded.
+    bits: u16,
     pub status: Status,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub children: Vec<Node>,
-    /// An identical subtree that was not walked; its children are loaded on demand.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub unexpanded: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
+    /// What only folders and a few files have: children and a message.
+    extra: Option<Box<Extra>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct Extra {
+    children: Vec<Node>,
+    message: Option<Box<str>>,
+}
+
+const NO_MTIME: i64 = i64::MIN;
+const PRESENT: u16 = 1;
+const KIND_SHIFT: u16 = 1;
+const KIND_MASK: u16 = 0b111;
+const IGNORED: u16 = 1 << 4;
+/// Bits per side; the right side's follow the left's.
+const SIDE_BITS: u16 = 5;
+const UNEXPANDED: u16 = 1 << 10;
+
+const KINDS: [EntryKind; 5] =
+    [EntryKind::File, EntryKind::Dir, EntryKind::Archive, EntryKind::Symlink, EntryKind::Submodule];
+
+impl Node {
+    pub fn new(name: &str, left: Option<Side>, right: Option<Side>) -> Self {
+        let mut node = Node {
+            name: name.into(),
+            sizes: [0; 2],
+            mtimes: [NO_MTIME; 2],
+            bits: 0,
+            status: Status::Same,
+            extra: None,
+        };
+        for (i, side) in [left, right].into_iter().enumerate() {
+            let Some(side) = side else { continue };
+            let kind = KINDS.iter().position(|k| *k == side.kind).unwrap_or(0) as u16;
+            let bits = PRESENT | kind << KIND_SHIFT | if side.ignored { IGNORED } else { 0 };
+            node.bits |= bits << (SIDE_BITS * i as u16);
+            node.sizes[i] = side.size;
+            // A real time of i64::MIN does not occur; it would read as none.
+            node.mtimes[i] = side.mtime.unwrap_or(NO_MTIME);
+        }
+        node
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn set_name(&mut self, name: &str) {
+        self.name = name.into();
+    }
+
+    fn side(&self, i: usize) -> Option<Side> {
+        let bits = self.bits >> (SIDE_BITS * i as u16);
+        (bits & PRESENT != 0).then(|| Side {
+            kind: KINDS[((bits >> KIND_SHIFT) & KIND_MASK) as usize],
+            size: self.sizes[i],
+            mtime: (self.mtimes[i] != NO_MTIME).then_some(self.mtimes[i]),
+            ignored: bits & IGNORED != 0,
+        })
+    }
+
+    pub fn left(&self) -> Option<Side> {
+        self.side(0)
+    }
+
+    pub fn right(&self) -> Option<Side> {
+        self.side(1)
+    }
+
+    /// Whether either side is a folder or an archive.
+    pub fn is_container(&self) -> bool {
+        [self.left(), self.right()].into_iter().flatten().any(|s| s.kind.is_container())
+    }
+
+    pub fn children(&self) -> &[Node] {
+        self.extra.as_ref().map_or(&[], |e| &e.children)
+    }
+
+    pub fn children_mut(&mut self) -> &mut Vec<Node> {
+        &mut self.extra.get_or_insert_default().children
+    }
+
+    pub fn set_children(&mut self, mut children: Vec<Node>) {
+        if children.is_empty() && self.extra.is_none() {
+            return;
+        }
+        children.shrink_to_fit();
+        self.extra.get_or_insert_default().children = children;
+    }
+
+    pub fn message(&self) -> Option<&str> {
+        self.extra.as_ref()?.message.as_deref()
+    }
+
+    pub fn set_message(&mut self, message: Option<&str>) {
+        if message.is_none() && self.extra.is_none() {
+            return;
+        }
+        self.extra.get_or_insert_default().message = message.map(Into::into);
+    }
+
+    /// An identical subtree or closed archive that was not walked; its children
+    /// are compared on demand.
+    pub fn unexpanded(&self) -> bool {
+        self.bits & UNEXPANDED != 0
+    }
+
+    pub fn set_unexpanded(&mut self, on: bool) {
+        if on { self.bits |= UNEXPANDED } else { self.bits &= !UNEXPANDED }
+    }
+}
+
+impl Serialize for Node {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("name", self.name())?;
+        map.serialize_entry("left", &self.left())?;
+        map.serialize_entry("right", &self.right())?;
+        map.serialize_entry("status", &self.status)?;
+        if !self.children().is_empty() {
+            map.serialize_entry("children", self.children())?;
+        }
+        if self.unexpanded() {
+            map.serialize_entry("unexpanded", &true)?;
+        }
+        if let Some(message) = self.message() {
+            map.serialize_entry("message", message)?;
+        }
+        map.end()
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -314,10 +447,16 @@ pub struct Control {
     /// [`PARTIAL_DEPTH`] levels, for showing the result while it is computed.
     /// The caller takes them out as it shows them.
     pub partial: Option<parking_lot::Mutex<Partial>>,
+    /// Entries reported through [`Control::partial`] so far, against [`PARTIAL_ENTRIES`].
+    partial_entries: AtomicU64,
 }
 
 /// How deep [`Control::partial`] reports: the levels a user sees first.
 pub const PARTIAL_DEPTH: usize = 4;
+
+/// How many entries [`Control::partial`] reports below the top level: enough to
+/// show a tree growing, without sending a large tree a second time.
+pub const PARTIAL_ENTRIES: u64 = 20_000;
 
 /// A compare in progress: what is known of the result so far.
 #[derive(Debug, Clone, Default, Serialize)]
@@ -416,11 +555,11 @@ pub fn compare_path(
         return Err(Error::NotFound(rel.to_string()));
     }
     let name = rel.rsplit('/').next().unwrap_or_default().to_string();
-    let mut root = engine.node(rel, name, l.map(as_container), r.map(as_container), true);
+    let mut root = engine.node(rel, name, l.map(as_container), r.map(as_container), true, false);
     if control.cancel.load(Ordering::Relaxed) {
         return Err(Error::Cancelled);
     }
-    root.unexpanded = false;
+    root.set_unexpanded(false);
     let c = &engine.counters;
     let get = |a: &AtomicU64| a.load(Ordering::Relaxed);
     let summary = Summary {
@@ -461,8 +600,8 @@ pub fn refresh_path(
     let root = compare_path(left, right, rel, opts, control)?.root;
     if !rel.is_empty()
         && container
-        && root.children.is_empty()
-        && !root.unexpanded
+        && root.children().is_empty()
+        && !root.unexpanded()
         && root.status != Status::Error
         && !includes.covers(rel)
     {
@@ -510,16 +649,10 @@ impl<'a> Engine<'a> {
         self.excludes.matches(rel, name)
     }
 
-    fn node(&self, rel: &str, name: String, l: Option<Entry>, r: Option<Entry>, is_root: bool) -> Node {
-        let mut node = Node {
-            name,
-            left: l.as_ref().map(Side::from),
-            right: r.as_ref().map(Side::from),
-            status: Status::Same,
-            children: Vec::new(),
-            unexpanded: false,
-            message: None,
-        };
+    /// `report`: the folder holding this entry was reported as listed, so its
+    /// outcome is reported too.
+    fn node(&self, rel: &str, name: String, l: Option<Entry>, r: Option<Entry>, is_root: bool, report: bool) -> Node {
+        let mut node = Node::new(&name, l.as_ref().map(Side::from), r.as_ref().map(Side::from));
         let result = match (&l, &r) {
             (Some(l), Some(r)) => self.fill_both(&mut node, rel, l, r, is_root),
             (Some(l), None) => self.fill_orphan(&mut node, rel, l, true, is_root),
@@ -529,17 +662,17 @@ impl<'a> Engine<'a> {
         if let Err(e) = result {
             self.counters.errors.fetch_add(1, Ordering::Relaxed);
             node.status = Status::Error;
-            node.message = Some(e.to_string());
+            node.set_message(Some(&e.to_string()));
         }
         if let Some(partial) = &self.control.partial
             && !is_root
-            && depth(rel) <= PARTIAL_DEPTH
+            && report
         {
             partial.lock().done.push(Finished {
                 path: rel.to_string(),
                 status: node.status,
-                unexpanded: node.unexpanded,
-                message: node.message.clone(),
+                unexpanded: node.unexpanded(),
+                message: node.message().map(str::to_string),
             });
         }
         node
@@ -554,28 +687,28 @@ impl<'a> Engine<'a> {
                 && a.matches(b) == Some(true)
             {
                 self.counters.identical_subtrees.fetch_add(1, Ordering::Relaxed);
-                node.unexpanded = true;
+                node.set_unexpanded(true);
                 return Ok(());
             }
             if !is_root && self.lazy_archive(rel, l) && self.lazy_archive(rel, r) {
                 // Compared as files; opened when expanded.
                 self.control.files_done.fetch_add(1, Ordering::Relaxed);
                 node.status = self.compare_archive_files(rel, l, r)?;
-                node.unexpanded = true;
+                node.set_unexpanded(true);
                 let counter = if node.status == Status::Same { &self.counters.same } else { &self.counters.different };
                 counter.fetch_add(1, Ordering::Relaxed);
                 if node.status == Status::Different {
-                    node.message = Some("the archives differ; open to compare their contents".into());
+                    node.set_message(Some("the archives differ; open to compare their contents"));
                 }
                 return Ok(());
             }
-            node.children = self.children(rel, true, true)?;
-            node.status = folder_status(&node.children);
+            node.set_children(self.children(rel, true, true)?);
+            node.status = folder_status(node.children());
         } else if !lc && !rc {
             self.control.files_done.fetch_add(1, Ordering::Relaxed);
             let (status, reason) = self.compare_files(rel, rel, l, r)?;
             node.status = status;
-            node.message = reason.map(str::to_string);
+            node.set_message(reason);
             let counter = match status {
                 Status::Same => &self.counters.same,
                 Status::Similar => &self.counters.similar,
@@ -584,8 +717,8 @@ impl<'a> Engine<'a> {
             counter.fetch_add(1, Ordering::Relaxed);
         } else {
             node.status = Status::Different;
-            node.message = Some("a file on one side, a folder on the other".into());
-            node.children = self.children(rel, lc, rc)?;
+            node.set_message(Some("a file on one side, a folder on the other"));
+            node.set_children(self.children(rel, lc, rc)?);
             self.counters.different.fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
@@ -594,12 +727,12 @@ impl<'a> Engine<'a> {
     fn fill_orphan(&self, node: &mut Node, rel: &str, e: &Entry, left: bool, is_root: bool) -> Result<()> {
         node.status = if left { Status::LeftOnly } else { Status::RightOnly };
         if e.kind.is_container() && !is_root && self.lazy_archive(rel, e) {
-            node.unexpanded = true;
+            node.set_unexpanded(true);
             self.control.files_done.fetch_add(1, Ordering::Relaxed);
             let counter = if left { &self.counters.left_only } else { &self.counters.right_only };
             counter.fetch_add(1, Ordering::Relaxed);
         } else if e.kind.is_container() {
-            node.children = self.children(rel, left, !left)?;
+            node.set_children(self.children(rel, left, !left)?);
         } else {
             self.control.files_done.fetch_add(1, Ordering::Relaxed);
             let counter = if left { &self.counters.left_only } else { &self.counters.right_only };
@@ -640,8 +773,14 @@ impl<'a> Engine<'a> {
         let files =
             pairs.iter().filter(|(_, (l, r))| l.as_ref().or(r.as_ref()).is_some_and(|e| e.kind != EntryKind::Dir));
         self.control.files_listed.fetch_add(files.count() as u64, Ordering::Relaxed);
-        if let Some(partial) = &self.control.partial
+        // The top level always; below it while the budget lasts.
+        let report = self.control.partial.is_some()
             && depth(rel) < PARTIAL_DEPTH
+            && (depth(rel) == 0
+                || self.control.partial_entries.fetch_add(pairs.len() as u64, Ordering::Relaxed) + pairs.len() as u64
+                    <= PARTIAL_ENTRIES);
+        if let Some(partial) = &self.control.partial
+            && report
         {
             let entries = pairs
                 .iter()
@@ -658,10 +797,10 @@ impl<'a> Engine<'a> {
             .into_par_iter()
             .filter_map(|(name, (l, r))| {
                 let child = join(rel, &name);
-                let node = self.node(&child, name, l, r, false);
+                let node = self.node(&child, name, l, r, false, report);
                 // With include patterns, folders without matching files are left out.
-                let empty = node.children.is_empty() && !node.unexpanded && node.status != Status::Error;
-                let container = node.left.as_ref().or(node.right.as_ref()).is_some_and(|s| s.kind.is_container());
+                let empty = node.children().is_empty() && !node.unexpanded() && node.status != Status::Error;
+                let container = node.is_container();
                 (!(filtered && container && empty && !self.includes.covers(&child))).then_some(node)
             })
             .collect())
@@ -726,7 +865,15 @@ impl<'a> Engine<'a> {
             && convert::flatbuffers::has_schema(self.right, rrel);
         let content = file && self.opts.compare_contents && (convert::has_content_rule(&l.name) || flatbuffers);
         // Without content rules, differing ids or sizes settle it without reading.
-        let must_read = eol || content;
+        // A format told only by its data (small, without extension): the start of
+        // both files decides whether they are read whole, so that any other such
+        // file is still compared as a stream.
+        let sniff = file
+            && self.opts.compare_contents
+            && !content
+            && convert::may_sniff_content_rule(&l.name, l.size)
+            && convert::may_sniff_content_rule(&r.name, r.size);
+        let must_read = eol || content || sniff;
         if let (Some(a), Some(b)) = (&l.quick_id, &r.quick_id)
             && let Some(equal) = a.matches(b)
         {
@@ -797,8 +944,9 @@ impl<'a> Engine<'a> {
                 }
             };
             let io = |e| Error::io(lrel, e);
-            let (left_head, left_stream) = peek(open(self.left, lrel, left_data)?, 4).map_err(io)?;
-            let (right_head, right_stream) = peek(open(self.right, rrel, right_data)?, 4).map_err(io)?;
+            let head = if sniff { convert::SNIFF } else { 4 };
+            let (left_head, left_stream) = peek(open(self.left, lrel, left_data)?, head).map_err(io)?;
+            let (right_head, right_stream) = peek(open(self.right, rrel, right_data)?, head).map_err(io)?;
             return match compare_streams(left_stream, right_stream, eol, &self.control.cancel)
                 .map_err(|e| self.stream_error(lrel, e))?
             {
@@ -811,6 +959,16 @@ impl<'a> Engine<'a> {
                     Ok(match same_text(&read_left()?, &read_right()?, eol) {
                         true => (Status::Similar, Some(ENCODING_ONLY)),
                         false => (Status::Different, None),
+                    })
+                }
+                Streams::Different
+                    if sniff
+                        && convert::sniffs_content_rule(&l.name, &left_head)
+                        && convert::sniffs_content_rule(&r.name, &right_head) =>
+                {
+                    Ok(match convert::content_equal(&l.name, &read_left()?, &read_right()?) {
+                        Some(reason) => (Status::Similar, Some(reason)),
+                        None => (Status::Different, None),
                     })
                 }
                 Streams::Different => DIFFERENT,
@@ -833,7 +991,9 @@ impl<'a> Engine<'a> {
         if file && self.opts.compare_contents && same_text(&left_data, &right_data, eol) {
             return Ok((Status::Similar, Some(ENCODING_ONLY)));
         }
-        if content && let Some(reason) = convert::content_equal(&l.name, &left_data, &right_data) {
+        if (content || sniff)
+            && let Some(reason) = convert::content_equal(&l.name, &left_data, &right_data)
+        {
             return Ok((Status::Similar, Some(reason)));
         }
         if flatbuffers
@@ -1021,7 +1181,7 @@ fn kind_change(l: EntryKind, r: EntryKind) -> &'static str {
     }
 }
 
-fn folder_status(children: &[Node]) -> Status {
+pub(crate) fn folder_status(children: &[Node]) -> Status {
     if children.iter().all(|c| c.status == Status::Same) {
         Status::Same
     } else if children.iter().all(|c| matches!(c.status, Status::Same | Status::Similar)) {
@@ -1045,8 +1205,8 @@ fn equal_ignoring_cr(a: &[u8], b: &[u8]) -> bool {
 /// Flattens a result tree into `(path, status)` pairs, for the CLI and tests.
 pub fn flatten(node: &Node) -> Vec<(String, Status)> {
     fn walk(node: &Node, prefix: &str, out: &mut Vec<(String, Status)>) {
-        for child in &node.children {
-            let path = join(prefix, &child.name);
+        for child in node.children() {
+            let path = join(prefix, child.name());
             out.push((path.clone(), child.status));
             walk(child, &path, out);
         }

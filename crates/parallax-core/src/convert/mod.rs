@@ -946,6 +946,22 @@ pub fn has_content_rule(name: &str) -> bool {
         )
 }
 
+/// For names [`has_content_rule`] does not cover: whether a file of this name
+/// and size may still have a content rule that only its data tells (a Conan
+/// profile has no extension). [`sniffs_content_rule`] decides from its start.
+pub fn may_sniff_content_rule(name: &str, size: u64) -> bool {
+    conan::may_be_profile(name, size)
+}
+
+/// How much of a file [`sniffs_content_rule`] needs.
+pub const SNIFF: u64 = conan::SNIFF;
+
+/// Whether the start of a file ([`SNIFF`] bytes of it, or all) shows a format
+/// with a content rule, for a file [`may_sniff_content_rule`] let through.
+pub fn sniffs_content_rule(name: &str, head: &[u8]) -> bool {
+    conan::is_ini(name, head)
+}
+
 /// Whether two byte-different files have equal content, for formats where
 /// "content" is well defined: document text, image pixels, the code of a Java
 /// class. The reason to show when they do; `None` when they differ or the format

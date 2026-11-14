@@ -248,7 +248,7 @@ fn compare_folders(cli: &Cli, left: &Source, right: &Source, paint: &Paint) -> R
     // Entries that could not be read make the comparison incomplete: exit status 2,
     // after the result is printed.
     // When the compared roots themselves could not be read, that is the reason.
-    let root_error = (result.root.status == Status::Error).then(|| result.root.message.clone()).flatten();
+    let root_error = (result.root.status == Status::Error).then(|| result.root.message().map(str::to_string)).flatten();
     let complete = |errors: u64| match errors {
         0 => Ok(identical),
         _ if root_error.is_some() => anyhow::bail!("{}", root_error.clone().unwrap_or_default()),
@@ -302,27 +302,23 @@ fn visible(name: &str) -> std::borrow::Cow<'_, str> {
 }
 
 fn print_tree(out: &mut impl Write, node: &Node, prefix: &str, all: bool, paint: &Paint) -> Result<()> {
-    for child in &node.children {
+    for child in node.children() {
         if child.status == Status::Same && !all {
             continue;
         }
-        let path = if prefix.is_empty() { child.name.clone() } else { format!("{prefix}/{}", child.name) };
-        let is_dir = child.left.as_ref().or(child.right.as_ref()).is_some_and(|s| s.kind.is_container());
-        let ignored = [&child.left, &child.right].into_iter().flatten().any(|s| s.ignored);
+        let path = if prefix.is_empty() { child.name().to_string() } else { format!("{prefix}/{}", child.name()) };
+        let is_dir = child.is_container();
+        let ignored = [child.left(), child.right()].into_iter().flatten().any(|s| s.ignored);
         let shown =
             format!("{}{}{}", visible(&path), if is_dir { "/" } else { "" }, if ignored { "  [ignored]" } else { "" });
         let line = match child.status {
             Status::Same => format!("  = {shown}"),
-            Status::Similar => paint.wrap(
-                "33",
-                &format!("  ≈ {shown}{}", child.message.as_deref().map(|m| format!("  ({m})")).unwrap_or_default()),
-            ),
+            Status::Similar => paint
+                .wrap("33", &format!("  ≈ {shown}{}", child.message().map(|m| format!("  ({m})")).unwrap_or_default())),
             Status::Different => paint.wrap("31", &format!("  ≠ {shown}")),
             Status::LeftOnly => paint.wrap("35", &format!("  ← {shown}")),
             Status::RightOnly => paint.wrap("36", &format!("  → {shown}")),
-            Status::Error => {
-                paint.wrap("1;31", &format!("  ! {shown}: {}", child.message.as_deref().unwrap_or("error")))
-            }
+            Status::Error => paint.wrap("1;31", &format!("  ! {shown}: {}", child.message().unwrap_or("error"))),
         };
         writeln!(out, "{line}")?;
         // Orphan folders are summarised by their top entry.

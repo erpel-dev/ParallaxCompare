@@ -63,6 +63,7 @@ mail-parser = { version = "0.11", features = ["full_encoding"] }
 cfb = "0.7"
 calamine = { version = "0.37", default-features = false }
 cap-std = "3"
+smol_str = { version = "0.3", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 sevenz-rust2 = { version = "0.24", default-features = false, features = ["compress", "util"] }

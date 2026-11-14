@@ -28,6 +28,7 @@ pub mod syntax_merge;
 pub mod text;
 pub mod textdiff;
 pub mod tools;
+pub mod tree;
 pub mod versions;
 pub mod vfs;
 pub mod watch;

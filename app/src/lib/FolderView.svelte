@@ -27,7 +27,6 @@
     matchingCount,
     matchingFolders,
     selfMatches,
-    countNodes,
     differingFolders,
     copyFilesBelow,
     findNode,
@@ -230,42 +229,94 @@
       });
   });
 
+  /** Paths of the loaded folders and archives whose entries are not loaded. */
+  function unloaded(root: Node): string[] {
+    const pending: string[] = [];
+    const walk = (node: Node, dir: string) => {
+      for (const c of node.children ?? []) {
+        const p = dir ? `${dir}/${c.name}` : c.name;
+        if (c.unexpanded) pending.push(p);
+        else walk(c, p);
+      }
+    };
+    walk(root, "");
+    return pending;
+  }
+
+  /** Entries that could not be loaded, so they are not asked for again and again. */
+  let unloadable = new Set<string>();
+  let loading = false;
+
   /**
-   * Loads the identical folders not walked yet (skipped by Git tree id), also those
-   * inside them, so all their files show.
+   * Loads all entries that are not loaded yet (identical folders, folders skipped
+   * by Git tree id, closed archives) with everything below them, so all files show.
    */
   async function loadSkipped() {
-    if (!result) return;
-    for (;;) {
-      const pending: string[] = [];
-      const walk = (node: Node, dir: string) => {
-        for (const c of node.children ?? []) {
-          const p = dir ? `${dir}/${c.name}` : c.name;
-          if (c.unexpanded) pending.push(p);
-          else walk(c, p);
-        }
-      };
-      walk(result.root, "");
-      if (!pending.length) break;
-      let loaded = 0;
-      for (const p of pending) {
-        busy = `Loading ${p}…`;
-        try {
-          const node = findNode(result.root, p);
-          const fresh = await api.expand(session.id, p, $state.snapshot(options));
-          if (node) {
-            replaceNode(result.root, p, fresh);
-            loaded++;
+    if (!result || provisional || loading) return;
+    const root = result.root;
+    const pending = unloaded(root).filter((p) => !unloadable.has(p));
+    if (!pending.length) return;
+    loading = true;
+    busy = "Loading all entries…";
+    try {
+      if (pending.length > 8) {
+        // Many: the whole tree at once.
+        const fresh = await api.expand(session.id, "", $state.snapshot(options), true);
+        if (result?.root === root) result = { root: fresh, summary: result.summary };
+      } else {
+        for (const p of pending) {
+          try {
+            const fresh = await api.expand(session.id, p, $state.snapshot(options), true);
+            if (result?.root !== root) break;
+            replaceNode(root, p, fresh);
+          } catch (e) {
+            unloadable.add(p);
+            error = String(e);
           }
-        } catch (e) {
-          error = String(e);
         }
       }
-      // Nothing could be loaded: stop rather than ask again.
-      if (!loaded) break;
+    } catch (e) {
+      for (const p of pending) unloadable.add(p);
+      error = String(e);
+    } finally {
+      loading = false;
+      busy = "";
+      version++;
     }
-    busy = "";
   }
+
+  /** Loads the entries of folders that are open but came without them, e.g. after a refresh. */
+  async function loadOpened() {
+    if (!result || provisional || loading) return;
+    const root = result.root;
+    const missing = (p: string) => !unloadable.has(p) && !!findNode(root, p)?.unexpanded;
+    const pending = [...expanded].filter(missing).sort((a, b) => a.length - b.length);
+    if (!pending.length) return;
+    loading = true;
+    try {
+      for (const p of pending) {
+        if (result?.root !== root) break;
+        if (!missing(p)) continue;
+        try {
+          replaceNode(root, p, await api.expand(session.id, p, $state.snapshot(options)));
+        } catch {
+          unloadable.add(p);
+          expanded.delete(p);
+        }
+      }
+    } finally {
+      loading = false;
+      version++;
+    }
+  }
+
+  // The tree holds identical folders without their entries. Whatever replaced a
+  // part of it (a refresh, a copy, a new compare): what is shown is loaded again.
+  $effect(() => {
+    void version;
+    if (!result || provisional) return;
+    void (flat ? loadSkipped() : loadOpened());
+  });
 
   /** Switches the flat view; identical folders not walked yet are loaded first, so their files show. */
   async function setFlat(on: boolean) {
@@ -542,7 +593,8 @@
       const r = await api.runCompare(session.id, $state.snapshot(options), invalidate);
       // Open folders with differences, but keep huge trees collapsed.
       const opened = provisional ? [...expanded] : [];
-      expanded = new Set([...differingFolders(r.root, countNodes(r.root) > 20000 ? 0 : 400), ...opened]);
+      expanded = new Set([...differingFolders(r.root, r.summary.files > 20000 ? 0 : 400), ...opened]);
+      unloadable = new Set();
       pairStatus = new Map();
       provisional = false;
       result = r;
@@ -957,7 +1009,8 @@
       return;
     }
     const root = result.root;
-    const targets = [...new Set([...deferred].map((p) => refreshTarget(root, p)))];
+    const changed = [...deferred];
+    const targets = [...new Set(changed.map((p) => refreshTarget(root, p)))];
     deferred.clear();
     if (targets.includes("")) {
       run(true);
@@ -967,7 +1020,7 @@
     const outer = targets.filter((p) => !targets.some((q) => p.startsWith(q + "/")));
     forgetPairs(outer);
     try {
-      const nodes = await api.refreshPaths(session.id, outer, $state.snapshot(options));
+      const nodes = await api.refreshPaths(session.id, outer, $state.snapshot(options), changed);
       if (result?.root !== root) return;
       outer.forEach((p, i) => replaceNode(root, p, nodes[i]));
       // A removed last match may leave empty ancestors. Ask the engine only for

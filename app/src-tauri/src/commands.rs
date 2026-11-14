@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
-use parallax_core::compare::{self, CompareOptions, CompareResult, Control, Excludes, Node};
+use parallax_core::compare::{self, CompareOptions, Control, Excludes, Node, Summary};
 use parallax_core::convert::{self, View, syntax};
 use parallax_core::edit::{EditSession, Edited, Pos, Side};
 use parallax_core::highlight::{self, DocHighlighter, Span, ThemeKind};
@@ -16,6 +16,7 @@ use parallax_core::search::{self, SearchOptions, SearchResult};
 use parallax_core::source::{Source, SourceInfo, SourceOptions, SourceSpec, open_pair};
 use parallax_core::text::{self, LineEnding, TextDoc};
 use parallax_core::textdiff::{self, DiffOptions, DiffStats, RowKind, Section};
+use parallax_core::tree::{self, ViewNode};
 use parallax_core::vfs::git::{GitRepo, RefList};
 use parallax_core::vfs::{Change, Data, EntryKind, split_parent};
 use parallax_core::watch::{Watcher, WriteGuard};
@@ -151,6 +152,9 @@ struct Session {
     /// The excludes of the last compare: changes there are not reported.
     excludes: Arc<RwLock<Excludes>>,
     exclude_patterns: Mutex<Vec<String>>,
+    /// The result of the last finished compare, kept up to date by refreshes.
+    /// The web view holds only the part of it that is shown (see [`tree`]).
+    tree: Mutex<Option<Node>>,
 }
 
 impl Session {
@@ -552,6 +556,7 @@ pub async fn open_session(
         watcher: Mutex::default(),
         excludes: Arc::new(RwLock::new(excludes)),
         exclude_patterns: Mutex::new(CompareOptions::default().excludes),
+        tree: Mutex::default(),
     });
     state.sessions.lock().insert(id, session.clone());
     start_watching(app, id, &session);
@@ -638,7 +643,7 @@ pub async fn run_compare(
     id: u64,
     options: CompareOptions,
     invalidate: bool,
-) -> CmdResult<CompareResult> {
+) -> CmdResult<ViewResult> {
     let session = state.session(id)?;
     if *session.exclude_patterns.lock() != options.excludes
         && let Ok(excludes) = Excludes::new(&options.excludes)
@@ -649,6 +654,9 @@ pub async fn run_compare(
         start_watching(app.clone(), id, &session);
     }
     let control = Arc::new(Control::with_partial());
+    // Until this compare is done there is no result to answer from: what the
+    // view asks for meanwhile is compared on the spot.
+    *session.tree.lock() = None;
     {
         let mut slot = session.control.lock();
         slot.cancel.store(true, Ordering::Relaxed);
@@ -674,11 +682,22 @@ pub async fn run_compare(
             session.left.vfs.changed(&session.left.path(""));
             session.right.vfs.changed(&session.right.path(""));
         }
-        compare::compare(&session.left, &session.right, &options, &control).map_err(err)
+        let result = compare::compare(&session.left, &session.right, &options, &control).map_err(err)?;
+        let view = ViewResult { root: tree::view(&result.root, false), summary: result.summary };
+        *session.tree.lock() = Some(result.root);
+        Ok(view)
     })
     .await;
     done.store(true, Ordering::Relaxed);
     result
+}
+
+/// A compare result as the web view gets it: identical folders come without
+/// their entries, which [`expand`] hands out when they are opened.
+#[derive(Serialize)]
+pub struct ViewResult {
+    root: ViewNode,
+    summary: Summary,
 }
 
 #[tauri::command]
@@ -687,15 +706,53 @@ pub fn cancel_compare(state: State<'_, AppState>, id: u64) -> CmdResult<()> {
     Ok(())
 }
 
-/// Compares one subtree again: expands an identical Git folder or refreshes after a change.
+/// The entries of the folder at `path`: from the kept result, or compared now
+/// when the folder was not walked (identical by Git tree id, or a closed
+/// archive). With `deep`, everything below it, for views that show all files.
 #[tauri::command]
-pub async fn expand(state: State<'_, AppState>, id: u64, path: String, options: CompareOptions) -> CmdResult<Node> {
+pub async fn expand(
+    state: State<'_, AppState>,
+    id: u64,
+    path: String,
+    options: CompareOptions,
+    deep: Option<bool>,
+) -> CmdResult<ViewNode> {
     check_paths(std::slice::from_ref(&path))?;
     let session = state.session(id)?;
+    let deep = deep.unwrap_or(false);
     blocking(move || {
-        compare::compare_path(&session.left, &session.right, &path, &options, &Control::default())
-            .map(|r| r.root)
-            .map_err(err)
+        let walk = |path: &str| {
+            compare::compare_path(&session.left, &session.right, path, &options, &Control::default())
+                .map(|r| r.root)
+                .map_err(err)
+        };
+        // What was not walked at or below the path, when all of it is wanted.
+        let pending = match session.tree.lock().as_ref() {
+            Some(root) => match tree::find(root, &path) {
+                Some(_) if deep => tree::unwalked(root, &path),
+                Some(node) if node.unexpanded() => vec![path.clone()],
+                Some(_) => Vec::new(),
+                // Not in the kept result (a compare is running, or it is new): as before.
+                None => return walk(&path).map(|node| tree::view(&node, deep)),
+            },
+            None => return walk(&path).map(|node| tree::view(&node, deep)),
+        };
+        let mut pending = pending;
+        // Folders that were not walked can hold more of them.
+        while let Some(at) = pending.pop() {
+            let fresh = walk(&at)?;
+            let mut slot = session.tree.lock();
+            let Some(root) = slot.as_mut() else { break };
+            tree::replace(root, &at, Some(fresh));
+            if deep {
+                pending.extend(tree::unwalked(root, &at));
+            }
+        }
+        let slot = session.tree.lock();
+        match slot.as_ref().and_then(|root| tree::find(root, &path)) {
+            Some(node) => Ok(tree::view(node, deep)),
+            None => Err(format!("not found: {path}")),
+        }
     })
     .await
 }
@@ -706,7 +763,7 @@ pub async fn expand(state: State<'_, AppState>, id: u64, path: String, options: 
 #[serde(rename_all = "camelCase")]
 pub struct OpResult {
     /// Per path: the node, or `None` when it is gone from both sides.
-    nodes: Vec<Option<Node>>,
+    nodes: Vec<Option<ViewNode>>,
     error: Option<String>,
     /// Paths that could not be moved to the trash and are still there.
     not_trashed: Vec<String>,
@@ -757,12 +814,22 @@ async fn run_op(
     result
 }
 
-/// Compares `paths` again; `None` for a path that is gone from both sides.
-fn refresh(session: &Session, paths: &[String], options: &CompareOptions) -> Vec<Option<Node>> {
+/// Compares `paths` again and brings the kept result up to date; `None` for a
+/// path that is gone from both sides.
+fn refresh(session: &Session, paths: &[String], options: &CompareOptions) -> Vec<Option<ViewNode>> {
     paths
         .iter()
         .map(|path| {
-            compare::refresh_path(&session.left, &session.right, path, options, &Control::default()).ok().flatten()
+            let node =
+                compare::refresh_path(&session.left, &session.right, path, options, &Control::default()).ok().flatten();
+            let view = node.as_ref().map(tree::entry);
+            if let Some(root) = session.tree.lock().as_mut() {
+                // The root goes only when a full compare replaces it.
+                if !path.is_empty() || node.is_some() {
+                    tree::replace(root, path, node);
+                }
+            }
+            view
         })
         .collect()
 }
@@ -866,21 +933,41 @@ pub fn cancel_op(state: State<'_, AppState>, id: u64) -> CmdResult<()> {
 }
 
 /// Compares `paths` again after they changed outside the app (or in a file tab).
+///
+/// The web view holds identical folders without their entries, so for a change
+/// inside one it can only name the folder. With `changed`, the changes
+/// themselves, the kept result is updated where they are and `paths` are
+/// answered from it, instead of comparing such a folder as a whole.
 #[tauri::command]
 pub async fn refresh_paths(
     state: State<'_, AppState>,
     id: u64,
     paths: Vec<String>,
     options: CompareOptions,
-) -> CmdResult<Vec<Option<Node>>> {
+    changed: Option<Vec<String>>,
+) -> CmdResult<Vec<Option<ViewNode>>> {
     check_paths(&paths)?;
+    let changed = changed.unwrap_or_default();
+    check_paths(&changed)?;
     let session = state.session(id)?;
     blocking(move || {
-        for path in &paths {
+        for path in paths.iter().chain(&changed) {
             session.left.vfs.changed(&session.left.path(path));
             session.right.vfs.changed(&session.right.path(path));
         }
-        Ok(refresh(&session, &paths, &options))
+        // Where the changes are, in the kept result; the view's paths are answered from it.
+        let updated = !changed.is_empty()
+            && match session.tree.lock().as_mut() {
+                Some(root) => {
+                    tree::refresh_changed(root, &session.left, &session.right, &changed, &options).unwrap_or(false)
+                }
+                None => false,
+            };
+        if !updated {
+            return Ok(refresh(&session, &paths, &options));
+        }
+        let slot = session.tree.lock();
+        Ok(paths.iter().map(|p| slot.as_ref().and_then(|root| tree::find(root, p)).map(tree::entry)).collect())
     })
     .await
 }

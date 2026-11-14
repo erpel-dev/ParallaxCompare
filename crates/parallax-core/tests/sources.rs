@@ -343,7 +343,7 @@ fn git_branches() {
 
     // ...and can be expanded on demand.
     let sub = compare::compare_path(&l, &r, "vendor", &CompareOptions::default(), &Control::default()).unwrap();
-    assert_eq!(sub.root.children[0].name, "big");
+    assert_eq!(sub.root.children()[0].name(), "big");
 
     // Compared against the merge-base, main's own README change disappears.
     let (l, r) = open_pair(&left, &right, SourceOptions::default(), true).unwrap();
@@ -577,7 +577,7 @@ fn copy_into_folder_with_gitignore_updates_the_tree() {
     assert!(repo.join("x.log").exists());
     let node = compare::compare_path(&l, &r, "x.log", &CompareOptions::default(), &Control::default()).unwrap().root;
     assert_eq!(node.status, Status::Same);
-    assert!(node.right.unwrap().ignored);
+    assert!(node.right().unwrap().ignored);
     delete(&r, "new").unwrap();
     assert_eq!(refresh("new"), Status::LeftOnly);
     // Asked to, ignore rules hide what they match.
@@ -828,22 +828,22 @@ fn archives_on_demand() {
     let (l, r) = open_pair(&open(a.path()), &open(b.path()), SourceOptions::default(), false).unwrap();
     let opts = CompareOptions { open_archives: false, ..Default::default() };
     let result = compare::compare(&l, &r, &opts, &Control::default()).unwrap();
-    let node = |name: &str| result.root.children.iter().find(|c| c.name == name).unwrap();
-    assert!(node("same.zip").unexpanded && node("same.zip").status == Status::Same);
-    assert!(node("app.zip").unexpanded && node("app.zip").status == Status::Different);
-    assert!(node("only.zip").unexpanded && node("only.zip").status == Status::LeftOnly);
+    let node = |name: &str| result.root.children().iter().find(|c| c.name() == name).unwrap();
+    assert!(node("same.zip").unexpanded() && node("same.zip").status == Status::Same);
+    assert!(node("app.zip").unexpanded() && node("app.zip").status == Status::Different);
+    assert!(node("only.zip").unexpanded() && node("only.zip").status == Status::LeftOnly);
     assert_eq!(result.summary.files, 3);
     // Opened: its entries, with the nested archive closed again.
     let app = compare::compare_path(&l, &r, "app.zip", &opts, &Control::default()).unwrap().root;
     assert_eq!(app.status, Status::Different);
-    let lib = app.children.iter().find(|c| c.name == "lib").unwrap();
-    assert!(lib.children[0].unexpanded && lib.children[0].status == Status::Different);
+    let lib = app.children().iter().find(|c| c.name() == "lib").unwrap();
+    assert!(lib.children()[0].unexpanded() && lib.children()[0].status == Status::Different);
     let inner = compare::compare_path(&l, &r, "app.zip/lib/inner.jar", &opts, &Control::default()).unwrap().root;
-    assert_eq!(inner.children[0].status, Status::Different);
+    assert_eq!(inner.children()[0].status, Status::Different);
     // Patterns that need to look inside open the archives.
     let txt = CompareOptions { includes: vec!["*.txt".into()], ..opts.clone() };
     let result = compare::compare(&l, &r, &txt, &Control::default()).unwrap();
-    assert!(!node_of(&result.root, "app.zip").unexpanded);
+    assert!(!node_of(&result.root, "app.zip").unexpanded());
 }
 
 /// A compare reports the folders it listed and the entries it finished as it goes.
@@ -869,7 +869,7 @@ fn partial_results() {
 }
 
 fn node_of<'a>(root: &'a compare::Node, name: &str) -> &'a compare::Node {
-    root.children.iter().find(|c| c.name == name).unwrap()
+    root.children().iter().find(|c| c.name() == name).unwrap()
 }
 
 /// A tar hard link has the content of the file it names from the archive root.
@@ -2061,4 +2061,83 @@ fn names_that_are_not_utf8_are_errors() {
     let result = statuses(a.to_str().unwrap(), b.to_str().unwrap(), &CompareOptions::default());
     assert_eq!(status_of(&result, "sub"), Status::Error);
     assert_eq!(status_of(&result, "ok.txt"), Status::Same);
+}
+
+/// The folder compare decides by name alone whether a file may be "similar"
+/// (`has_content_rule`), before reading it; what the content says is decided
+/// elsewhere, by the data. Every fixture whose data has such a rule must be
+/// covered by its name (or, without an extension, be small enough to have its
+/// start looked at), or the rule never runs for files of differing size.
+#[test]
+fn content_rules_by_name_cover_the_rules_by_data() {
+    fn files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()) {
+            if entry.is_dir() { files(&entry, out) } else { out.push(entry) }
+        }
+    }
+    let mut all = Vec::new();
+    files(&Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures"), &mut all);
+    assert!(all.len() > 50, "{} fixtures", all.len());
+    let mut missing = Vec::new();
+    let mut with_rule = 0;
+    for path in all {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let data = fs::read(&path).unwrap();
+        // A file has the same content as itself wherever content is defined.
+        if parallax_core::convert::content_equal(&name, &data, &data).is_some() {
+            with_rule += 1;
+            if !parallax_core::convert::has_content_rule(&name)
+                && !parallax_core::convert::may_sniff_content_rule(&name, data.len() as u64)
+            {
+                missing.push(name);
+            }
+        }
+    }
+    assert!(with_rule > 20, "{with_rule} fixtures with a content rule");
+    assert_eq!(missing, Vec::<String>::new());
+}
+
+/// After changes on disk, the kept result is updated where the changes are. It
+/// must then hold what a fresh comparison holds, also with include patterns: a
+/// folder left without matching files goes, unless a pattern names the folder.
+#[test]
+fn incremental_refresh_agrees_with_a_fresh_comparison() {
+    use parallax_core::tree;
+    for (includes, folder_stays) in [(vec!["*.txt"], false), (vec!["*.txt", "folder"], true), (vec![], true)] {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+        for side in [&a, &b] {
+            write(side, &[("folder/deep/a.txt", "same"), ("folder/deep/skip.bin", "same"), ("keep/k.txt", "same")]);
+        }
+        write(&b, &[("keep/k.txt", "changed")]);
+        let opts = CompareOptions { includes: includes.iter().map(|s| s.to_string()).collect(), ..Default::default() };
+        let open = || {
+            open_pair(
+                &SourceSpec::parse(a.to_str().unwrap()),
+                &SourceSpec::parse(b.to_str().unwrap()),
+                SourceOptions::default(),
+                false,
+            )
+            .unwrap()
+        };
+        let (l, r) = open();
+        let mut root = compare::compare(&l, &r, &opts, &Control::default()).unwrap().root;
+        assert!(tree::find(&root, "folder/deep/a.txt").is_some(), "{includes:?}");
+        // The files go on both sides, their folders stay; one file changes back.
+        for side in [&a, &b] {
+            fs::remove_file(side.join("folder/deep/a.txt")).unwrap();
+        }
+        write(&b, &[("keep/k.txt", "same")]);
+        let changed = ["folder/deep/a.txt".to_string(), "keep/k.txt".to_string()];
+        for path in &changed {
+            l.vfs.changed(&l.path(path));
+            r.vfs.changed(&r.path(path));
+        }
+        assert!(tree::refresh_changed(&mut root, &l, &r, &changed, &opts).unwrap());
+        let (l, r) = open();
+        let fresh = compare::compare(&l, &r, &opts, &Control::default()).unwrap().root;
+        assert_eq!(compare::flatten(&root), compare::flatten(&fresh), "{includes:?}");
+        assert_eq!(tree::find(&root, "folder").is_some(), folder_stays, "{includes:?}");
+        assert_eq!(tree::find(&root, "keep").unwrap().status, Status::Same, "{includes:?}");
+    }
 }
