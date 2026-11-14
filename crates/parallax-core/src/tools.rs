@@ -51,7 +51,7 @@ fn run_text(name: &str, program: &str, args: &[&str], limit: Duration) -> (Check
             let c = if message.contains("could not be run") {
                 check(State::Missing, format!("{program} is not installed or not on PATH"))
             } else {
-                check(State::Broken, message.trim_start_matches("not supported: ").to_string())
+                check(State::Broken, message)
             };
             (c, String::new())
         }

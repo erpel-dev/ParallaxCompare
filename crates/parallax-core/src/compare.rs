@@ -785,11 +785,19 @@ impl<'a> Engine<'a> {
                     None => source.vfs.open(&source.path(rel)),
                 }
             };
-            let left_stream = open(self.left, lrel, left_data)?;
-            let right_stream = open(self.right, rrel, right_data)?;
-            return match compare_streams(left_stream, right_stream, eol).map_err(|e| Error::io(lrel, e))? {
+            let io = |e| Error::io(lrel, e);
+            let (left_head, left_stream) = peek(open(self.left, lrel, left_data)?, 4).map_err(io)?;
+            let (right_head, right_stream) = peek(open(self.right, rrel, right_data)?, 4).map_err(io)?;
+            return match compare_streams(left_stream, right_stream, eol).map_err(io)? {
                 Streams::Same => SAME,
                 Streams::LineEndings => Ok((Status::Similar, Some("only line endings differ"))),
+                // Text with a byte order mark is compared as the text view shows it, whole.
+                Streams::Different if self.opts.compare_contents && (has_bom(&left_head) || has_bom(&right_head)) => {
+                    Ok(match same_text(&read_left()?, &read_right()?, eol) {
+                        true => (Status::Similar, Some(ENCODING_ONLY)),
+                        false => (Status::Different, None),
+                    })
+                }
                 Streams::Different => DIFFERENT,
             };
         }
@@ -807,6 +815,9 @@ impl<'a> Engine<'a> {
         if eol && !is_binary(&left_data) && !is_binary(&right_data) && equal_ignoring_cr(&left_data, &right_data) {
             return Ok((Status::Similar, Some("only line endings differ")));
         }
+        if self.opts.compare_contents && same_text(&left_data, &right_data, eol) {
+            return Ok((Status::Similar, Some(ENCODING_ONLY)));
+        }
         if content && let Some(reason) = convert::content_equal(&l.name, &left_data, &right_data) {
             return Ok((Status::Similar, Some(reason)));
         }
@@ -821,6 +832,32 @@ impl<'a> Engine<'a> {
         }
         DIFFERENT
     }
+}
+
+const ENCODING_ONLY: &str = "same text, only the encoding or byte order mark differs";
+
+/// Whether `data` starts with a UTF-8 or UTF-16 byte order mark.
+fn has_bom(data: &[u8]) -> bool {
+    encoding_rs::Encoding::for_bom(data).is_some()
+}
+
+/// Whether two texts, at least one with a byte order mark, decode to the same
+/// text (with `ignore_cr`, also once `\r\n` counts as `\n`). Files without one
+/// are left to the byte comparison: guessing an encoding is no proof.
+fn same_text(a: &[u8], b: &[u8], ignore_cr: bool) -> bool {
+    if !(has_bom(a) || has_bom(b)) || is_binary(a) || is_binary(b) {
+        return false;
+    }
+    let (a, b) = (crate::text::decode(a), crate::text::decode(b));
+    a.text == b.text || ignore_cr && equal_ignoring_cr(a.text.as_bytes(), b.text.as_bytes())
+}
+
+/// The first `n` bytes of a stream, and the stream as a whole again.
+fn peek(mut r: Box<dyn std::io::Read + Send>, n: u64) -> std::io::Result<(Vec<u8>, Box<dyn std::io::Read + Send>)> {
+    use std::io::Read;
+    let mut head = Vec::new();
+    r.by_ref().take(n).read_to_end(&mut head)?;
+    Ok((head.clone(), Box::new(std::io::Cursor::new(head).chain(r))))
 }
 
 #[derive(Debug, PartialEq, Eq)]

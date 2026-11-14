@@ -221,7 +221,7 @@ impl GitRepo {
 
     pub fn resolve(&self, rev: &str) -> Result<ResolvedRev> {
         self.with(|repo| {
-            let id = repo.rev_parse_single(rev).map_err(Error::git)?;
+            let id = repo.rev_parse_single(rev).map_err(|e| bad_revision(rev, e))?;
             let object = id.object().map_err(Error::git)?;
             match object.kind {
                 gix::objs::Kind::Tree => Ok(ResolvedRev { commit: None, tree: object.id }),
@@ -287,9 +287,21 @@ impl GitRepo {
     }
 }
 
+/// A revision that names nothing, said without the parser's internals
+/// (`delegate.traverse(NthAncestor(200)) failed`).
+fn bad_revision(rev: &str, e: impl std::fmt::Display) -> Error {
+    let text = e.to_string();
+    let why = if ["NthAncestor", "NthParent", "navigation"].iter().any(|w| text.contains(w)) {
+        "the history has no such ancestor or parent"
+    } else {
+        "no branch, tag or commit has that name"
+    };
+    Error::Git(format!("no revision \"{rev}\" in this repository: {why}"))
+}
+
 /// The commit a revision names, through annotated tags.
 fn commit_of(repo: &gix::Repository, rev: &str) -> Result<ObjectId> {
-    let object = repo.rev_parse_single(rev).map_err(Error::git)?.object().map_err(Error::git)?;
+    let object = repo.rev_parse_single(rev).map_err(|e| bad_revision(rev, e))?.object().map_err(Error::git)?;
     Ok(object.peel_to_commit().map_err(Error::git)?.id)
 }
 

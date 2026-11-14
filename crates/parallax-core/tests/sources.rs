@@ -1950,3 +1950,52 @@ fn copying_a_symlink_cannot_escape_through_a_destination_parent() {
     assert!(copy(&l, &r, "sub/link").is_err());
     assert_eq!(fs::read_to_string(outside.path().join("link")).unwrap(), "DO NOT REMOVE");
 }
+
+/// The same text in UTF-8 and in UTF-16 with a byte order mark is similar, as
+/// the text view shows it, on disk and inside archives; without a mark, or
+/// comparing by bytes, it is not.
+#[test]
+fn text_that_differs_only_in_encoding_is_similar() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (dir.path().join("left"), dir.path().join("right"));
+    let text = "Grüße\r\nzweite Zeile\n";
+    let mut utf16 = vec![0xFF, 0xFE];
+    utf16.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+    let mut utf8_bom = vec![0xEF, 0xBB, 0xBF];
+    utf8_bom.extend_from_slice(text.as_bytes());
+    write(&a, &[("u16.txt", text), ("bom.txt", text), ("lf.txt", text), ("changed.txt", text)]);
+    fs::create_dir_all(&b).unwrap();
+    fs::write(b.join("u16.txt"), &utf16).unwrap();
+    fs::write(b.join("bom.txt"), &utf8_bom).unwrap();
+    let mut lf_bom = vec![0xEF, 0xBB, 0xBF];
+    lf_bom.extend_from_slice(text.replace("\r\n", "\n").as_bytes());
+    fs::write(b.join("lf.txt"), &lf_bom).unwrap();
+    let mut changed = vec![0xFF, 0xFE];
+    changed.extend("Grüsse\r\nzweite Zeile\n".encode_utf16().flat_map(u16::to_le_bytes));
+    fs::write(b.join("changed.txt"), &changed).unwrap();
+    let (l, r) = (a.to_str().unwrap(), b.to_str().unwrap());
+    let opts = CompareOptions::default();
+    let result = statuses(l, r, &opts);
+    for name in ["u16.txt", "bom.txt", "lf.txt"] {
+        assert_eq!(status_of(&result, name), Status::Similar, "{name}");
+    }
+    assert_eq!(status_of(&result, "changed.txt"), Status::Different);
+    let strict = CompareOptions { ignore_line_endings: false, ..Default::default() };
+    assert_eq!(status_of(&statuses(l, r, &strict), "lf.txt"), Status::Different);
+    let bytes_only = CompareOptions { compare_contents: false, ..Default::default() };
+    assert_eq!(status_of(&statuses(l, r, &bytes_only), "u16.txt"), Status::Different);
+
+    // Inside archives, compared as streams.
+    let zip = |data: &[u8]| {
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        let mut zip = zip::ZipWriter::new(&mut cursor);
+        zip.start_file("t.txt", zip::write::SimpleFileOptions::default()).unwrap();
+        zip.write_all(data).unwrap();
+        zip.finish().unwrap();
+        cursor.into_inner()
+    };
+    let (azip, bzip) = (dir.path().join("a.zip"), dir.path().join("b.zip"));
+    fs::write(&azip, zip(text.as_bytes())).unwrap();
+    fs::write(&bzip, zip(&utf16)).unwrap();
+    assert_eq!(status_of(&statuses(azip.to_str().unwrap(), bzip.to_str().unwrap(), &opts), "t.txt"), Status::Similar);
+}

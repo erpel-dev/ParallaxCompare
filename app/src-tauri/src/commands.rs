@@ -294,21 +294,13 @@ pub async fn preview_source(
 
 #[tauri::command]
 pub async fn resolve_pull_request(url: String) -> CmdResult<parallax_core::pull_request::PullRequestComparison> {
-    blocking(move || parallax_core::pull_request::resolve(&url).map_err(message)).await
+    blocking(move || parallax_core::pull_request::resolve(&url).map_err(err)).await
 }
 
 /// Whether git and gh work for a pull request URL, shown before it is resolved.
 #[tauri::command]
 pub async fn pull_request_tools(url: String) -> CmdResult<parallax_core::pull_request::Tools> {
-    blocking(move || parallax_core::pull_request::tools(&url).map_err(message)).await
-}
-
-/// An error's message without the "not supported:" its kind adds.
-fn message(e: parallax_core::Error) -> String {
-    match e {
-        parallax_core::Error::Unsupported(message) => message,
-        e => err(e),
-    }
+    blocking(move || parallax_core::pull_request::tools(&url).map_err(err)).await
 }
 
 /// Opens a link or file with the system's default app. Inside an AppImage the
@@ -346,24 +338,24 @@ pub async fn pull_request_conversation(
     url: String,
     head: String,
 ) -> CmdResult<parallax_core::pull_request::Conversation> {
-    blocking(move || parallax_core::pull_request::conversation(&url, &head).map_err(message)).await
+    blocking(move || parallax_core::pull_request::conversation(&url, &head).map_err(err)).await
 }
 
 /// CI data can finish or fail independently of comments.
 #[tauri::command]
 pub async fn pull_request_checks(url: String, head: String) -> CmdResult<parallax_core::pull_request::CheckDetails> {
-    blocking(move || parallax_core::pull_request::check_details(&url, &head).map_err(message)).await
+    blocking(move || parallax_core::pull_request::check_details(&url, &head).map_err(err)).await
 }
 #[tauri::command]
 pub async fn pull_request_files(url: String) -> CmdResult<parallax_core::pull_request::FileDetails> {
-    blocking(move || parallax_core::pull_request::file_details(&url).map_err(message)).await
+    blocking(move || parallax_core::pull_request::file_details(&url).map_err(err)).await
 }
 
 /// Changes a pull request's conversation: a reply, a comment, resolving, editing or
 /// deleting a comment, or the viewer's pending review. Only on an explicit click.
 #[tauri::command]
 pub async fn pull_request_write(url: String, change: parallax_core::pull_request::Write) -> CmdResult<()> {
-    blocking(move || parallax_core::pull_request::write(&url, change).map_err(message)).await
+    blocking(move || parallax_core::pull_request::write(&url, change).map_err(err)).await
 }
 
 /// Opens a link of a pull request's conversation in the browser: HTTPS links on

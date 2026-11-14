@@ -25,7 +25,8 @@
   const reviews = $derived(data ? reviewSummary(data) : []);
   const people = $derived(reviews.filter((r) => !r.bot && (r.state === "APPROVED" || r.state === "CHANGES_REQUESTED")));
   const bots = $derived(new Set([...(data?.threads ?? []).flatMap((t) => t.comments.filter((c) => c.bot).map((c) => c.author)), ...reviews.filter((r) => r.bot).map((r) => r.author)]).size);
-  const open = $derived(data ? data.threads.filter((t) => !t.resolved).length : 0);
+  // As the panel's Open tab counts them: outdated threads are listed apart.
+  const open = $derived(data ? data.threads.filter((t) => !t.resolved && !t.outdated).length : 0);
   const ci = $derived(data?.annotations.length ?? 0);
   const checks = $derived(data?.checks);
   const totalChecks = $derived(checks ? checks.passed + checks.failed + checks.pending : 0);

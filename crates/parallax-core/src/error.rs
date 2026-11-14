@@ -24,7 +24,8 @@ pub enum Error {
     ArchiveResource(String),
     #[error("invalid source: {0}")]
     InvalidSource(String),
-    #[error("not supported: {0}")]
+    /// What cannot be read or done, in a sentence that stands on its own.
+    #[error("{0}")]
     Unsupported(String),
     #[error("cancelled")]
     Cancelled,

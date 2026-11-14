@@ -216,3 +216,43 @@ fn syntax_strategy_is_built_in() {
     let (code, out, _) = merge(&[&files[..], &["--strategy", "syntax"]].concat());
     assert_eq!((code, out.as_str()), (0, "struct C {\n    a: u8,\n    b: u8,\n    c: u8,\n}\n"));
 }
+
+/// Errors name the cause once, and a revision that names nothing is said plainly.
+#[test]
+fn errors_are_plain() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("missing");
+    let out = Command::new(env!("CARGO_BIN_EXE_parallax")).arg(&missing).arg(dir.path()).output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(err.matches("os error").count(), 1, "{err}");
+
+    let repo = dir.path().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let ok = Command::new("git").current_dir(&repo).args(args).status().map(|s| s.success()).unwrap_or(false);
+        assert!(ok, "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    fs::write(repo.join("a.txt"), "a").unwrap();
+    git(&["add", "."]);
+    git(&["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "a"]);
+    let at = |rev: &str| format!("{}@{rev}", repo.display());
+    for (rev, why) in [("HEAD~5", "no such ancestor"), ("nosuch", "no branch, tag or commit")] {
+        let out = Command::new(env!("CARGO_BIN_EXE_parallax")).arg(at(rev)).arg(at("HEAD")).output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains(&format!("no revision \"{rev}\"")) && err.contains(why), "{err}");
+        assert!(!err.contains("delegate") && !err.contains("input="), "{err}");
+    }
+}
+
+/// A line break or tab in a name is shown as a symbol, on one line.
+#[cfg(unix)]
+#[test]
+fn control_characters_in_names_are_visible() {
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    fs::write(a.path().join("new\nline.txt"), "x").unwrap();
+    fs::write(b.path().join("tab\there.txt"), "x").unwrap();
+    let (_, out) = parallax(&[a.path().to_str().unwrap(), b.path().to_str().unwrap()]);
+    assert!(out.contains("← new␊line.txt") && out.contains("→ tab␉here.txt"), "{out}");
+}

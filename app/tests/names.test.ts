@@ -11,3 +11,11 @@ test('versions are named as people know them', () => {
   assert.equal(sourceName({ type: 'gitRev', repo: '/home/me/work', rev: 'v1.0', subpath: '' }), 'v1.0');
   assert.equal(sourceName({ type: 'local', path: '/home/me/work/src/cart.ts' }, 2), 'src/cart.ts');
 });
+
+test('control characters in names are shown as symbols', async () => {
+  const { shown } = await import('../src/lib/format.ts');
+  assert.equal(shown('new\nline.txt'), 'new␊line.txt');
+  assert.equal(shown('tab\there.txt'), 'tab␉here.txt');
+  assert.equal(shown('del\u007f'), 'del␡');
+  assert.equal(shown('plain name.txt'), 'plain name.txt');
+});

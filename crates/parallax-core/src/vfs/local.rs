@@ -256,6 +256,13 @@ fn entry_from_path(path: &Path, name: String) -> Option<Entry> {
 }
 
 fn entry_and_meta(path: &Path, name: String) -> Option<(Entry, fs::Metadata)> {
+    // A write in progress, or one cut off: not part of the folder.
+    if let Some(alive) = temp_owner_alive(&name) {
+        if !alive && untouched_for(path, std::time::Duration::from_secs(600)) {
+            let _ = fs::remove_file(path);
+        }
+        return None;
+    }
     let meta = fs::symlink_metadata(path).ok()?;
     // Symlinks are not followed: like Git and tar, a link is compared by its target
     // path. Following them would also loop forever on links to a parent folder.
@@ -558,6 +565,40 @@ pub(crate) fn replace_file_at(
     result
 }
 
+/// For the temporary file of a write ([`replace_file_at`], named
+/// `.{name}.{pid}-{n}.parallax-tmp`): whether the process writing it may still
+/// run. `None` for any other name. Only Linux can tell a finished process
+/// apart; elsewhere every such file counts as in use and is only left out.
+fn temp_owner_alive(name: &str) -> Option<bool> {
+    let stem = name.strip_prefix('.')?.strip_suffix(".parallax-tmp")?;
+    let (_, tail) = stem.rsplit_once('.')?;
+    let (pid, n) = tail.split_once('-')?;
+    let pid: u32 = pid.parse().ok()?;
+    n.parse::<u64>().ok()?;
+    if pid == std::process::id() || !cfg!(target_os = "linux") {
+        return Some(true);
+    }
+    Some(Path::new("/proc").join(pid.to_string()).exists())
+}
+
+/// Whether nothing changed `path` (its data or its attributes) for `age`. A
+/// process in another sandbox is not in this one's `/proc`, but its write keeps
+/// changing the file until it is renamed into place.
+fn untouched_for(path: &Path, age: std::time::Duration) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(meta) = fs::symlink_metadata(path) else { return false };
+        let changed = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(meta.ctime().max(0) as u64);
+        SystemTime::now().duration_since(changed).is_ok_and(|d| d >= age)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, age);
+        false
+    }
+}
+
 /// Whether `a` and `b` are the same file on disk, also through hard links,
 /// symlinked folders or other spellings of the path. A symlink at `b` itself
 /// counts as its own entry.
@@ -598,6 +639,32 @@ pub(crate) fn make_symlink(link_to: &str, at: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use crate::progress::Progress;
+
+    /// The temporary files of writes are not part of a folder; those of a
+    /// process that has ended are removed once they are old enough.
+    #[test]
+    fn temporary_files_of_writes_are_left_out() {
+        assert_eq!(temp_owner_alive("a.txt"), None);
+        assert_eq!(temp_owner_alive(".a.txt.x-1.parallax-tmp"), None);
+        assert_eq!(temp_owner_alive(&format!(".a.txt.{}-3.parallax-tmp", std::process::id())), Some(true));
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), "a").unwrap();
+        let mine = format!(".a.txt.{}-0.parallax-tmp", std::process::id());
+        fs::write(dir.path().join(&mine), "partial").unwrap();
+        // No process has this id: Linux limits them to 2^22.
+        let gone = ".b.txt.4999999-0.parallax-tmp";
+        fs::write(dir.path().join(gone), "partial").unwrap();
+        let fs_ = LocalFs::new(dir.path());
+        let names: Vec<_> = fs_.list("").unwrap().into_iter().map(|e| e.name).collect();
+        assert_eq!(names, ["a.txt"]);
+        // Too recent to be removed, even with its process gone.
+        assert!(dir.path().join(gone).exists() && dir.path().join(&mine).exists());
+        if cfg!(target_os = "linux") {
+            assert_eq!(temp_owner_alive(gone), Some(false));
+            assert!(untouched_for(&dir.path().join(gone), std::time::Duration::ZERO));
+            assert!(!untouched_for(&dir.path().join(gone), std::time::Duration::from_secs(600)));
+        }
+    }
 
     /// Two writers at once each get their own temporary file: both succeed, and the
     /// file ends up as one of them wrote it, whole.

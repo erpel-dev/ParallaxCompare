@@ -16,7 +16,7 @@
   import { loadVersions } from "./versions";
   import PathBar, { type SideEdit } from "./PathBar.svelte";
   import { scaledWheel, scrollScale, spacerHeight, windowOffset } from "./vscroll";
-  import { formatSize, formatTime } from "./format";
+  import { formatSize, formatTime, shown } from "./format";
   import PrBar from "./PrBar.svelte";
   import ThreadPanel from "./ThreadPanel.svelte";
   import { countsByPath, prConversations } from "./prConversation.svelte";
@@ -199,7 +199,17 @@
     const all = flat ? flatRows.filter((r) => r.pending || selfMatches(r.node, filter)) : flatten(result.root, expanded, filter);
     return onlyCommented && prCounts ? all.filter((r) => prCounts.has(r.path)) : all;
   });
+  /** Beyond this many levels the indent steps are narrow, so deep names keep room. */
+  const DEEP = 12;
+  function indent(depth: number): number {
+    return depth <= DEEP ? depth * 16 : DEEP * 16 + (depth - DEEP) * 4;
+  }
   const rowByPath = $derived(new Map(rows.map((r) => [r.path, r])));
+  /** The selected rows still shown: a deleted, copied-away or filtered-out row no longer counts. */
+  const selectedPaths = $derived.by(() => {
+    void version;
+    return selection.size ? rows.filter((r) => selection.has(r.path)).map((r) => r.path) : [];
+  });
 
   // Matched files are compared once they are shown.
   let comparing = false;
@@ -383,9 +393,9 @@
   const selectedRow = $derived(selectedIndex >= 0 ? rows[selectedIndex] : null);
   /** With two rows selected: the entries "Compare these" compares. */
   const pair = $derived.by(() => {
-    if (selection.size !== 2) return null;
-    const picked = rows.filter((r) => selection.has(r.path));
-    return picked.length === 2 ? pairRows(picked[0], picked[1]) : null;
+    if (selectedPaths.length !== 2) return null;
+    const picked = selectedPaths.map((p) => rowByPath.get(p)!);
+    return picked.every(Boolean) ? pairRows(picked[0], picked[1]) : null;
   });
 
   // Reveal a row once the comparison is there; folders on the way are opened.
@@ -797,11 +807,7 @@
   }
 
   /** The selected paths, in display order, without those inside another selected folder. */
-  const targets = $derived.by(() => {
-    void version;
-    const paths = rows.filter((r) => selection.has(r.path)).map((r) => r.path);
-    return selectionTargets(paths);
-  });
+  const targets = $derived(selectionTargets(selectedPaths));
 
   /** Shared by action availability and operations; indexed in both tree and flat views. */
   const presentTargets = $derived.by(() => {
@@ -1036,7 +1042,7 @@
     const paths = present(left);
     const incoming = present(!left);
     const n = paths.length;
-    const multiple = selection.size > 1;
+    const multiple = selectedPaths.length > 1;
     const what = (n: number) => `${n} item${n === 1 ? "" : "s"}`;
     const kind = entry?.kind === "dir" ? "folder" : "file";
     const items: MenuItem[] = [
@@ -1095,7 +1101,7 @@
     }
     const filename = sidePath(path, left).split("/").pop() ?? path;
     const scope = multiple
-      ? targets.length !== selection.size ? `${what(n)} on the ${side} · ${selection.size} rows selected (includes nested entries)`
+      ? targets.length !== selectedPaths.length ? `${what(n)} on the ${side} · ${selectedPaths.length} rows selected (includes nested entries)`
         : `${n} of ${targets.length} selected items exist on the ${side}`
       : entry ? "" : `Missing on the ${side}`;
     const shownPath = multiple && n === 1 ? paths[0] : path;
@@ -1421,14 +1427,14 @@
                 {@const other = i === 0 ? row.node.right : row.node.left}
                 <!-- svelte-ignore a11y_no_static_element_interactions -->
                 <div class="side" class:r={i === 1} class:ignored={side.ignored} data-side={i === 0 ? "left" : "right"} onmousedown={() => (activeSide = i === 0 ? "left" : "right")} oncontextmenu={(e) => { e.preventDefault(); rowMenu(row.path, i === 0 ? "left" : "right", e.clientX, e.clientY); }}>
-                  <span class="name" style:padding-left="{row.depth * 16}px">
+                  <span class="name" style:padding-left="{indent(row.depth)}px" title={row.depth > DEEP ? `Level ${row.depth + 1}: ${shown(row.path)}` : undefined}>
                     {#if row.container}
                       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
                       <span class="chev" onclick={(e) => { e.stopPropagation(); toggle(row.path); }}>{row.expanded ? "▾" : "▸"}</span>
                     {:else}
                       <span class="chev"></span>
                     {/if}
-                    <span class="icon">{icon(side)}</span>{#if row.folders?.[i]}<span class="dir">{row.folders[i]}/</span>{/if}{i === 1 && row.rightPath ? row.rightPath.split("/").pop() : row.node.name}{#if side.ignored && !row.inIgnored?.[i]}<span class="ignored-tag" title="Ignored by Git: a .gitignore rule matches it, and it is not tracked">ignored</span>{/if}{#if prCounts && (i === 1 || !row.node.right) && (!row.container || !row.expanded)}{@const c = prCounts.get(row.path)}{#if c}<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions --><span class="prc" title="Pull request: {c.open} open threads, {c.findings} findings, {c.warnings} CI warnings, {c.resolved} resolved. Click for the details." onclick={(e) => { e.stopPropagation(); showPrDetails(row.path); }}>{#if c.open}<span class="cm">💬 {c.open}</span>{/if}{#if c.findings}<span class="fd">● {c.findings}</span>{/if}{#if c.warnings}<span class="wn">▲ {c.warnings}</span>{/if}{#if !c.open && !c.findings && !c.warnings && c.resolved}<span class="rs">{c.resolved} resolved</span>{/if}</span>{/if}{/if}{#if row.container && !row.expanded && !row.pending && !closedArchive(row.node) && (i === 0 || !row.node.left)}{@const c = inside(row.node)}{#if c.files > c.same}<span class="inside" title="Files in this folder that are not the same, by status">{#if c.different}<span class="different">{c.different.toLocaleString()} ≠</span>{/if}{#if c.similar}<span class="similar">{c.similar.toLocaleString()} ≈</span>{/if}{#if c.leftOnly}<span class="leftOnly">{c.leftOnly.toLocaleString()} ◀</span>{/if}{#if c.rightOnly}<span class="rightOnly">{c.rightOnly.toLocaleString()} ▶</span>{/if}{#if c.errors}<span class="error">{c.errors.toLocaleString()} !</span>{/if}</span>{/if}{/if}
+                    <span class="icon">{icon(side)}</span>{#if row.folders?.[i]}<span class="dir">{shown(row.folders[i])}/</span>{/if}{shown(i === 1 && row.rightPath ? (row.rightPath.split("/").pop() ?? "") : row.node.name)}{#if side.ignored && !row.inIgnored?.[i]}<span class="ignored-tag" title="Ignored by Git: a .gitignore rule matches it, and it is not tracked">ignored</span>{/if}{#if prCounts && (i === 1 || !row.node.right) && (!row.container || !row.expanded)}{@const c = prCounts.get(row.path)}{#if c}<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions --><span class="prc" title="Pull request: {c.open} open threads, {c.findings} findings, {c.warnings} CI warnings, {c.resolved} resolved. Click for the details." onclick={(e) => { e.stopPropagation(); showPrDetails(row.path); }}>{#if c.open}<span class="cm">💬 {c.open}</span>{/if}{#if c.findings}<span class="fd">● {c.findings}</span>{/if}{#if c.warnings}<span class="wn">▲ {c.warnings}</span>{/if}{#if !c.open && !c.findings && !c.warnings && c.resolved}<span class="rs">{c.resolved} resolved</span>{/if}</span>{/if}{/if}{#if row.container && !row.expanded && !row.pending && !closedArchive(row.node) && (i === 0 || !row.node.left)}{@const c = inside(row.node)}{#if c.files > c.same}<span class="inside" title="Files in this folder that are not the same, by status">{#if c.different}<span class="different">{c.different.toLocaleString()} ≠</span>{/if}{#if c.similar}<span class="similar">{c.similar.toLocaleString()} ≈</span>{/if}{#if c.leftOnly}<span class="leftOnly">{c.leftOnly.toLocaleString()} ◀</span>{/if}{#if c.rightOnly}<span class="rightOnly">{c.rightOnly.toLocaleString()} ▶</span>{/if}{#if c.errors}<span class="error">{c.errors.toLocaleString()} !</span>{/if}</span>{/if}{/if}
                   </span>
                   <span class="num">{side.kind === "dir" ? "" : formatSize(side.size)}</span>
                   {#if i === 1}<span class="num chg">{changeOf(row.node)}</span>{/if}
@@ -1450,9 +1456,10 @@
   {/if}
   </div>
 
-  {#if selection.size > 0 && result}
+  {#if selectedPaths.length > 0 && result}
     <div class="selbar" role="toolbar" aria-label="Selected entries">
-      <b>{selection.size === 1 ? "1 selected" : `${selection.size.toLocaleString()} selected`}</b>
+      <b>{selectedPaths.length === 1 ? "1 row selected" : `${selectedPaths.length.toLocaleString()} rows selected`}</b>
+      {#if targets.length !== selectedPaths.length}<span class="dim" title="Copy and delete act on these; what is inside a selected folder goes with it">{targets.length === 1 ? "1 top-level item" : `${targets.length.toLocaleString()} top-level items`}</span>{/if}
       <button disabled={!canCopy[1] || !!op} onclick={() => copy(true)} title="Copy the selection from the left side to the right side">Copy left → right</button>
       <button disabled={!canCopy[0] || !!op} onclick={() => copy(false)} title="Copy the selection from the right side to the left side">Copy right → left</button>
       {#if pair && onCompareRows}<button onclick={() => onCompareRows?.(pair![0], pair![1])} title="Compare the two selected entries with each other, e.g. a file renamed between the sides">⇆ Compare these</button>{/if}
@@ -1467,7 +1474,7 @@
     {@const n = selectedRow.node}
     {@const label = { same: "Same", similar: "Similar", different: "Different", leftOnly: "Left only", rightOnly: "Right only", error: "Error", pending: "Being compared" }[n.status]}
     <div class="detailline" aria-live="polite">
-      <b class="name">{n.name}</b>
+      <b class="name">{shown(n.name)}</b>
       <span class="st {n.status}">{glyph[n.status]} {label}</span>
       {#if n.message}<span>{n.message}</span>{/if}
       {#if n.status === "similar"}
@@ -1493,7 +1500,6 @@
       <span>{op.label}…{op.total ? ` ${op.done.toLocaleString()} / ${op.total.toLocaleString()}` : ""}</span>
       <button class="small" onclick={() => api.cancelOp(session.id)}>Cancel</button>
     {/if}
-    {#if targets.length > 1}<span>{targets.length} selected</span>{/if}
   </div>
   {#if menu}
     <Menu items={menu.items} context={menu.context} x={menu.x} y={menu.y} returnFocus={viewport} onClose={() => (menu = null)} />
@@ -1580,7 +1586,7 @@
   .detailline .st.different, .detailline .st.error { color: var(--diff); }
   .detailline .st.leftOnly { color: var(--left-only); }
   .detailline .st.rightOnly { color: var(--right-only); }
-  .detailline .dim { color: var(--dim); }
+  .detailline .dim, .selbar .dim { color: var(--dim); }
   .detailline .grow { flex: 1; }
   .scope { margin: 0; font-size: 11.5px; color: var(--dim); max-width: 300px; }
   label small { color: var(--dim); font-size: 10.5px; margin-left: auto; padding-left: 8px; white-space: nowrap; }

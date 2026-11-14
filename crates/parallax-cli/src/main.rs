@@ -175,10 +175,28 @@ fn exit(result: Result<bool>) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("parallax: {e:#}");
+            eprintln!("parallax: {}", chain(&e));
             ExitCode::from(2)
         }
     }
+}
+
+/// An error and its causes in one line, like `{:#}`, but without a cause that
+/// the message before it already ends with (`path: No such file …` would
+/// otherwise repeat it).
+fn chain(e: &anyhow::Error) -> String {
+    let mut out = String::new();
+    for cause in e.chain() {
+        let text = cause.to_string();
+        if out.ends_with(&text) {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push_str(": ");
+        }
+        out.push_str(&text);
+    }
+    out
 }
 
 fn run(cli: &Cli) -> Result<bool> {
@@ -263,6 +281,22 @@ fn compare_folders(cli: &Cli, left: &Source, right: &Source, paint: &Paint) -> R
     complete(s.errors)
 }
 
+/// Control characters as their visible symbols (␊, ␉ …): a line break in a name
+/// would otherwise split its line, and a tab look like spaces.
+fn visible(name: &str) -> std::borrow::Cow<'_, str> {
+    if !name.chars().any(char::is_control) {
+        return name.into();
+    }
+    name.chars()
+        .map(|c| match c as u32 {
+            n @ 0..=0x1f => char::from_u32(0x2400 + n).unwrap_or(c),
+            0x7f => '\u{2421}',
+            _ => c,
+        })
+        .collect::<String>()
+        .into()
+}
+
 fn print_tree(out: &mut impl Write, node: &Node, prefix: &str, all: bool, paint: &Paint) -> Result<()> {
     for child in &node.children {
         if child.status == Status::Same && !all {
@@ -271,7 +305,8 @@ fn print_tree(out: &mut impl Write, node: &Node, prefix: &str, all: bool, paint:
         let path = if prefix.is_empty() { child.name.clone() } else { format!("{prefix}/{}", child.name) };
         let is_dir = child.left.as_ref().or(child.right.as_ref()).is_some_and(|s| s.kind.is_container());
         let ignored = [&child.left, &child.right].into_iter().flatten().any(|s| s.ignored);
-        let shown = format!("{path}{}{}", if is_dir { "/" } else { "" }, if ignored { "  [ignored]" } else { "" });
+        let shown =
+            format!("{}{}{}", visible(&path), if is_dir { "/" } else { "" }, if ignored { "  [ignored]" } else { "" });
         let line = match child.status {
             Status::Same => format!("  = {shown}"),
             Status::Similar => paint.wrap(

@@ -244,7 +244,7 @@
       <div class="scope">In <b>{scope}</b> <button class="link" onclick={onClearScope}>Show all files</button></div>
     {/if}
     <span class="seg" role="tablist">
-      <button role="tab" class:on={tab === "open"} onclick={() => (tab = "open")}>Open {lists.open.length + annotations.length}</button>
+      <button role="tab" class:on={tab === "open"} onclick={() => (tab = "open")} title="Open threads, and the findings of CI checks">Open {lists.open.length}{#if annotations.length}{" "}· ▲ {annotations.length}{/if}</button>
       <button role="tab" class:on={tab === "resolved"} onclick={() => (tab = "resolved")}>Resolved {lists.resolved.length}</button>
       <button role="tab" class:on={tab === "outdated"} onclick={() => (tab = "outdated")}>Outdated {lists.outdated.length}</button>
       {#if path === null && !scope}<button role="tab" class:on={tab === "conversation"} onclick={() => (tab = "conversation")}>Conversation {data.reviews.filter((r) => r.body.trim()).length + data.comments.length}</button>{/if}

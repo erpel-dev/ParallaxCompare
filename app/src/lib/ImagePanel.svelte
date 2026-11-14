@@ -25,6 +25,13 @@
   const scale = $derived(zoom ?? fitScale);
   const sizeOf = (side: { width: number; height: number } | null) =>
     side?.width ? `width: ${side.width * scale}px; height: ${side.height * scale}px` : undefined;
+  /** Where a ring marks the differing area, in percent of the image: when it is too small on screen to see. */
+  const ring = $derived.by(() => {
+    const b = image.bounds;
+    const side = image.left ?? image.right;
+    if (!b || !side?.width || !side.height || Math.max(b[2], b[3]) * scale >= 16) return null;
+    return { x: ((b[0] + b[2] / 2) / side.width) * 100, y: ((b[1] + b[3] / 2) / side.height) * 100 };
+  });
   function zoomBy(factor: number) {
     zoom = Math.max(0.01, Math.min(64, scale * factor));
   }
@@ -92,6 +99,7 @@
                   <path d={image.area} class="area" />
                   <path d={image.outline} class="edge" />
                 </svg>
+                {#if ring}<span class="ring" style:left="{ring.x}%" style:top="{ring.y}%" title="The differing area, small at this zoom"></span>{/if}
               {:else if showMask && image.mask}<img class="mask" src={image.mask} alt="" />{/if}
             </div>
           {:else}
@@ -202,6 +210,16 @@
     height: 100%;
     pointer-events: none;
     overflow: visible;
+  }
+  .stack .ring {
+    position: absolute;
+    width: 28px;
+    height: 28px;
+    transform: translate(-50%, -50%);
+    border: 2px solid #ff005a;
+    border-radius: 50%;
+    box-shadow: 0 0 0 1px rgb(255 255 255 / 0.7);
+    pointer-events: none;
   }
   .outline .area {
     fill: #ff005a;
