@@ -856,6 +856,7 @@ pub fn has_content_rule(name: &str) -> bool {
                 .any(|n| f.eq_ignore_ascii_case(n))
         })
         || conan::is_graph_name(name)
+        || conan::may_be_profile(name)
         || office::has_native_reader(&extension(name))
         || visio::XML_EXTENSIONS.contains(&extension(name).as_str())
         || visio::BINARY_EXTENSIONS.contains(&extension(name).as_str())

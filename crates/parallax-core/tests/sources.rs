@@ -2062,3 +2062,34 @@ fn names_that_are_not_utf8_are_errors() {
     assert_eq!(status_of(&result, "sub"), Status::Error);
     assert_eq!(status_of(&result, "ok.txt"), Status::Same);
 }
+
+/// The folder compare decides by name alone whether a file may be "similar"
+/// (`has_content_rule`), before reading it; what the content says is decided
+/// elsewhere, by the data. Every fixture whose data has such a rule must be
+/// covered by its name, or the rule never runs for files of differing size.
+#[test]
+fn content_rules_by_name_cover_the_rules_by_data() {
+    fn files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()) {
+            if entry.is_dir() { files(&entry, out) } else { out.push(entry) }
+        }
+    }
+    let mut all = Vec::new();
+    files(&Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures"), &mut all);
+    assert!(all.len() > 50, "{} fixtures", all.len());
+    let mut missing = Vec::new();
+    let mut with_rule = 0;
+    for path in all {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let data = fs::read(&path).unwrap();
+        // A file has the same content as itself wherever content is defined.
+        if parallax_core::convert::content_equal(&name, &data, &data).is_some() {
+            with_rule += 1;
+            if !parallax_core::convert::has_content_rule(&name) {
+                missing.push(name);
+            }
+        }
+    }
+    assert!(with_rule > 20, "{with_rule} fixtures with a content rule");
+    assert_eq!(missing, Vec::<String>::new());
+}
