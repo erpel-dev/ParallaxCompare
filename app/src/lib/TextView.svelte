@@ -24,6 +24,7 @@
   import ImagePanel from "./ImagePanel.svelte";
   import FilterBar, { type CountFilter } from "./FilterBar.svelte";
   import { RowProjection, type Fold, type RowFilter } from "./rowFilter";
+  import { anchorFor, hitAtOrAfter } from "./findHits";
   import { prefs, CONTEXTS } from "./prefs.svelte";
   import PrBar from "./PrBar.svelte";
   import { notify } from "./toast.svelte";
@@ -1605,7 +1606,7 @@
       truncated = false;
       return;
     }
-    const from = keep && currentHit ? currentHit : { row: selected ?? Math.floor(vTop / ROW), side: 0 as const, start: 0 };
+    const from = anchorFor(keep && currentHit ? currentHit : { row: selected ?? Math.floor(vTop / ROW), side: 0, start: 0 }, findOptions.side);
     try {
       const r = await api.searchDiff(info.id, findQuery, $state.snapshot(findOptions));
       if (run !== searchRun) return;
@@ -1613,7 +1614,7 @@
       hits = r.hits;
       truncated = r.truncated;
       // The first match at or after where the reader is.
-      const at = hits.findIndex((h) => h.row > from.row || (h.row === from.row && (h.side > from.side || (h.side === from.side && h.start >= from.start))));
+      const at = hitAtOrAfter(hits, from);
       if (!hits.length) hitIndex = -1;
       else if (keep) hitIndex = at === -1 ? hits.length - 1 : at;
       else showHit(at === -1 ? 0 : at);
