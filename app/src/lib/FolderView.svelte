@@ -365,6 +365,29 @@
     void result;
     return new WeakMap<Node, Counts>();
   });
+  /** For a closed folder with differences: what it holds by status; null for any other row. */
+  function collapsedCounts(row: FlatRow): Counts | null {
+    if (!row.container || row.expanded || row.pending || closedArchive(row.node)) return null;
+    const c = inside(row.node);
+    return c.files > c.same ? c : null;
+  }
+  function countsTitle(c: Counts): string {
+    const parts = [
+      c.different && `${c.different.toLocaleString()} different`,
+      c.similar && `${c.similar.toLocaleString()} similar`,
+      c.leftOnly && `${c.leftOnly.toLocaleString()} only on the left`,
+      c.rightOnly && `${c.rightOnly.toLocaleString()} only on the right`,
+      c.errors && `${c.errors.toLocaleString()} not compared`,
+    ].filter(Boolean);
+    return `Files in this folder: ${parts.join(", ")}`;
+  }
+  /** A count that fits the middle column: 1,234 as 1.2k. */
+  function short(n: number): string {
+    if (n < 1000) return String(n);
+    if (n < 10_000) return `${(Math.floor(n / 100) / 10).toFixed(1).replace(/\.0$/, "")}k`;
+    if (n < 1_000_000) return `${Math.floor(n / 1000)}k`;
+    return `${(Math.floor(n / 100_000) / 10).toFixed(1).replace(/\.0$/, "")}M`;
+  }
   function inside(node: Node): Counts {
     let c = insideMemo.get(node);
     if (!c) insideMemo.set(node, (c = countFiles(node)));
@@ -1474,7 +1497,17 @@
           >
             {#each [row.node.left, row.node.right] as side, i (i)}
               {#if i === 1}
-                <div class="mid">{row.pending ? "…" : glyph[row.node.status]}{row.rightPath ? "↷" : ""}</div>
+                {@const c = collapsedCounts(row)}
+                {#if c && (c.different || c.similar || c.errors)}
+                  <!-- A closed folder: what differs between the sides, counted. What exists on one side only is counted there. -->
+                  <div class="mid counts" title={countsTitle(c)}>
+                    {#if c.errors}<span class="error">! {short(c.errors)}</span>{/if}
+                    {#if c.different}<span class="different">≠ {short(c.different)}</span>{/if}
+                    {#if c.similar && !(c.errors && c.different)}<span class="similar">≈ {short(c.similar)}</span>{/if}
+                  </div>
+                {:else}
+                  <div class="mid">{row.pending ? "…" : glyph[row.node.status]}{row.rightPath ? "↷" : ""}</div>
+                {/if}
               {/if}
               {#if side}
                 {@const other = i === 0 ? row.node.right : row.node.left}
@@ -1487,7 +1520,7 @@
                     {:else}
                       <span class="chev"></span>
                     {/if}
-                    <span class="icon">{icon(side)}</span>{#if row.folders?.[i]}<span class="dir">{shown(row.folders[i])}/</span>{/if}{shown(i === 1 && row.rightPath ? (row.rightPath.split("/").pop() ?? "") : row.node.name)}{#if side.ignored && !row.inIgnored?.[i]}<span class="ignored-tag" title="Ignored by Git: a .gitignore rule matches it, and it is not tracked">ignored</span>{/if}{#if prCounts && (i === 1 || !row.node.right) && (!row.container || !row.expanded)}{@const c = prCounts.get(row.path)}{#if c}<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions --><span class="prc" title="Pull request: {c.open} open threads, {c.findings} findings, {c.warnings} CI warnings, {c.resolved} resolved. Click for the details." onclick={(e) => { e.stopPropagation(); showPrDetails(row.path); }}>{#if c.open}<span class="cm">💬 {c.open}</span>{/if}{#if c.findings}<span class="fd">● {c.findings}</span>{/if}{#if c.warnings}<span class="wn">▲ {c.warnings}</span>{/if}{#if !c.open && !c.findings && !c.warnings && c.resolved}<span class="rs">{c.resolved} resolved</span>{/if}</span>{/if}{/if}{#if row.container && !row.expanded && !row.pending && !closedArchive(row.node) && (i === 0 || !row.node.left)}{@const c = inside(row.node)}{#if c.files > c.same}<span class="inside" title="Files in this folder that are not the same, by status">{#if c.different}<span class="different">{c.different.toLocaleString()} ≠</span>{/if}{#if c.similar}<span class="similar">{c.similar.toLocaleString()} ≈</span>{/if}{#if c.leftOnly}<span class="leftOnly">{c.leftOnly.toLocaleString()} ◀</span>{/if}{#if c.rightOnly}<span class="rightOnly">{c.rightOnly.toLocaleString()} ▶</span>{/if}{#if c.errors}<span class="error">{c.errors.toLocaleString()} !</span>{/if}</span>{/if}{/if}
+                    <span class="icon">{icon(side)}</span>{#if row.folders?.[i]}<span class="dir">{shown(row.folders[i])}/</span>{/if}{shown(i === 1 && row.rightPath ? (row.rightPath.split("/").pop() ?? "") : row.node.name)}{#if side.ignored && !row.inIgnored?.[i]}<span class="ignored-tag" title="Ignored by Git: a .gitignore rule matches it, and it is not tracked">ignored</span>{/if}{#if prCounts && (i === 1 || !row.node.right) && (!row.container || !row.expanded)}{@const c = prCounts.get(row.path)}{#if c}<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions --><span class="prc" title="Pull request: {c.open} open threads, {c.findings} findings, {c.warnings} CI warnings, {c.resolved} resolved. Click for the details." onclick={(e) => { e.stopPropagation(); showPrDetails(row.path); }}>{#if c.open}<span class="cm">💬 {c.open}</span>{/if}{#if c.findings}<span class="fd">● {c.findings}</span>{/if}{#if c.warnings}<span class="wn">▲ {c.warnings}</span>{/if}{#if !c.open && !c.findings && !c.warnings && c.resolved}<span class="rs">{c.resolved} resolved</span>{/if}</span>{/if}{/if}{#if collapsedCounts(row)}{@const c = collapsedCounts(row)!}{@const n = i === 0 ? c.leftOnly : c.rightOnly}{#if n}<span class="inside" title={countsTitle(c)}><span class={i === 0 ? "leftOnly" : "rightOnly"}>{n.toLocaleString()} {i === 0 ? "◀" : "▶"}</span></span>{/if}{/if}
                   </span>
                   <span class="num">{side.kind === "dir" ? "" : formatSize(side.size)}</span>
                   {#if i === 1}<span class="num chg">{changeOf(row.node)}</span>{/if}
@@ -1561,6 +1594,8 @@
 
 <style>
   .view {
+    /* The column between the panes: the status of a row, and the counts of a closed folder. */
+    --mid: 64px;
     display: flex;
     flex-direction: column;
     height: 100%;
@@ -1624,6 +1659,7 @@
   .view.compact .mod { display: none; }
   .view.narrow .side.r { grid-template-columns: 1fr 64px; }
   .view.narrow .chg { display: none; }
+  .view.narrow { --mid: 44px; }
   .view.compact .patterns { flex: 1 1 110px; min-width: 80px; }
   .view.compact .toolbar { flex-wrap: nowrap; }
   .selbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 4px 10px; border-top: 1px solid var(--line); background: color-mix(in srgb, var(--accent) 9%, var(--panel-2)); font-size: 12px; }
@@ -1677,7 +1713,7 @@
   .pathbars,
   .head {
     display: grid;
-    grid-template-columns: 1fr 28px 1fr;
+    grid-template-columns: 1fr var(--mid) 1fr;
   }
   .pathbars {
     grid-template-columns: 1fr 1fr;
@@ -1724,7 +1760,7 @@
   }
   .row {
     display: grid;
-    grid-template-columns: 1fr 28px 1fr;
+    grid-template-columns: 1fr var(--mid) 1fr;
     height: 22px;
     cursor: default;
     white-space: nowrap;
@@ -1748,6 +1784,15 @@
     height: 100%;
     font-size: 11px;
   }
+  /* Counts of a closed folder, in the colours of their status whatever the row's is. */
+  .row .mid.counts {
+    gap: 6px;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    overflow: hidden;
+  }
+  .row .mid.counts .different, .row .mid.counts .error { color: var(--diff); }
+  .row .mid.counts .similar { color: var(--similar); }
   .name {
     overflow: hidden;
     text-overflow: ellipsis;
