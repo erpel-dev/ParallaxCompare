@@ -316,6 +316,8 @@ export interface SearchOptions {
   matchCase: boolean;
   wholeWord: boolean;
   regex: boolean;
+  /** The side searched. */
+  side: "both" | "left" | "right";
 }
 
 /** A match: its row, side (0 left, 1 right) and UTF-16 offsets in the line. */

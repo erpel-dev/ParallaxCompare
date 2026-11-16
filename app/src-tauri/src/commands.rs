@@ -1641,7 +1641,7 @@ pub async fn search_diff(
         let re = search::pattern(&query, &options)?;
         let fd = diff.lock();
         let docs = [fd.edit.doc(Side::Left), fd.edit.doc(Side::Right)];
-        Ok(search::search(&fd.edit.diff().rows, docs, &re, 20_000))
+        Ok(search::search(&fd.edit.diff().rows, docs, &re, options.side, 20_000))
     })
     .await
 }

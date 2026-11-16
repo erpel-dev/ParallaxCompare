@@ -12,6 +12,29 @@ pub struct SearchOptions {
     pub match_case: bool,
     pub whole_word: bool,
     pub regex: bool,
+    /// The side searched; both when not given.
+    #[serde(default)]
+    pub side: SearchSide,
+}
+
+/// Which side of the comparison a search covers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SearchSide {
+    #[default]
+    Both,
+    Left,
+    Right,
+}
+
+impl SearchSide {
+    fn covers(self, side: usize) -> bool {
+        match self {
+            SearchSide::Both => true,
+            SearchSide::Left => side == 0,
+            SearchSide::Right => side == 1,
+        }
+    }
 }
 
 /// A match in one line: its row, the side (0 left, 1 right), and UTF-16 offsets.
@@ -45,12 +68,16 @@ pub fn pattern(query: &str, options: &SearchOptions) -> Result<Regex, String> {
     })
 }
 
-/// Every match in row order, left before right; empty matches are skipped.
-pub fn search(rows: &[Row], docs: [&TextDoc; 2], re: &Regex, limit: usize) -> SearchResult {
+/// Every match on the sides `sides` covers, in row order, left before right;
+/// empty matches are skipped. The limit counts only the sides searched.
+pub fn search(rows: &[Row], docs: [&TextDoc; 2], re: &Regex, sides: SearchSide, limit: usize) -> SearchResult {
     let mut hits = Vec::new();
     for (i, row) in rows.iter().enumerate() {
         for (side, line) in [row.left, row.right].into_iter().enumerate() {
             let Some(n) = line else { continue };
+            if !sides.covers(side) {
+                continue;
+            }
             let text = docs[side].line(n as usize);
             // Byte offsets become UTF-16 offsets, counted from the previous match.
             let (mut byte, mut unit) = (0, 0u32);
@@ -86,7 +113,11 @@ mod tests {
         let (a, b) = (decode(a.as_bytes()), decode(b.as_bytes()));
         let diff = diff_docs(&a, &b, &DiffOptions::default());
         let re = pattern(query, &options)?;
-        Ok(search(&diff.rows, [&a, &b], &re, 100).hits.into_iter().map(|h| (h.row, h.side, h.start, h.end)).collect())
+        Ok(search(&diff.rows, [&a, &b], &re, options.side, 100)
+            .hits
+            .into_iter()
+            .map(|h| (h.row, h.side, h.start, h.end))
+            .collect())
     }
 
     #[test]
@@ -125,9 +156,29 @@ mod tests {
         let a = decode("x\n".repeat(500).as_bytes());
         let diff = diff_docs(&a, &a, &DiffOptions::default());
         let re = pattern("x", &SearchOptions::default()).unwrap();
-        let r = search(&diff.rows, [&a, &a], &re, 100);
+        let r = search(&diff.rows, [&a, &a], &re, SearchSide::Both, 100);
         assert_eq!((r.hits.len(), r.truncated), (100, true));
-        let r = search(&diff.rows, [&a, &a], &re, 1000);
+        let r = search(&diff.rows, [&a, &a], &re, SearchSide::Both, 1000);
         assert_eq!((r.hits.len(), r.truncated), (1000, false));
+        // The limit counts the side searched: all 500 of one side fit.
+        let r = search(&diff.rows, [&a, &a], &re, SearchSide::Right, 500);
+        assert_eq!((r.hits.len(), r.truncated), (500, false));
+        assert!(r.hits.iter().all(|h| h.side == 1));
+    }
+
+    #[test]
+    fn searches_one_side_when_asked() {
+        let (a, b) = ("one\nFoo foo\nthree\n", "one\nfoo\nthree\nfood\n");
+        let on = |side| find(a, b, "foo", SearchOptions { side, ..Default::default() }).unwrap();
+        assert_eq!(on(SearchSide::Left), [(1, 0, 0, 3), (1, 0, 4, 7)]);
+        assert_eq!(on(SearchSide::Right), [(1, 1, 0, 3), (3, 1, 0, 3)]);
+        assert_eq!(on(SearchSide::Both).len(), 4);
+        // Options sent without a side search both.
+        let options: SearchOptions =
+            serde_json::from_str(r#"{"matchCase":false,"wholeWord":false,"regex":false}"#).unwrap();
+        assert_eq!(options.side, SearchSide::Both);
+        let options: SearchOptions =
+            serde_json::from_str(r#"{"matchCase":false,"wholeWord":false,"regex":false,"side":"right"}"#).unwrap();
+        assert_eq!(options.side, SearchSide::Right);
     }
 }
