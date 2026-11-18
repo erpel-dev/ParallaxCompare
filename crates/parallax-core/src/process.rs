@@ -470,7 +470,8 @@ mod tests {
             Command::new("git").arg("parallax-nonexistent-subcommand"),
             "git",
             "git request",
-            Duration::from_secs(5),
+            // Only a safety net: on a busy Windows runner, git took longer than 5 s.
+            Duration::from_secs(60),
         )
         .unwrap_err()
         .to_string();

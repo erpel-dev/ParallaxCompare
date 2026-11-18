@@ -814,16 +814,30 @@ mod tests {
         }
     }
 
-    /// Opening is linear in the input: thousands of separate conflicts open fast.
+    /// Opening is linear in the input: four times the conflicts take about four
+    /// times as long, not sixteen. Compared with itself rather than with a fixed
+    /// time, so a slow or busy machine does not fail it.
     #[test]
     fn many_conflicts_open_in_linear_time() {
-        let make = |side: &str| (0..4000).map(|i| format!("c{i} {side}\n1\n2\n3\n4\n5\n6\n")).collect::<String>();
-        let (base, local, remote) = (make("base"), make("local"), make("remote"));
-        let started = std::time::Instant::now();
-        let s = session(&base, &local, &remote);
-        assert_eq!(s.stats().conflicts, 4000);
-        // Quadratic splitting took seconds here even in release builds.
-        assert!(started.elapsed() < std::time::Duration::from_secs(3), "{:?}", started.elapsed());
+        let make =
+            |n: usize, side: &str| (0..n).map(|i| format!("c{i} {side}\n1\n2\n3\n4\n5\n6\n")).collect::<String>();
+        // The fastest of three runs: a pause of the machine only makes a run slower.
+        let fastest = |n: usize| {
+            let (base, local, remote) = (make(n, "base"), make(n, "local"), make(n, "remote"));
+            (0..3)
+                .map(|_| {
+                    let started = std::time::Instant::now();
+                    let s = session(&base, &local, &remote);
+                    assert_eq!(s.stats().conflicts as usize, n);
+                    started.elapsed()
+                })
+                .min()
+                .unwrap()
+        };
+        let (small, large) = (fastest(1000), fastest(4000));
+        // Quadratic splitting took seconds here even in release builds: a ratio near 16.
+        let ratio = large.as_secs_f64() / small.as_secs_f64().max(1e-6);
+        assert!(ratio < 8.0, "1,000 conflicts: {small:?}, 4,000: {large:?}, ratio {ratio:.1}");
     }
 
     #[test]
