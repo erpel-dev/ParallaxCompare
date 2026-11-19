@@ -1595,8 +1595,8 @@
     viewport?.focus();
   }
 
-  /** Searches again; `keep` stays near the current match instead of the view. */
-  async function runSearch(keep: boolean) {
+  /** Search from the current match when `keep` is set. `revealMatch` also moves the selection. */
+  async function runSearch(keep: boolean, { revealMatch = !keep } = {}) {
     clearTimeout(searchTimer);
     const run = ++searchRun;
     if (!info || !findQuery) {
@@ -1613,11 +1613,15 @@
       findError = "";
       hits = r.hits;
       truncated = r.truncated;
+      if (!hits.length) {
+        hitIndex = -1;
+        return;
+      }
       // The first match at or after where the reader is.
       const at = hitAtOrAfter(hits, from);
-      if (!hits.length) hitIndex = -1;
-      else if (keep) hitIndex = at === -1 ? hits.length - 1 : at;
-      else showHit(at === -1 ? 0 : at);
+      const index = at === -1 ? (keep ? hits.length - 1 : 0) : at;
+      if (revealMatch) showHit(index);
+      else hitIndex = index;
     } catch (e) {
       if (run !== searchRun) return;
       findError = String(e);
@@ -1722,7 +1726,7 @@
   function setFindSide(side: SearchOptions["side"]) {
     findOptions.side = side;
     // Stays near the current match, which may be on the side no longer searched.
-    runSearch(true).then(() => hitIndex >= 0 && showHit(hitIndex));
+    runSearch(true, { revealMatch: true });
     findInput?.focus();
   }
 

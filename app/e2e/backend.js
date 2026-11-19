@@ -1,7 +1,7 @@
 // A stand-in for the app's backend, loaded into the page before the web view's
 // own code. It keeps two small trees, answers the commands the folder view
 // uses the way the app does (identical folders come without their entries),
-// and counts what was asked, so tests can tell what the view requested.
+// and serves a text comparison for changed.txt. Tests can inspect the calls.
 (() => {
   const file = (size = 4) => ({ kind: "file", size, mtime: 1700000000 });
   const dir = () => ({ kind: "dir", size: 0, mtime: 1700000000 });
@@ -68,6 +68,14 @@
     return s;
   };
 
+  const line = (n, t) => ({ n, t, s: [], m: [] });
+  const fileRows = [
+    { k: "equal", l: line(0, "shared"), r: line(0, "shared") },
+    { k: "changed", l: line(1, "different"), r: line(1, "needle") },
+  ];
+  const fileSide = { exists: true, size: 14, binary: false, encoding: "UTF-8", lineEnding: "LF", bom: false, lines: 2, editable: false };
+  const pendingSearches = new Map();
+
   const calls = [];
   const commands = {
     app_info: () => ({ version: "0.0.0", revision: "test", os: "linux", arch: "x86_64", tempDir: "/tmp" }),
@@ -79,6 +87,29 @@
     expand: ({ path, deep }) => view(find(path), !!deep),
     refresh_paths: ({ paths }) => paths.map((p) => (find(p) ? entry(find(p)) : null)),
     delete_entries: ({ paths, left }) => ({ nodes: paths.map((p) => remove(p, left)), error: null, notTrashed: [] }),
+    open_file_diff: () => ({
+      id: 2,
+      rows: fileRows.length,
+      sections: [{ start: 1, end: 2 }],
+      rowRuns: [{ start: 0, end: 1, kind: "equal" }, { start: 1, end: 2, kind: "changed" }],
+      stats: { changed: 1, added: 0, removed: 0, minor: 0 },
+      left: fileSide,
+      right: fileSide,
+      syntax: null,
+      identical: false,
+      view: "text",
+      views: [{ id: "text", label: "Text" }],
+      image: null,
+      note: null,
+      equalView: null,
+    }),
+    file_rows: ({ start, count }) => fileRows.slice(start, start + count),
+    search_diff: ({ query, options: { side } }) => {
+      const hits = query === "needle" && side !== "left" ? [{ row: 1, side: 1, start: 0, end: 6 }] : [];
+      const result = { hits, truncated: false };
+      if (side === "both") return result;
+      return new Promise((resolve) => pendingSearches.set(side, () => resolve(result)));
+    },
   };
 
   let callbacks = 0;
@@ -93,11 +124,22 @@
     convertFileSrc: (path) => path,
     async invoke(command, args = {}) {
       calls.push({ command, args });
-      if (command in commands) return structuredClone(commands[command](args));
+      if (command in commands) return structuredClone(await commands[command](args));
       // Window, event and other plugin calls, and commands these tests do not need.
       return command.startsWith("plugin:event|listen") ? ++callbacks : null;
     },
   };
   window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
-  window.__backend = { calls, count: (name) => calls.filter((c) => c.command === name).length };
+  window.__backend = {
+    calls,
+    count: (name) => calls.filter((c) => c.command === name).length,
+    async finishSearch(side) {
+      const finish = pendingSearches.get(side);
+      if (!finish) throw new Error(`No pending ${side} search`);
+      pendingSearches.delete(side);
+      finish();
+      // Let the app handle this response before the test delivers another one.
+      await new Promise(requestAnimationFrame);
+    },
+  };
 })();
