@@ -24,6 +24,7 @@
   import ImagePanel from "./ImagePanel.svelte";
   import FilterBar, { type CountFilter } from "./FilterBar.svelte";
   import { RowProjection, type Fold, type RowFilter } from "./rowFilter";
+  import { anchorFor, hitAtOrAfter } from "./findHits";
   import { prefs, CONTEXTS } from "./prefs.svelte";
   import PrBar from "./PrBar.svelte";
   import { notify } from "./toast.svelte";
@@ -138,7 +139,7 @@
   let root = $state<HTMLDivElement>();
   let findOpen = $state(false);
   let findQuery = $state("");
-  let findOptions = $state<SearchOptions>({ matchCase: false, wholeWord: false, regex: false });
+  let findOptions = $state<SearchOptions>({ matchCase: false, wholeWord: false, regex: false, side: "both" });
   let findInput = $state<HTMLInputElement>();
   let findError = $state("");
   let hits = $state.raw<Hit[]>([]);
@@ -1605,7 +1606,7 @@
       truncated = false;
       return;
     }
-    const from = keep && currentHit ? currentHit : { row: selected ?? Math.floor(vTop / ROW), side: 0 as const, start: 0 };
+    const from = anchorFor(keep && currentHit ? currentHit : { row: selected ?? Math.floor(vTop / ROW), side: 0, start: 0 }, findOptions.side);
     try {
       const r = await api.searchDiff(info.id, findQuery, $state.snapshot(findOptions));
       if (run !== searchRun) return;
@@ -1613,7 +1614,7 @@
       hits = r.hits;
       truncated = r.truncated;
       // The first match at or after where the reader is.
-      const at = hits.findIndex((h) => h.row > from.row || (h.row === from.row && (h.side > from.side || (h.side === from.side && h.start >= from.start))));
+      const at = hitAtOrAfter(hits, from);
       if (!hits.length) hitIndex = -1;
       else if (keep) hitIndex = at === -1 ? hits.length - 1 : at;
       else showHit(at === -1 ? 0 : at);
@@ -1712,9 +1713,16 @@
     e.preventDefault();
   }
 
-  function toggle(key: keyof SearchOptions) {
+  function toggle(key: "matchCase" | "wholeWord" | "regex") {
     findOptions[key] = !findOptions[key];
     runSearch(false);
+    findInput?.focus();
+  }
+
+  function setFindSide(side: SearchOptions["side"]) {
+    findOptions.side = side;
+    // Stays near the current match, which may be on the side no longer searched.
+    runSearch(true).then(() => hitIndex >= 0 && showHit(hitIndex));
     findInput?.focus();
   }
 
@@ -2032,13 +2040,18 @@
         bind:value={findQuery}
         oninput={searchSoon}
         onkeydown={findKey}
-        placeholder="Find in both files"
+        placeholder={findOptions.side === "both" ? "Find in both files" : `Find in the ${findOptions.side} file`}
         title="Searches all lines; revealing a hidden match switches to All"
         spellcheck="false"
       />
       <button class="opt" class:on={findOptions.matchCase} onclick={() => toggle("matchCase")} title="Match case">Aa</button>
       <button class="opt" class:on={findOptions.wholeWord} onclick={() => toggle("wholeWord")} title="Whole words"><u>ab</u></button>
       <button class="opt" class:on={findOptions.regex} onclick={() => toggle("regex")} title="Regular expression">.*</button>
+      <span class="sides" role="group" aria-label="Side to search">
+        {#each [["left", "Left", "Search only the left file"], ["both", "Both", "Search both files"], ["right", "Right", "Search only the right file"]] as const as [id, label, title] (id)}
+          <button class="opt" class:on={findOptions.side === id} aria-pressed={findOptions.side === id} onclick={() => setFindSide(id)} {title}>{label}</button>
+        {/each}
+      </span>
       <button onclick={() => nextHit(-1)} disabled={!hits.length} title="Previous match (Shift+Enter, Shift+F3)">▲</button>
       <button onclick={() => nextHit(1)} disabled={!hits.length} title="Next match (Enter, F3)">▼</button>
       <span class="found" class:bad={!!findError || (!!findQuery && !hits.length)}>
@@ -2605,6 +2618,26 @@
     min-width: 30px;
     font-family: var(--mono);
     font-size: 11.5px;
+  }
+  .findbar .sides {
+    display: inline-flex;
+    margin-left: 4px;
+  }
+  .findbar .sides .opt {
+    font-family: var(--ui);
+    padding: 0 8px;
+    border-radius: 0;
+    margin-left: -1px;
+  }
+  .findbar .sides .opt:first-child {
+    border-radius: 4px 0 0 4px;
+    margin-left: 0;
+  }
+  .findbar .sides .opt:last-child {
+    border-radius: 0 4px 4px 0;
+  }
+  .findbar .sides .opt.on {
+    position: relative;
   }
   .found {
     color: var(--dim);
