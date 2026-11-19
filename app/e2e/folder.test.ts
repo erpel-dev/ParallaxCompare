@@ -1,4 +1,4 @@
-// Smoke tests of the folder view in a real browser engine, against the stand-in
+// Smoke tests of the folder and text views in a real browser engine, against the stand-in
 // backend in backend.js. They cover what unit tests of helpers cannot: that the
 // view asks the backend for the right things and shows what it gets.
 // Run with `npm run e2e` after `npm run build`.
@@ -125,4 +125,37 @@ test('flat view asks for everything once', async () => {
   const deep = (await calls('expand')).filter((a) => a.deep);
   assert.ok(deep.length >= 1 && deep.length <= 3, JSON.stringify(deep));
   assert.match(await statusLine(), /Showing 23 of 23 files/);
+});
+
+test('a superseded find-side search leaves the row filter and selection in place', async () => {
+  await row('changed.txt').dblclick();
+  await page.getByText('needle', { exact: true }).first().waitFor();
+  await page.keyboard.press('Control+f');
+  await page.getByPlaceholder('Find in both files').fill('needle');
+  const matchCount = page.getByText('1 of 1', { exact: true });
+  await matchCount.waitFor();
+
+  const same = page.getByRole('group', { name: 'Filter comparison by status' }).getByRole('button', { name: /^Same\b/ });
+  const selected = page.locator('.row.cur .code[data-side=right]');
+  await same.click();
+  assert.equal(await selected.innerText(), 'shared');
+
+  const sides = page.getByRole('group', { name: 'Side to search' });
+  const right = sides.getByRole('button', { name: 'Right', exact: true });
+  const left = sides.getByRole('button', { name: 'Left', exact: true });
+  const finishSearch = (side: 'left' | 'right') => page.evaluate((s) => (window as any).__backend.finishSearch(s), side);
+
+  await right.click();
+  await left.click();
+  await finishSearch('right');
+  await finishSearch('left');
+  await page.getByText('No matches', { exact: true }).waitFor();
+  assert.equal(await same.getAttribute('aria-pressed'), 'true');
+  assert.equal(await selected.innerText(), 'shared');
+
+  await right.click();
+  await finishSearch('right');
+  await matchCount.waitFor();
+  assert.equal(await same.getAttribute('aria-pressed'), 'false');
+  assert.equal(await selected.innerText(), 'needle');
 });
