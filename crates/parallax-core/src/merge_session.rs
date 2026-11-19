@@ -814,16 +814,33 @@ mod tests {
         }
     }
 
-    /// Opening is linear in the input: thousands of separate conflicts open fast.
+    /// Guard against quadratic Myers preprocessing on repeated lines. Each
+    /// conflict is separated by the same six lines, which become frequent tokens.
     #[test]
     fn many_conflicts_open_in_linear_time() {
-        let make = |side: &str| (0..4000).map(|i| format!("c{i} {side}\n1\n2\n3\n4\n5\n6\n")).collect::<String>();
-        let (base, local, remote) = (make("base"), make("local"), make("remote"));
-        let started = std::time::Instant::now();
-        let s = session(&base, &local, &remote);
-        assert_eq!(s.stats().conflicts, 4000);
-        // Quadratic splitting took seconds here even in release builds.
-        assert!(started.elapsed() < std::time::Duration::from_secs(3), "{:?}", started.elapsed());
+        use std::time::{Duration, Instant};
+
+        let measure = |n| {
+            let make = |side| (0..n).map(|i| format!("c{i} {side}\n1\n2\n3\n4\n5\n6\n")).collect::<String>();
+            let [base, local, remote] = ["base", "local", "remote"].map(make);
+            move || {
+                let started = Instant::now();
+                let s = session(&base, &local, &remote);
+                let elapsed = started.elapsed();
+                assert_eq!(s.stats().conflicts, n);
+                elapsed
+            }
+        };
+        let [measure_small, measure_large] = [2_000, 8_000].map(measure);
+        let (mut small, mut large) = (Duration::MAX, Duration::MAX);
+        // Interleave the sizes and keep the fastest run of each to reduce the impact of scheduler delays.
+        for _ in 0..3 {
+            small = small.min(measure_small());
+            large = large.min(measure_large());
+        }
+        // Four times the input gives a ratio near 4 for linear work and 16 for quadratic work.
+        let ratio = large.as_secs_f64() / small.as_secs_f64().max(1e-6);
+        assert!(ratio < 8.0, "2,000 conflicts: {small:?}, 8,000: {large:?}, ratio {ratio:.1}");
     }
 
     #[test]

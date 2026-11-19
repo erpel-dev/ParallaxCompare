@@ -18,7 +18,9 @@ flate2 = "1"
 lzma-rust2 = "0.22"
 ruzstd = "0.9"
 bzip2 = "0.6"
-imara-diff = "0.2"
+# The maintained fork of imara-diff: 0.2.0 scans quadratically on files with many
+# repeated lines (a window bound of `WINDOW_SIZE` instead of `pos - WINDOW_SIZE`).
+imara-diff = { package = "gix-imara-diff", version = "0.3.3" }
 similar = "3"
 syntect = { version = "5.3", default-features = false, features = ["default-onig"] }
 two-face = { version = "0.5", default-features = false, features = ["syntect-onig"] }
