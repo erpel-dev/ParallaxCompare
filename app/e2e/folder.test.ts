@@ -71,6 +71,18 @@ const waitForCount = (command: string, count: number) => page.waitForFunction(
 const filter = (label: string) => page.locator('button[aria-pressed]').filter({ hasText: label });
 const statusLine = () => page.locator('.status').innerText();
 
+test('switching from AUTOSAR structure to ECUC values drops the old row selection', async () => {
+  await page.goto(origin + '/?arxml');
+  await row('metadata.arxml').dblclick();
+  const status = page.locator('.status').filter({ hasText: /of \d+ rows/ });
+  await status.getByText('Row 2 of 2', { exact: true }).waitFor();
+
+  await page.getByRole('combobox', { name: 'How the files are shown' }).selectOption('ecucValues');
+  await status.getByText('ECUC values', { exact: true }).waitFor();
+  assert.match(await status.innerText(), /Showing 1 of 1 rows/);
+  assert.doesNotMatch(await status.innerText(), /Row 2 of 1/);
+});
+
 test('shows the result, with identical folders closed and counted', async () => {
   const shown = await names();
   // Folders with differences are open; the identical one is a single row.
