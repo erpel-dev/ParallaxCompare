@@ -290,7 +290,10 @@ export interface RowSide {
  * `null` when a file would be paired with a folder.
  */
 export function pairRows(a: FlatRow, b: FlatRow): [RowSide, RowSide] | null {
-  const sides = (r: FlatRow) => [r.node.left && { path: r.path, left: true }, r.node.right && { path: r.path, left: false }];
+  const sides = (r: FlatRow) => [
+    r.node.left && { path: r.path, left: true },
+    r.node.right && { path: r.rightPath ?? r.path, left: false },
+  ];
   const [al, ar] = sides(a);
   const [bl, br] = sides(b);
   const pair = (al && br ? [al, br] : bl && ar ? [bl, ar] : [al ?? ar, bl ?? br]) as [RowSide | null, RowSide | null];
@@ -302,6 +305,12 @@ export function pairRows(a: FlatRow, b: FlatRow): [RowSide, RowSide] | null {
 export interface PairStatus {
   status: Node["status"];
   message: string | null;
+}
+
+/** Cached comparison keyed by the left path, with the exact right path it was matched to. */
+export interface MatchedStatus {
+  right: string;
+  result: PairStatus;
 }
 
 function parent(path: string): string {
@@ -434,7 +443,7 @@ export function flatFiles(
   root: Node,
   filter: Filter,
   moved: [string, string][],
-  statuses: Map<string, PairStatus>,
+  statuses: ReadonlyMap<string, MatchedStatus>,
 ): FlatRow[] {
   const all = files(root);
   const rightOf = new Map(moved.map(([l, r]) => [l, r]));
@@ -450,7 +459,8 @@ export function flatFiles(
       continue;
     }
     const other = byPath.get(right);
-    const known = statuses.get(`${path}\n${right}`);
+    const cached = statuses.get(path);
+    const known = cached?.right === right ? cached.result : undefined;
     const pair: Node = {
       ...node,
       right: other?.right ?? null,

@@ -63,9 +63,25 @@ const names = () =>
   );
 const count = (command: string) => page.evaluate((c) => (window as any).__backend.count(c), command);
 const calls = (command: string) => page.evaluate((c) => (window as any).__backend.calls.filter((x: any) => x.command === c).map((x: any) => x.args), command);
+const waitForCount = (command: string, count: number) => page.waitForFunction(
+  ([c, n]) => (window as any).__backend.count(c) === n,
+  [command, count] as const,
+);
 /** A button of the filter bar. */
 const filter = (label: string) => page.locator('button[aria-pressed]').filter({ hasText: label });
 const statusLine = () => page.locator('.status').innerText();
+
+test('switching from AUTOSAR structure to ECUC values drops the old row selection', async () => {
+  await page.goto(origin + '/?arxml');
+  await row('metadata.arxml').dblclick();
+  const status = page.locator('.status').filter({ hasText: /of \d+ rows/ });
+  await status.getByText('Row 2 of 2', { exact: true }).waitFor();
+
+  await page.getByRole('combobox', { name: 'How the files are shown' }).selectOption('ecucValues');
+  await status.getByText('ECUC values', { exact: true }).waitFor();
+  assert.match(await status.innerText(), /Showing 1 of 1 rows/);
+  assert.doesNotMatch(await status.innerText(), /Row 2 of 1/);
+});
 
 test('shows the result, with identical folders closed and counted', async () => {
   const shown = await names();
@@ -125,6 +141,202 @@ test('flat view asks for everything once', async () => {
   const deep = (await calls('expand')).filter((a) => a.deep);
   assert.ok(deep.length >= 1 && deep.length <= 3, JSON.stringify(deep));
   assert.match(await statusLine(), /Showing 23 of 23 files/);
+});
+
+async function openMatchedFolder() {
+  await page.goto(origin + '/?matched');
+  await page.getByText('Showing').waitFor();
+}
+
+test('difference navigation follows the active filter and resolved Flat rows', async () => {
+  await openMatchedFolder();
+  const diffs = page.getByRole('button', { name: /^All differences / });
+  const next = page.getByRole('button', { name: /Next difference/ });
+  const changed = row('changed-move.txt');
+  await diffs.click();
+  await next.click();
+  await rows().and(page.locator('[aria-selected=true]')).waitFor();
+  assert.equal(await diffs.getAttribute('aria-pressed'), 'true');
+  await filter('Errors').click();
+  assert.equal(await next.isDisabled(), true);
+
+  await page.getByRole('button', { name: 'Flat', exact: true }).click();
+  await page.getByRole('button', { name: 'Different 1', exact: true }).click();
+  await next.click();
+  assert.equal(await changed.getAttribute('aria-selected'), 'true');
+  await diffs.click();
+  await next.click();
+  assert.equal(await diffs.getAttribute('aria-pressed'), 'true');
+  assert.equal(await changed.getAttribute('aria-selected'), 'true');
+});
+
+test('opening matched comparisons uses their actual right-hand paths', async () => {
+  await openMatchedFolder();
+  const same = row('same␊name.txt');
+  const changed = row('changed-move.txt');
+  const folderTab = page.getByRole('tab', { name: /left.*right/ });
+  await page.getByRole('button', { name: 'Flat', exact: true }).click();
+  await page.getByRole('button', { name: 'Different 1', exact: true }).waitFor();
+  for (const open of [
+    () => page.keyboard.press('Enter'),
+    () => page.getByRole('button', { name: 'Open comparison (Enter)' }).click(),
+    async () => {
+      await same.locator('[data-side=right]').click({ button: 'right' });
+      await page.getByRole('menuitem', { name: /^Open comparison/ }).click();
+    },
+  ]) {
+    await same.click();
+    const before = await count('open_session');
+    await open();
+    await page.locator('.code:visible').first().waitFor();
+    assert.equal(await count('open_session'), before + 1);
+    const request = (await calls('open_session')).at(-1);
+    assert.equal(request.right.path, '/work/right/after/same\nname.txt');
+    await folderTab.click();
+  }
+  await changed.click();
+  await same.click({ modifiers: ['Control'] });
+  await page.getByRole('button', { name: /Compare these/ }).click();
+  await page.locator('.code:visible').first().waitFor();
+  const request = (await calls('open_session')).at(-1);
+  assert.equal(request.left.path, '/work/left/before/changed-move.txt');
+  assert.equal(request.right.path, '/work/right/after/same\nname.txt');
+});
+
+test('a watcher change invalidates a matched filename containing a line break', async () => {
+  await openMatchedFolder();
+  await page.getByRole('button', { name: 'Flat', exact: true }).click();
+  await page.getByRole('button', { name: 'Same 1', exact: true }).waitFor();
+  await page.evaluate(() => (window as any).__backend.editMovedFile('same\nname.txt'));
+  await page.getByRole('button', { name: 'Different 2', exact: true }).waitFor({ timeout: 5000 });
+  assert.deepEqual((await calls('compare_pairs')).at(-1).pairs, [['before/same\nname.txt', 'after/same\nname.txt']]);
+});
+
+test('watcher changes keep unaffected results from an in-flight matched batch', async () => {
+  await openMatchedFolder();
+  await page.evaluate(() => (window as any).__backend.holdNextPairs());
+  await page.getByRole('button', { name: 'Flat', exact: true }).click();
+  await waitForCount('compare_pairs', 1);
+  await page.evaluate(() => {
+    const backend = (window as any).__backend;
+    backend.touch('aaa/line-endings.txt');
+    backend.editMovedFile('same\nname.txt');
+  });
+  await waitForCount('refresh_paths', 2);
+  await page.evaluate(() => (window as any).__backend.finishPairs());
+  await page.getByRole('button', { name: 'Different 2', exact: true }).waitFor();
+  assert.deepEqual((await calls('compare_pairs')).map((call) => call.pairs.length), [2, 1]);
+  assert.deepEqual((await calls('compare_pairs')).at(-1).pairs, [['before/same\nname.txt', 'after/same\nname.txt']]);
+});
+
+test('a failed matched comparison waits for a relevant change or manual refresh', async () => {
+  await openMatchedFolder();
+  await page.evaluate(() => (window as any).__backend.failNextPairs());
+  await page.getByRole('button', { name: 'Flat', exact: true }).click();
+  await page.getByText('Matched files could not be compared', { exact: false }).waitFor();
+  // The failed rows show as errors, not as still being compared.
+  await page.getByRole('button', { name: 'Errors 2', exact: true }).waitFor();
+  assert.equal(await page.getByText('Matched files are still being compared').count(), 0);
+  assert.equal(await page.locator('.row .mid', { hasText: '…' }).count(), 0);
+  await page.evaluate(() => (window as any).__backend.touch('aaa/line-endings.txt'));
+  await waitForCount('refresh_paths', 1);
+  assert.equal(await count('compare_pairs'), 1);
+  await page.getByRole('button', { name: /Refresh/ }).click();
+  await page.getByRole('button', { name: 'Same 1', exact: true }).waitFor();
+  assert.equal(await count('compare_pairs'), 2);
+});
+
+test('refresh preserves open folders and selection, including after a cancelled refresh', async () => {
+  await page.setViewportSize({ width: 1400, height: 420 });
+  await row('mixed').locator('.chev').first().click();
+  await row('equal').locator('.chev').first().click();
+  await row('inner').locator('.chev').first().click();
+  const selected = row('i02.txt');
+  await selected.click();
+  const tree = page.getByRole('tree');
+  const scrollTop = await tree.evaluate((node) => (node.scrollTop = 80, node.scrollTop));
+  assert.ok(scrollTop > 0);
+  const refresh = page.getByRole('button', { name: /Refresh/ });
+
+  await page.evaluate(() => (window as any).__backend.holdRefresh());
+  await refresh.click();
+  await page.evaluate(() => (window as any).__backend.changeFile('top.txt'));
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await page.getByText('Showing the results from before the refresh.').waitFor();
+  assert.match(await statusLine(), /refresh cancelled · previous results/);
+  assert.equal(await selected.getAttribute('aria-selected'), 'true');
+  await page.getByRole('button', { name: 'Different 2', exact: true }).waitFor();
+  assert.ok((await calls('refresh_paths')).some((call) => call.paths.includes('top.txt')));
+
+  await page.getByRole('button', { name: 'Compare again', exact: true }).click();
+  await page.locator('.status').getByText('compared in', { exact: false }).waitFor();
+  await selected.waitFor();
+  assert.equal(await selected.getAttribute('aria-selected'), 'true');
+  assert.equal(await row('mixed').getAttribute('aria-expanded'), 'false');
+  assert.equal(await tree.evaluate((node) => node.scrollTop), scrollTop);
+  assert.equal((await calls('run_compare')).at(-1).invalidate, true);
+});
+
+test('refresh keeps an expansion requested while a lazy folder is loading', async () => {
+  await page.evaluate(() => (window as any).__backend.holdNextExpand('equal'));
+  await row('equal').locator('.chev').first().click();
+  await waitForCount('expand', 1);
+  await page.locator('.status').getByText('Loading equal…').waitFor();
+  await page.getByRole('button', { name: /Refresh/ }).click();
+  await page.getByText('Restoring the comparison view…').waitFor();
+  assert.equal(await page.getByRole('button', { name: 'Cancel', exact: true }).count(), 0);
+  await page.evaluate(() => (window as any).__backend.finishExpand());
+  await page.locator('.status').getByText('compared in', { exact: false }).waitFor();
+  await row('e00.txt').waitFor();
+  assert.equal(await row('equal').getAttribute('aria-expanded'), 'true');
+});
+
+test('Flat refresh restores scroll after the matched rows settle', async () => {
+  await page.goto(origin + '/?many-pairs');
+  await page.getByText('Showing').waitFor();
+  await page.getByRole('button', { name: 'Flat', exact: true }).click();
+  await page.getByRole('button', { name: 'Different 24', exact: true }).click();
+  await page.setViewportSize({ width: 1400, height: 420 });
+  const tree = page.getByRole('tree');
+  const scrollTop = await tree.evaluate((node) => {
+    node.scrollTop = 120;
+    return node.scrollTop;
+  });
+  assert.ok(scrollTop > 0);
+  const refresh = page.getByRole('button', { name: /Refresh/ });
+  const comparing = page.getByText('Matched files are still being compared');
+  await page.evaluate(() => (window as any).__backend.holdNextPairs());
+  await refresh.click();
+  await waitForCount('compare_pairs', 2);
+  // While the matched files are compared, the view is usable and can be refreshed again.
+  await comparing.waitFor();
+  await page.locator('.status').getByText('compared in', { exact: false }).waitFor();
+  assert.equal(await refresh.isEnabled(), true);
+  await page.evaluate(() => (window as any).__backend.finishPairs());
+  await comparing.waitFor({ state: 'detached' });
+  assert.equal(await tree.evaluate((node) => node.scrollTop), scrollTop);
+
+  // Scrolling while the matched files are compared is not undone when they settle.
+  await page.evaluate(() => (window as any).__backend.holdNextPairs());
+  await refresh.click();
+  await waitForCount('compare_pairs', 3);
+  await comparing.waitFor();
+  const scrolledByUser = await tree.evaluate((node) => (node.scrollTop = 40, node.scrollTop));
+  assert.notEqual(scrolledByUser, scrollTop);
+  await page.evaluate(() => (window as any).__backend.finishPairs());
+  await comparing.waitFor({ state: 'detached' });
+  assert.equal(await tree.evaluate((node) => node.scrollTop), scrolledByUser);
+});
+
+test('tree navigation uses display order from a row without a difference', async () => {
+  await page.goto(origin + '/?tree-order');
+  await page.getByText('Showing').waitFor();
+  await row('a-same.txt').click();
+  await page.keyboard.press('F7');
+  assert.equal(await row('inside.txt').getAttribute('aria-selected'), 'true');
+  await row('a-same.txt').click();
+  await page.keyboard.press('F8');
+  assert.equal(await row('b-later.txt').getAttribute('aria-selected'), 'true');
 });
 
 test('a superseded find-side search leaves the row filter and selection in place', async () => {

@@ -11,7 +11,20 @@
 
   // equal/: identical, with a folder inside. mixed/: one changed file, one only
   // on the left, an identical folder. odd/: names with a tab and a line break.
-  const root = folder("", [
+  const scenario = new URLSearchParams(location.search);
+  const arxml = scenario.has("arxml");
+  const manyPairs = scenario.has("many-pairs");
+  const movedNames = manyPairs ? [...names(24, "a-same-"), ...names(24, "z-changed-")] : ["same\nname.txt", "changed-move.txt"];
+  const orphan = (name, left) => ({ name, left: left ? file() : null, right: left ? null : file(), status: left ? "leftOnly" : "rightOnly" });
+  const root = arxml ? folder("", [pair("metadata.arxml", "different")]) : scenario.has("tree-order") ? folder("", [
+    folder("z-folder", [pair("inside.txt", "different")]),
+    pair("a-same.txt"),
+    pair("b-later.txt", "different"),
+  ]) : scenario.has("matched") || manyPairs ? folder("", [
+    folder("aaa", [pair("line-endings.txt", "similar")]),
+    folder("before", movedNames.map((name) => orphan(name, true))),
+    folder("after", movedNames.map((name) => orphan(name, false))),
+  ]) : folder("", [
     folder("equal", [folder("inner", names(3, "i").map((n) => pair(n))), ...names(12, "e").map((n) => pair(n))]),
     folder("mixed", [
       folder("quiet", names(2, "q").map((n) => pair(n))),
@@ -74,36 +87,84 @@
     { k: "changed", l: line(1, "different"), r: line(1, "needle") },
   ];
   const fileSide = { exists: true, size: 14, binary: false, encoding: "UTF-8", lineEnding: "LF", bom: false, lines: 2, editable: false };
+  const ecucRows = [{ k: "equal", l: line(0, "{}"), r: line(0, "{}") }];
   const pendingSearches = new Map();
+  const listeners = new Map();
+  const changedPairs = new Set(manyPairs ? names(24, "z-changed-") : ["changed-move.txt"]);
+  let holdRefresh = false;
+  let rejectRefresh;
+  let holdExpand;
+  let finishExpand;
+  let nextPairs;
+  let finishPairs;
+
+  function emitPaths(paths) {
+    for (const handler of listeners.get("paths-changed") ?? []) {
+      window[`_${handler}`]({ event: "paths-changed", payload: { session: 1, paths } });
+    }
+  }
 
   const calls = [];
   const commands = {
     app_info: () => ({ version: "0.0.0", revision: "test", os: "linux", arch: "x86_64", tempDir: "/tmp" }),
     startup_request: () => ({ kind: "compare", left: { type: "local", path: "/work/left" }, right: { type: "local", path: "/work/right" }, mergeBase: false }),
-    open_session: () => ({ id: 1, left: source("/work/left"), right: source("/work/right"), isFile: false }),
+    open_session: ({ left, right }) => ({
+      id: left.path === "/work/left" ? 1 : 3,
+      left: source(left.path),
+      right: source(right.path),
+      isFile: left.path.endsWith(".txt"),
+    }),
     close_session: () => null,
-    side_source: ({ left, path }) => ({ type: "local", path: `/work/${left ? "left" : "right"}/${path}` }),
-    run_compare: () => ({ root: view(root, false), summary: summary() }),
-    expand: ({ path, deep }) => view(find(path), !!deep),
+    side_source: ({ left, rel }) => ({ type: "local", path: `/work/${left ? "left" : "right"}/${rel}` }),
+    run_compare: ({ invalidate }) => {
+      if (invalidate && holdRefresh) {
+        holdRefresh = false;
+        return new Promise((_, reject) => (rejectRefresh = reject));
+      }
+      return { root: view(root, false), summary: summary() };
+    },
+    cancel_compare: () => rejectRefresh?.("cancelled"),
+    compare_pairs: ({ pairs }) => {
+      const result = pairs.map(([, right]) => ({ status: changedPairs.has(right.split("/").at(-1)) ? "different" : "same", message: null }));
+      const action = nextPairs;
+      nextPairs = undefined;
+      if (action === "fail") throw new Error("Matched files could not be compared");
+      if (action === "hold") return new Promise((resolve) => (finishPairs = () => resolve(result)));
+      return result;
+    },
+    expand: ({ path, deep }) => {
+      const result = view(find(path), !!deep);
+      if (holdExpand === path) {
+        holdExpand = undefined;
+        return new Promise((resolve) => (finishExpand = () => resolve(result)));
+      }
+      return result;
+    },
     refresh_paths: ({ paths }) => paths.map((p) => (find(p) ? entry(find(p)) : null)),
     delete_entries: ({ paths, left }) => ({ nodes: paths.map((p) => remove(p, left)), error: null, notTrashed: [] }),
-    open_file_diff: () => ({
-      id: 2,
-      rows: fileRows.length,
-      sections: [{ start: 1, end: 2 }],
-      rowRuns: [{ start: 0, end: 1, kind: "equal" }, { start: 1, end: 2, kind: "changed" }],
-      stats: { changed: 1, added: 0, removed: 0, minor: 0 },
-      left: fileSide,
-      right: fileSide,
-      syntax: null,
-      identical: false,
-      view: "text",
-      views: [{ id: "text", label: "Text" }],
-      image: null,
-      note: null,
-      equalView: null,
-    }),
-    file_rows: ({ start, count }) => fileRows.slice(start, start + count),
+    open_file_diff: ({ view: requested }) => {
+      const view = arxml ? requested ?? "arxmlStructure" : "text";
+      const ecuc = view === "ecucValues";
+      const views = [{ id: "text", label: "Text" }];
+      if (arxml) views.unshift({ id: "arxmlStructure", label: "AUTOSAR structure" }, { id: "ecucValues", label: "ECUC values" });
+      return {
+        id: ecuc ? 4 : 2,
+        rows: ecuc ? ecucRows.length : fileRows.length,
+        sections: ecuc ? [] : [{ start: 1, end: 2 }],
+        rowRuns: ecuc ? [{ start: 0, end: 1, kind: "equal" }] : [{ start: 0, end: 1, kind: "equal" }, { start: 1, end: 2, kind: "changed" }],
+        stats: { changed: ecuc ? 0 : 1, added: 0, removed: 0, minor: 0 },
+        left: fileSide,
+        right: fileSide,
+        syntax: null,
+        identical: ecuc,
+        view,
+        views,
+        image: null,
+        note: null,
+        equalView: null,
+      };
+    },
+    file_rows: ({ id, start, count }) => (id === 4 ? ecucRows : fileRows).slice(start, start + count),
     search_diff: ({ query, options: { side } }) => {
       const hits = query === "needle" && side !== "left" ? [{ row: 1, side: 1, start: 0, end: 6 }] : [];
       const result = { hits, truncated: false };
@@ -125,14 +186,33 @@
     async invoke(command, args = {}) {
       calls.push({ command, args });
       if (command in commands) return structuredClone(await commands[command](args));
-      // Window, event and other plugin calls, and commands these tests do not need.
-      return command.startsWith("plugin:event|listen") ? ++callbacks : null;
+      if (command === "plugin:event|listen") {
+        listeners.set(args.event, [...(listeners.get(args.event) ?? []), args.handler]);
+        return ++callbacks;
+      }
+      return null;
     },
   };
   window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
   window.__backend = {
     calls,
     count: (name) => calls.filter((c) => c.command === name).length,
+    holdRefresh() { holdRefresh = true; },
+    holdNextExpand(path) { holdExpand = path; },
+    finishExpand() { finishExpand(); },
+    holdNextPairs() { nextPairs = "hold"; },
+    failNextPairs() { nextPairs = "fail"; },
+    finishPairs() { finishPairs(); },
+    touch(path) { emitPaths([path]); },
+    changeFile(path) {
+      find(path).status = "different";
+      settle(root);
+      emitPaths([path]);
+    },
+    editMovedFile(name) {
+      changedPairs.add(name);
+      emitPaths([`after/${name}`]);
+    },
     async finishSearch(side) {
       const finish = pendingSearches.get(side);
       if (!finish) throw new Error(`No pending ${side} search`);

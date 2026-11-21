@@ -43,12 +43,14 @@ test('flat view totals count a moved pair once and use its resolved status', () 
   const pending = flatFiles(root,'all',moved,new Map());
   assert.equal(countFlatFiles(pending).files,1);
   assert.equal(pending.filter(r=>r.pending).length,1);
-  const rows = flatFiles(root,'all',moved,new Map([['old/moved.txt\nnew/moved.txt',{status:'same',message:null}]]));
+  const statuses = new Map([['old/moved.txt', { right: 'new/moved.txt', result: { status:'same', message:null } }]]);
+  const rows = flatFiles(root,'all',moved,statuses);
   assert.equal(countFlatFiles(rows).files,2);
   assert.equal(countFlatFiles(rows).same,1);
   assert.equal(countFlatFiles(rows).leftOnly,1);
   assert.equal(countFlatFiles(rows).rightOnly,0);
-  assert.equal(flatFiles(root,'leftOnly',moved,new Map([['old/moved.txt\nnew/moved.txt',{status:'same',message:null}]])).length,1);
+  assert.equal(flatFiles(root,'leftOnly',moved,statuses).length,1);
+  assert.ok(flatFiles(root,'all',moved,new Map([['old/moved.txt', { ...statuses.get('old/moved.txt'), right: 'other/moved.txt' }]])).some(r => r.pending));
 });
 const runs = [{start:0,end:100,kind:'equal'},{start:100,end:102,kind:'changed'},{start:102,end:103,kind:'removed'},{start:103,end:200,kind:'equal'},{start:200,end:203,kind:'added'},{start:203,end:204,kind:'minor'},{start:204,end:205,kind:'changed'}];
 test('filtered rows keep original IDs, with one fold bar per hidden stretch', () => {

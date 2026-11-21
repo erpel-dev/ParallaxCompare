@@ -106,8 +106,15 @@ pub fn write_back(original: &str, edited: &str, donor: Option<&str>) -> Result<S
         templates.collect(&XDoc::read(d));
     }
     let nl = if original.contains("\r\n") { "\r\n" } else { "\n" };
-    let mut w =
-        Writer { src: original, patches: Vec::new(), unit: indent_unit(original, &root), nl, doc: &doc, templates };
+    let mut w = Writer {
+        src: original,
+        edited,
+        patches: Vec::new(),
+        unit: indent_unit(original, &root),
+        nl,
+        doc: &doc,
+        templates,
+    };
     w.sync_modules(&wanted)?;
     let out = w.apply()?;
     // Read back: the saved file must hold exactly the edited configuration.
@@ -274,8 +281,15 @@ const STEP: &str = " ▸ ";
 struct Node {
     /// `@def`, `@index`, `@variant` …
     attrs: BTreeMap<String, Val>,
-    values: BTreeMap<String, Vec<Val>>,
+    values: BTreeMap<String, Values>,
     groups: BTreeMap<String, BTreeMap<String, Node>>,
+}
+
+#[derive(Debug, Clone)]
+struct Values {
+    items: Vec<Val>,
+    /// Offset of the property name in the edited text.
+    at: usize,
 }
 
 type Model = BTreeMap<String, Node>;
@@ -307,8 +321,7 @@ fn same_node(a: &Node, b: &Node, path: &str) -> Option<String> {
         }
     }
     for k in a.values.keys().chain(b.values.keys()) {
-        let empty = Vec::new();
-        if keys(a.values.get(k).unwrap_or(&empty)) != keys(b.values.get(k).unwrap_or(&empty)) {
+        if keys(a.values.get(k).map_or(&[], |v| &v.items)) != keys(b.values.get(k).map_or(&[], |v| &v.items)) {
             return Some(format!("{path}/{k}"));
         }
     }
@@ -356,7 +369,7 @@ fn write_node(out: &mut String, name: &str, node: &Node, depth: usize, last: boo
     let entries: Vec<Entry<'_>> = attrs
         .into_iter()
         .map(|(k, v)| Entry::Attr(k, v))
-        .chain(node.values.iter().map(|(k, vs)| Entry::Values(k, vs)))
+        .chain(node.values.iter().map(|(k, vs)| Entry::Values(k, &vs.items)))
         .chain(node.groups.iter().map(|(g, is)| Entry::Group(g, is)))
         .collect();
     if entries.is_empty() {
@@ -686,7 +699,11 @@ impl XNode<'_> {
     fn model(&self) -> Node {
         Node {
             attrs: self.attrs.iter().map(|(k, (v, _))| (k.clone(), v.clone())).collect(),
-            values: self.values.iter().map(|(k, vs)| (k.clone(), vs.iter().map(|v| v.val.clone()).collect())).collect(),
+            values: self
+                .values
+                .iter()
+                .map(|(k, vs)| (k.clone(), Values { items: vs.iter().map(|v| v.val.clone()).collect(), at: 0 }))
+                .collect(),
             groups: self
                 .groups
                 .iter()
@@ -945,10 +962,11 @@ fn node_from_json(j: J, name: &str, at: usize, module: bool) -> Result<Node, (us
             }
             J::Arr(items) => {
                 let vals = items.into_iter().map(|i| scalar(i, &key, line)).collect::<Result<Vec<_>, _>>()?;
-                node.values.insert(key, vals);
+                node.values.insert(key, Values { items: vals, at: line });
             }
             other => {
-                node.values.insert(key.clone(), vec![scalar(other, &key, line)?]);
+                let value = scalar(other, &key, line)?;
+                node.values.insert(key, Values { items: vec![value], at: line });
             }
         }
     }
@@ -961,7 +979,6 @@ fn node_from_json(j: J, name: &str, at: usize, module: bool) -> Result<Node, (us
 // ---------------------------------------------------------------------------
 // How new elements are written: taken from the same definition in either file
 
-#[derive(Clone)]
 struct ValueTemplate {
     tag: String,
     dest: String,
@@ -984,15 +1001,16 @@ impl Templates {
     }
 
     fn node(&mut self, node: &XNode<'_>, path: &str) {
-        for (name, vs) in &node.values {
+        for vs in node.values.values() {
             let Some(v) = vs.first() else { continue };
+            let Some(definition) = v.el.text_of("DEFINITION-REF") else { continue };
             let value_dest = v.el.child("VALUE-REF").and_then(|r| r.attr("DEST")).map(str::to_string);
             let iref_dests = v
                 .el
                 .child("VALUE-IREF")
                 .map_or(Vec::new(), |i| i.children.iter().filter_map(|c| c.attr("DEST").map(str::to_string)).collect());
             let numeric_bools = v.el.child("VALUE").is_some_and(|x| matches!(x.text.trim(), "0" | "1"));
-            self.values.entry(format!("{path}/{name}")).or_insert(ValueTemplate {
+            self.values.entry(definition).or_insert(ValueTemplate {
                 tag: v.el.name.clone(),
                 dest: v.dest.clone(),
                 value_dest,
@@ -1008,34 +1026,6 @@ impl Templates {
                 }
                 self.node(c, &gpath);
             }
-        }
-    }
-
-    fn value(&self, path: &str, name: &str, val: &Val) -> Result<ValueTemplate, String> {
-        if let Some(t) = self.values.get(path) {
-            return Ok(t.clone());
-        }
-        let numerical = |dest: &str| ValueTemplate {
-            tag: "ECUC-NUMERICAL-PARAM-VALUE".into(),
-            dest: dest.into(),
-            value_dest: None,
-            iref_dests: Vec::new(),
-            numeric_bools: false,
-        };
-        match val {
-            Val::Bool(_) => Ok(numerical("ECUC-BOOLEAN-PARAM-DEF")),
-            Val::Num(n) if n.contains(['.', 'e', 'E']) => Ok(numerical("ECUC-FLOAT-PARAM-DEF")),
-            Val::Num(_) => Ok(numerical("ECUC-INTEGER-PARAM-DEF")),
-            Val::Ref(r) if !r.contains(STEP) && !r.starts_with('/') => Ok(ValueTemplate {
-                tag: "ECUC-REFERENCE-VALUE".into(),
-                dest: "ECUC-REFERENCE-DEF".into(),
-                value_dest: Some("ECUC-CONTAINER-VALUE".into()),
-                iref_dests: Vec::new(),
-                numeric_bools: false,
-            }),
-            _ => Err(format!(
-                "neither file has {name} at {path}, so its kind of parameter is unknown; add it in the Text view"
-            )),
         }
     }
 }
@@ -1148,6 +1138,7 @@ struct Patch {
 
 struct Writer<'a> {
     src: &'a str,
+    edited: &'a str,
     patches: Vec<Patch>,
     unit: String,
     nl: &'static str,
@@ -1164,6 +1155,25 @@ struct Pending {
 }
 
 impl Writer<'_> {
+    fn value_template(&self, definition: &str, path: &str, at: usize) -> Result<&ValueTemplate, String> {
+        self.templates.values.get(definition).ok_or_else(|| {
+            format!(
+                "line {}: {path} has an unknown definition ({definition}); add it in the Text view",
+                line_of(self.edited, at)
+            )
+        })
+    }
+
+    fn check_integer(&self, dest: &str, value: &Val, path: &str, at: usize) -> Result<(), String> {
+        if dest == "ECUC-INTEGER-PARAM-DEF"
+            && !matches!(value, Val::Null)
+            && !matches!(value, Val::Num(n) if !n.contains(['.', 'e', 'E']))
+        {
+            return Err(format!("line {}: {path} must be an integer", line_of(self.edited, at)));
+        }
+        Ok(())
+    }
+
     fn nl(&self) -> &'static str {
         self.nl
     }
@@ -1437,7 +1447,7 @@ impl Writer<'_> {
         let names: std::collections::BTreeSet<&String> = x.values.keys().chain(node.values.keys()).collect();
         for name in names {
             let have = x.values.get(name).map_or(&empty[..], |v| &v[..]);
-            let want = node.values.get(name).map_or(&[][..], |v| &v[..]);
+            let want = node.values.get(name);
             let vpath = format!("{path}/{name}");
             // Values on both sides stay; the others are changed in place, removed or added.
             let mut used = vec![false; have.len()];
@@ -1446,7 +1456,7 @@ impl Writer<'_> {
             for (i, h) in have.iter().enumerate().rev() {
                 available.entry(h.val.comparison_key()).or_default().push(i);
             }
-            for w in want {
+            for w in want.into_iter().flat_map(|v| &v.items) {
                 match available.get_mut(&w.comparison_key()).and_then(Vec::pop) {
                     Some(i) => used[i] = true,
                     None => missing.push(w),
@@ -1454,11 +1464,16 @@ impl Writer<'_> {
             }
             let mut stale = have.iter().zip(&used).filter(|(_, u)| !**u).map(|(h, _)| h);
             for w in missing {
+                let at = want.map_or(0, |v| v.at);
                 match stale.next() {
-                    Some(h) => self.set_value(h, w, &vpath)?,
+                    Some(h) => self.set_value(h, w, &vpath, at)?,
                     None => {
-                        let t = self.templates.value(&vpath, name, w)?;
-                        let item = self.new_value(&t, &format!("{def}/{name}"), w, &vpath)?;
+                        let definition = have
+                            .first()
+                            .and_then(|h| h.el.text_of("DEFINITION-REF"))
+                            .unwrap_or_else(|| format!("{def}/{name}"));
+                        let t = self.value_template(&definition, &vpath, at)?;
+                        let item = self.new_value(t, &definition, w, &vpath, at)?;
                         if t.tag == "ECUC-REFERENCE-VALUE" || t.tag == "ECUC-INSTANCE-REFERENCE-VALUE" {
                             pending.refs.push(item);
                         } else {
@@ -1522,7 +1537,7 @@ impl Writer<'_> {
         Ok(())
     }
 
-    fn set_value(&mut self, h: &XVal<'_>, w: &Val, path: &str) -> Result<(), String> {
+    fn set_value(&mut self, h: &XVal<'_>, w: &Val, path: &str, at: usize) -> Result<(), String> {
         let el = h.el;
         match h.kind {
             Kind::Numerical | Kind::Textual => {
@@ -1530,7 +1545,10 @@ impl Writer<'_> {
                 let text = match (h.kind, w) {
                     (_, Val::Null) => None,
                     (_, Val::Ref(_)) => return Err(format!("{path} is a parameter, not a reference")),
-                    (Kind::Numerical, v) => Some(numeric_text(v, old.map(|o| o.text.trim()).unwrap_or_default())),
+                    (Kind::Numerical, v) => {
+                        self.check_integer(&h.dest, v, path, at)?;
+                        Some(numeric_text(v, old.map(|o| o.text.trim()).unwrap_or_default()))
+                    }
                     (_, v) => Some(v.key()),
                 };
                 match (old, text) {
@@ -1551,10 +1569,9 @@ impl Writer<'_> {
                     (Some(o), None) => self.delete(o),
                     (Some(o), Some(t)) => self.set_text(o, &t),
                     (None, Some(t)) => {
-                        let dest = self
-                            .templates
-                            .values
-                            .get(path)
+                        let dest = el
+                            .child("DEFINITION-REF")
+                            .and_then(|d| self.templates.values.get(d.text.trim()))
                             .and_then(|t| t.value_dest.clone())
                             .unwrap_or_else(|| "ECUC-CONTAINER-VALUE".into());
                         self.append(el, vec![X::Leaf("VALUE-REF".into(), vec![("DEST".into(), dest)], t)]);
@@ -1569,7 +1586,13 @@ impl Writer<'_> {
                     .unwrap_or_default();
                 let iref = match w {
                     Val::Null => None,
-                    Val::Ref(r) => Some(self.iref(r, &dests, path)?),
+                    Val::Ref(r) => {
+                        let known = el
+                            .child("DEFINITION-REF")
+                            .and_then(|d| self.templates.values.get(d.text.trim()))
+                            .map_or(&[][..], |t| &t.iref_dests);
+                        Some(self.iref(r, &dests, known, path)?)
+                    }
                     _ => {
                         return Err(format!(
                             "{path} is an instance reference; write it as \"{ARROW}context{STEP}target\""
@@ -1598,13 +1621,12 @@ impl Writer<'_> {
         Ok(())
     }
 
-    /// The VALUE-IREF for `ctx ▸ … ▸ target`, with the DEST of each step from `dests`
-    /// or from the same definition in either file.
-    fn iref(&self, value: &str, dests: &[String], path: &str) -> Result<X, String> {
+    /// The VALUE-IREF for `ctx ▸ … ▸ target`, with the DEST of each step from
+    /// the original reference or its template.
+    fn iref(&self, value: &str, dests: &[String], known: &[String], path: &str) -> Result<X, String> {
         let parts: Vec<&str> = value.split(STEP).map(str::trim).collect();
-        let known = self.templates.values.get(path).map(|t| t.iref_dests.clone()).unwrap_or_default();
         let dests = if dests.len() == parts.len() {
-            dests.to_vec()
+            dests
         } else if known.len() == parts.len() {
             known
         } else {
@@ -1615,12 +1637,12 @@ impl Writer<'_> {
         let mut children = Vec::new();
         for (i, (p, d)) in parts.iter().zip(dests).enumerate() {
             let tag = if i + 1 == parts.len() { "TARGET-REF" } else { "CONTEXT-ELEMENT-REF" };
-            children.push(X::Leaf(tag.into(), vec![("DEST".into(), d)], self.doc.abs(p)?));
+            children.push(X::Leaf(tag.into(), vec![("DEST".into(), d.clone())], self.doc.abs(p)?));
         }
         Ok(X::Node("VALUE-IREF".into(), Vec::new(), children))
     }
 
-    fn new_value(&self, t: &ValueTemplate, def: &str, w: &Val, path: &str) -> Result<X, String> {
+    fn new_value(&self, t: &ValueTemplate, def: &str, w: &Val, path: &str, at: usize) -> Result<X, String> {
         let mut children = vec![X::Leaf("DEFINITION-REF".into(), vec![("DEST".into(), t.dest.clone())], def.into())];
         match (t.tag.as_str(), w) {
             (_, Val::Null) => {}
@@ -1628,12 +1650,15 @@ impl Writer<'_> {
                 let dest = t.value_dest.clone().unwrap_or_else(|| "ECUC-CONTAINER-VALUE".into());
                 children.push(X::Leaf("VALUE-REF".into(), vec![("DEST".into(), dest)], self.doc.abs(r)?));
             }
-            ("ECUC-INSTANCE-REFERENCE-VALUE", Val::Ref(r)) => children.push(self.iref(r, &t.iref_dests, path)?),
+            ("ECUC-INSTANCE-REFERENCE-VALUE", Val::Ref(r)) => {
+                children.push(self.iref(r, &t.iref_dests, &[], path)?);
+            }
             ("ECUC-REFERENCE-VALUE" | "ECUC-INSTANCE-REFERENCE-VALUE", _) => {
                 return Err(format!("{path} is a reference; write it as \"{ARROW}path\""));
             }
             (_, Val::Ref(_)) => return Err(format!("{path} is a parameter, not a reference")),
             ("ECUC-NUMERICAL-PARAM-VALUE", v) => {
+                self.check_integer(&t.dest, v, path, at)?;
                 let style = if t.numeric_bools { "1" } else { "" };
                 children.push(X::leaf("VALUE", &numeric_text(v, style)));
             }
@@ -1659,9 +1684,10 @@ impl Writer<'_> {
         let (mut params, mut refs, mut subs) = (Vec::new(), Vec::new(), Vec::new());
         for (name, vals) in &node.values {
             let vpath = format!("{path}/{name}");
-            for v in vals {
-                let t = self.templates.value(&vpath, name, v)?;
-                let item = self.new_value(&t, &format!("{def}/{name}"), v, &vpath)?;
+            let definition = format!("{def}/{name}");
+            for v in &vals.items {
+                let t = self.value_template(&definition, &vpath, vals.at)?;
+                let item = self.new_value(t, &definition, v, &vpath, vals.at)?;
                 if t.tag == "ECUC-REFERENCE-VALUE" || t.tag == "ECUC-INSTANCE-REFERENCE-VALUE" {
                     refs.push(item);
                 } else {
@@ -1734,14 +1760,24 @@ fn numeric_text(v: &Val, old: &str) -> String {
         Val::Bool(b) if matches!(old, "0" | "1") => if *b { "1" } else { "0" }.into(),
         Val::Bool(b) => b.to_string(),
         Val::Num(n) => {
-            let hex = old.strip_prefix("0x").or_else(|| old.strip_prefix("0X"));
-            match (hex, n.parse::<u128>()) {
-                (Some(digits), Ok(i)) => {
-                    let prefix = &old[..2];
-                    let lower = digits.bytes().any(|b| b.is_ascii_lowercase());
-                    if lower { format!("{prefix}{i:x}") } else { format!("{prefix}{i:X}") }
-                }
-                _ => n.clone(),
+            let unsigned_old = old.strip_prefix(['-', '+']).unwrap_or(old);
+            let digits = unsigned_old.strip_prefix("0x").or_else(|| unsigned_old.strip_prefix("0X"));
+            let magnitude = n.strip_prefix('-').unwrap_or(n);
+            let (Some(digits), Ok(i)) = (digits, magnitude.parse::<u128>()) else {
+                return n.clone();
+            };
+            let sign = if n.starts_with('-') {
+                "-"
+            } else if old.starts_with('+') {
+                "+"
+            } else {
+                ""
+            };
+            let prefix = &unsigned_old[..2];
+            if digits.bytes().any(|b| b.is_ascii_lowercase()) {
+                format!("{sign}{prefix}{i:x}")
+            } else {
+                format!("{sign}{prefix}{i:X}")
             }
         }
         other => other.key(),
@@ -1898,6 +1934,51 @@ mod tests {
     }
 
     #[test]
+    fn unknown_parameters_are_rejected_at_their_line() {
+        let json = render(FILE).unwrap();
+        for value in ["4", "3.14", "true", "\"POLLING\"", "\"→ Mcu/Clk\""] {
+            let edited = json.replace(
+                "\"CanRxProcessing\": \"INTERRUPT\"",
+                &format!("\"CanRxProcessing\": \"INTERRUPT\",\n            \"Unknown\": {value}"),
+            );
+            let err = write_back(FILE, &edited, Some(FILE)).unwrap_err();
+            assert!(err.starts_with("line 13:") && err.contains("Unknown"), "{err}");
+        }
+        let donor = FILE.replace("CanControllerId", "Unknown").replace("/AUTOSAR/EcucDefs/Can", "/Vendor/Can");
+        let edited = json.replace(
+            "\"CanRxProcessing\": \"INTERRUPT\"",
+            "\"CanRxProcessing\": \"INTERRUPT\",\n            \"Unknown\": 4",
+        );
+        assert!(write_back(FILE, &edited, Some(&donor)).unwrap_err().contains("Unknown"));
+    }
+
+    #[test]
+    fn integer_parameters_reject_fractional_edits_and_insertions() {
+        let json = render(FILE).unwrap();
+        let edited = json.replace("\"CanControllerId\": 31", "\"CanControllerId\": 3.14");
+        let err = write_back(FILE, &edited, None).unwrap_err();
+        assert!(err.starts_with("line 10:") && err.contains("CanControllerId") && err.contains("integer"), "{err}");
+
+        let donor = FILE.replace("CanControllerId", "NewId");
+        let edited = json.replace("\"CanControllerId\": 31", "\"CanControllerId\": 31,\n            \"NewId\": 3.14");
+        let err = write_back(FILE, &edited, Some(&donor)).unwrap_err();
+        assert!(err.starts_with("line 11:") && err.contains("NewId") && err.contains("integer"), "{err}");
+    }
+
+    #[test]
+    fn preserves_signed_hexadecimal_when_editing_an_integer() {
+        for (old, value, expected) in [("-0x1F", "-32", "-0x20"), ("0X1F", "-42", "-0X2A"), ("+0x1f", "42", "+0x2a")] {
+            let xml = FILE.replace("<VALUE>0x1F</VALUE>", &format!("<VALUE>{old}</VALUE>"));
+            let old_value = canon_int(old).unwrap();
+            let edited = render(&xml)
+                .unwrap()
+                .replace(&format!("\"CanControllerId\": {old_value}"), &format!("\"CanControllerId\": {value}"));
+            let saved = write_back(&xml, &edited, None).unwrap();
+            assert_eq!(saved, xml.replace(&format!("<VALUE>{old}</VALUE>"), &format!("<VALUE>{expected}</VALUE>")));
+        }
+    }
+
+    #[test]
     fn json_errors_name_the_line() {
         let json = render(FILE).unwrap();
         let err = write_back(FILE, &json.replace("31", "3 1"), None).unwrap_err();
@@ -1965,7 +2046,7 @@ mod tests {
             value.repeat(2000)
         );
         let mut model = XDoc::read(&parse_xml(&xml).unwrap()).model();
-        model.get_mut("M").unwrap().values.get_mut("P").unwrap()[1000] = Val::Str("changed".into());
+        model.get_mut("M").unwrap().values.get_mut("P").unwrap().items[1000] = Val::Str("changed".into());
         let edited = to_json(&model);
         let saved = write_back(&xml, &edited, None).unwrap();
         assert_eq!(render(&saved).unwrap(), edited);
