@@ -837,7 +837,7 @@ impl FolderView {
             n => format!("{n} entries could not be moved to the {}.", trash_name()),
         };
         let answer = window.prompt(
-            PromptLevel::Warning,
+            PromptLevel::Critical,
             &message,
             Some("Delete them permanently? This cannot be undone."),
             &["Delete permanently", "Keep them"],

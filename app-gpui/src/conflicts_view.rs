@@ -22,7 +22,7 @@ pub enum ConflictsEvent {
 pub struct ConflictsView {
     dir: PathBuf,
     focus: FocusHandle,
-    state: Option<Result<RepoState, String>>,
+    pub(crate) state: Option<Result<RepoState, String>>,
     /// Files resolved here, and how to stage each.
     pub(crate) resolved: BTreeMap<String, Resolution>,
     message: Option<SharedString>,
@@ -51,10 +51,10 @@ impl ConflictsView {
             let state = work.await;
             let _ = this.update(cx, |this, cx| {
                 // Files staged or resolved elsewhere (Git, another tool) are no
-                // longer listed; their records here would be staged again.
-                match &state {
-                    Ok(state) => this.resolved.retain(|path, _| state.files.iter().any(|f| f.path == *path)),
-                    Err(_) => this.resolved.clear(),
+                // longer listed; their records here would be staged again. A
+                // failed read (the repository briefly unavailable) changes nothing.
+                if let Ok(state) = &state {
+                    this.resolved.retain(|path, _| state.files.iter().any(|f| f.path == *path));
                 }
                 this.state = Some(state);
                 cx.notify();

@@ -302,13 +302,21 @@ impl TextView {
                         cx,
                     );
                     cx.spawn_in(window, async move |this, cx| {
-                        let replace = answer.await == Ok(0);
-                        if replace {
-                            run.sides.insert(0, side);
-                            run.overwrite = Some(side);
-                        } else {
-                            run.kept.push(side_name(side));
-                            run.overwrite = None;
+                        match answer.await {
+                            Ok(0) => {
+                                run.sides.insert(0, side);
+                                run.overwrite = Some(side);
+                            }
+                            Ok(_) => {
+                                run.kept.push(side_name(side));
+                                run.overwrite = None;
+                            }
+                            // The question went away unanswered (another one
+                            // replaced it): stop, writing nothing more.
+                            Err(_) => {
+                                let _ = this.update(cx, |this, cx| this.finish_save(run, true, cx));
+                                return;
+                            }
                         }
                         let _ = this.update_in(cx, |this, window, cx| this.save_sides(run, window, cx));
                     })
@@ -323,8 +331,12 @@ impl TextView {
                 }
             }
         }
+        self.finish_save(run, false, cx);
+    }
+
+    fn finish_save(&mut self, run: SaveRun, stopped: bool, cx: &mut Context<Self>) {
         let mut message = match run.saved.as_slice() {
-            [] if run.kept.is_empty() => "Nothing to save.".to_string(),
+            [] if run.kept.is_empty() && !stopped => "Nothing to save.".to_string(),
             [] => String::new(),
             saved => format!("Saved the {} side.", saved.join(" and ")),
         };
@@ -334,6 +346,9 @@ impl TextView {
                 "{}Kept the {kept} file as it is on disk; your edits are not saved.",
                 if message.is_empty() { "" } else { " " }
             ));
+        }
+        if stopped {
+            message = format!("{message}{}Saving stopped.", if message.is_empty() { "" } else { " " });
         }
         if !run.saved.is_empty() {
             cx.emit(TextEvent::Saved(self.path.clone()));

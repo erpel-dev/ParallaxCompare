@@ -302,5 +302,20 @@ mod tests {
         });
         cx.run_until_parked();
         list.read_with(cx, |list, _| assert_eq!(list.resolved.keys().collect::<Vec<_>>(), ["a.txt"]));
+
+        // A refresh that cannot read the repository keeps the records.
+        let git = repo.path().join(".git");
+        let away = repo.path().join(".git-away");
+        std::fs::rename(&git, &away).unwrap();
+        list.update(cx, |list, cx| list.load(cx));
+        cx.run_until_parked();
+        list.read_with(cx, |list, _| assert!(matches!(list.state, Some(Err(_)))));
+        std::fs::rename(&away, &git).unwrap();
+        list.update(cx, |list, cx| list.load(cx));
+        cx.run_until_parked();
+        list.read_with(cx, |list, _| {
+            assert!(matches!(list.state, Some(Ok(_))));
+            assert_eq!(list.resolved.keys().collect::<Vec<_>>(), ["a.txt"]);
+        });
     }
 }
