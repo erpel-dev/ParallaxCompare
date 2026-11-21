@@ -11,10 +11,15 @@
 
   // equal/: identical, with a folder inside. mixed/: one changed file, one only
   // on the left, an identical folder. odd/: names with a tab and a line break.
-  const matched = new URLSearchParams(location.search).has("matched");
-  const movedNames = ["same\nname.txt", "changed-move.txt"];
+  const scenario = new URLSearchParams(location.search);
+  const manyPairs = scenario.has("many-pairs");
+  const movedNames = manyPairs ? [...names(24, "a-same-"), ...names(24, "z-changed-")] : ["same\nname.txt", "changed-move.txt"];
   const orphan = (name, left) => ({ name, left: left ? file() : null, right: left ? null : file(), status: left ? "leftOnly" : "rightOnly" });
-  const root = matched ? folder("", [
+  const root = scenario.has("tree-order") ? folder("", [
+    folder("z-folder", [pair("inside.txt", "different")]),
+    pair("a-same.txt"),
+    pair("b-later.txt", "different"),
+  ]) : scenario.has("matched") || manyPairs ? folder("", [
     folder("aaa", [pair("line-endings.txt", "similar")]),
     folder("before", movedNames.map((name) => orphan(name, true))),
     folder("after", movedNames.map((name) => orphan(name, false))),
@@ -83,9 +88,19 @@
   const fileSide = { exists: true, size: 14, binary: false, encoding: "UTF-8", lineEnding: "LF", bom: false, lines: 2, editable: false };
   const pendingSearches = new Map();
   const listeners = new Map();
-  const changedPairs = new Set(["changed-move.txt"]);
+  const changedPairs = new Set(manyPairs ? names(24, "z-changed-") : ["changed-move.txt"]);
   let holdRefresh = false;
   let rejectRefresh;
+  let holdExpand;
+  let finishExpand;
+  let nextPairs;
+  let finishPairs;
+
+  function emitPaths(paths) {
+    for (const handler of listeners.get("paths-changed") ?? []) {
+      window[`_${handler}`]({ event: "paths-changed", payload: { session: 1, paths } });
+    }
+  }
 
   const calls = [];
   const commands = {
@@ -107,8 +122,22 @@
       return { root: view(root, false), summary: summary() };
     },
     cancel_compare: () => rejectRefresh?.("cancelled"),
-    compare_pairs: ({ pairs }) => pairs.map(([, right]) => ({ status: changedPairs.has(right.split("/").at(-1)) ? "different" : "same", message: null })),
-    expand: ({ path, deep }) => view(find(path), !!deep),
+    compare_pairs: ({ pairs }) => {
+      const result = pairs.map(([, right]) => ({ status: changedPairs.has(right.split("/").at(-1)) ? "different" : "same", message: null }));
+      const action = nextPairs;
+      nextPairs = undefined;
+      if (action === "fail") throw new Error("Matched files could not be compared");
+      if (action === "hold") return new Promise((resolve) => (finishPairs = () => resolve(result)));
+      return result;
+    },
+    expand: ({ path, deep }) => {
+      const result = view(find(path), !!deep);
+      if (holdExpand === path) {
+        holdExpand = undefined;
+        return new Promise((resolve) => (finishExpand = () => resolve(result)));
+      }
+      return result;
+    },
     refresh_paths: ({ paths }) => paths.map((p) => (find(p) ? entry(find(p)) : null)),
     delete_entries: ({ paths, left }) => ({ nodes: paths.map((p) => remove(p, left)), error: null, notTrashed: [] }),
     open_file_diff: () => ({
@@ -161,11 +190,20 @@
     calls,
     count: (name) => calls.filter((c) => c.command === name).length,
     holdRefresh() { holdRefresh = true; },
+    holdNextExpand(path) { holdExpand = path; },
+    finishExpand() { finishExpand(); },
+    holdNextPairs() { nextPairs = "hold"; },
+    failNextPairs() { nextPairs = "fail"; },
+    finishPairs() { finishPairs(); },
+    touch(path) { emitPaths([path]); },
+    changeFile(path) {
+      find(path).status = "different";
+      settle(root);
+      emitPaths([path]);
+    },
     editMovedFile(name) {
       changedPairs.add(name);
-      for (const handler of listeners.get("paths-changed") ?? []) {
-        window[`_${handler}`]({ event: "paths-changed", payload: { session: 1, paths: [`after/${name}`] } });
-      }
+      emitPaths([`after/${name}`]);
     },
     async finishSearch(side) {
       const finish = pendingSearches.get(side);

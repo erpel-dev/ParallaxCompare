@@ -63,6 +63,10 @@ const names = () =>
   );
 const count = (command: string) => page.evaluate((c) => (window as any).__backend.count(c), command);
 const calls = (command: string) => page.evaluate((c) => (window as any).__backend.calls.filter((x: any) => x.command === c).map((x: any) => x.args), command);
+const waitForCount = (command: string, count: number) => page.waitForFunction(
+  ([c, n]) => (window as any).__backend.count(c) === n,
+  [command, count] as const,
+);
 /** A button of the filter bar. */
 const filter = (label: string) => page.locator('button[aria-pressed]').filter({ hasText: label });
 const statusLine = () => page.locator('.status').innerText();
@@ -196,6 +200,36 @@ test('a watcher change invalidates a matched filename containing a line break', 
   assert.deepEqual((await calls('compare_pairs')).at(-1).pairs, [['before/same\nname.txt', 'after/same\nname.txt']]);
 });
 
+test('watcher changes keep unaffected results from an in-flight matched batch', async () => {
+  await openMatchedFolder();
+  await page.evaluate(() => (window as any).__backend.holdNextPairs());
+  await page.getByRole('button', { name: 'Flat', exact: true }).click();
+  await waitForCount('compare_pairs', 1);
+  await page.evaluate(() => {
+    const backend = (window as any).__backend;
+    backend.touch('aaa/line-endings.txt');
+    backend.editMovedFile('same\nname.txt');
+  });
+  await waitForCount('refresh_paths', 2);
+  await page.evaluate(() => (window as any).__backend.finishPairs());
+  await page.getByRole('button', { name: 'Different 2', exact: true }).waitFor();
+  assert.deepEqual((await calls('compare_pairs')).map((call) => call.pairs.length), [2, 1]);
+  assert.deepEqual((await calls('compare_pairs')).at(-1).pairs, [['before/same\nname.txt', 'after/same\nname.txt']]);
+});
+
+test('a failed matched comparison waits for a relevant change or manual refresh', async () => {
+  await openMatchedFolder();
+  await page.evaluate(() => (window as any).__backend.failNextPairs());
+  await page.getByRole('button', { name: 'Flat', exact: true }).click();
+  await page.getByText('Matched files could not be compared', { exact: false }).waitFor();
+  await page.evaluate(() => (window as any).__backend.touch('aaa/line-endings.txt'));
+  await waitForCount('refresh_paths', 1);
+  assert.equal(await count('compare_pairs'), 1);
+  await page.getByRole('button', { name: /Refresh/ }).click();
+  await page.getByRole('button', { name: 'Same 1', exact: true }).waitFor();
+  assert.equal(await count('compare_pairs'), 2);
+});
+
 test('refresh preserves open folders and selection, including after a cancelled refresh', async () => {
   await page.setViewportSize({ width: 1400, height: 420 });
   await row('mixed').locator('.chev').first().click();
@@ -210,10 +244,13 @@ test('refresh preserves open folders and selection, including after a cancelled 
 
   await page.evaluate(() => (window as any).__backend.holdRefresh());
   await refresh.click();
+  await page.evaluate(() => (window as any).__backend.changeFile('top.txt'));
   await page.getByRole('button', { name: 'Cancel', exact: true }).click();
   await page.getByText('Showing the results from before the refresh.').waitFor();
   assert.match(await statusLine(), /refresh cancelled · previous results/);
   assert.equal(await selected.getAttribute('aria-selected'), 'true');
+  await page.getByRole('button', { name: 'Different 2', exact: true }).waitFor();
+  assert.ok((await calls('refresh_paths')).some((call) => call.paths.includes('top.txt')));
 
   await page.getByRole('button', { name: 'Compare again', exact: true }).click();
   await page.locator('.status').getByText('compared in', { exact: false }).waitFor();
@@ -222,6 +259,52 @@ test('refresh preserves open folders and selection, including after a cancelled 
   assert.equal(await row('mixed').getAttribute('aria-expanded'), 'false');
   assert.equal(await tree.evaluate((node) => node.scrollTop), scrollTop);
   assert.equal((await calls('run_compare')).at(-1).invalidate, true);
+});
+
+test('refresh keeps an expansion requested while a lazy folder is loading', async () => {
+  await page.evaluate(() => (window as any).__backend.holdNextExpand('equal'));
+  await row('equal').locator('.chev').first().click();
+  await waitForCount('expand', 1);
+  await page.getByRole('button', { name: /Refresh/ }).click();
+  await page.getByText('Restoring the comparison view…').waitFor();
+  assert.equal(await page.getByRole('button', { name: 'Cancel', exact: true }).count(), 0);
+  await page.evaluate(() => (window as any).__backend.finishExpand());
+  await page.locator('.status').getByText('compared in', { exact: false }).waitFor();
+  await row('e00.txt').waitFor();
+  assert.equal(await row('equal').getAttribute('aria-expanded'), 'true');
+});
+
+test('Flat refresh restores scroll after the matched rows settle', async () => {
+  await page.goto(origin + '/?many-pairs');
+  await page.getByText('Showing').waitFor();
+  await page.getByRole('button', { name: 'Flat', exact: true }).click();
+  await page.getByRole('button', { name: 'Different 24', exact: true }).click();
+  await page.setViewportSize({ width: 1400, height: 420 });
+  const tree = page.getByRole('tree');
+  const scrollTop = await tree.evaluate((node) => {
+    node.scrollTop = 120;
+    return node.scrollTop;
+  });
+  assert.ok(scrollTop > 0);
+  await page.evaluate(() => (window as any).__backend.holdNextPairs());
+  await page.getByRole('button', { name: /Refresh/ }).click();
+  await waitForCount('compare_pairs', 2);
+  await page.getByText('Restoring the comparison view…').waitFor();
+  assert.equal(await page.getByRole('button', { name: 'Cancel', exact: true }).count(), 0);
+  await page.evaluate(() => (window as any).__backend.finishPairs());
+  await page.locator('.status').getByText('compared in', { exact: false }).waitFor();
+  assert.equal(await tree.evaluate((node) => node.scrollTop), scrollTop);
+});
+
+test('tree navigation uses display order from a row without a difference', async () => {
+  await page.goto(origin + '/?tree-order');
+  await page.getByText('Showing').waitFor();
+  await row('a-same.txt').click();
+  await page.keyboard.press('F7');
+  assert.equal(await row('inside.txt').getAttribute('aria-selected'), 'true');
+  await row('a-same.txt').click();
+  await page.keyboard.press('F8');
+  assert.equal(await row('b-later.txt').getAttribute('aria-selected'), 'true');
 });
 
 test('a superseded find-side search leaves the row filter and selection in place', async () => {
