@@ -9,9 +9,10 @@ use std::time::Duration;
 use parallax_core::compare::{self, CompareOptions, Control, Excludes, Node, Summary};
 use parallax_core::convert::{self, View, syntax};
 use parallax_core::edit::{EditSession, Edited, Pos, Side};
-use parallax_core::highlight::{self, DocHighlighter, Span, ThemeKind};
+use parallax_core::highlight::{self, DocHighlighter, ThemeKind};
 use parallax_core::ops::Removal;
 use parallax_core::progress::Progress;
+use parallax_core::rows::{self, LineFocus, RowView};
 use parallax_core::search::{self, SearchOptions, SearchResult};
 use parallax_core::source::{Source, SourceInfo, SourceOptions, SourceSpec, open_pair};
 use parallax_core::text::{self, LineEnding, TextDoc};
@@ -21,7 +22,7 @@ use parallax_core::vfs::git::{GitRepo, RefList};
 use parallax_core::vfs::{Change, Data, EntryKind, split_parent};
 use parallax_core::watch::{Watcher, WriteGuard};
 use parking_lot::{Mutex, RwLock};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 pub(crate) type CmdResult<T> = Result<T, String>;
@@ -1456,101 +1457,6 @@ pub async fn open_file_diff(
     Ok(FileDiffInfo { id: diff_id, ..info })
 }
 
-/// Longer lines are cut for display; the web view cannot lay out megabyte-long rows.
-const MAX_SHOWN_LINE: u32 = 10_000;
-
-#[derive(Serialize)]
-pub struct LineView {
-    /// 0-based line number.
-    n: u32,
-    t: String,
-    /// Syntax colours.
-    s: Vec<Span>,
-    /// Changed character ranges within a changed line.
-    m: Vec<(u32, u32)>,
-    /// Number of UTF-16 units cut from the end of a very long line.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    x: Option<u32>,
-    /// Number of UTF-16 units cut from the start, to reveal a change or search hit.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    o: Option<u32>,
-    /// The file's last line, without the terminator the other file has.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    nn: bool,
-}
-
-impl LineView {
-    pub(crate) fn new(n: u32, line: &str, spans: Vec<Span>, marks: Vec<(u32, u32)>) -> Self {
-        Self::window(n, line, spans, marks, None)
-    }
-
-    fn window(n: u32, line: &str, spans: Vec<Span>, marks: Vec<(u32, u32)>, focus: Option<u32>) -> Self {
-        let total = text::utf16_len(line) as u32;
-        if total <= MAX_SHOWN_LINE {
-            return LineView { n, t: line.to_string(), s: spans, m: marks, x: None, o: None, nn: false };
-        }
-        // A requested search column takes precedence over the first change.
-        let column = focus.unwrap_or_else(|| marks.first().map_or(0, |m| m.0)).min(total);
-        let from_units = if column.saturating_add(100) > MAX_SHOWN_LINE { column.saturating_sub(200) } else { 0 };
-        let byte_at = |target: u32| {
-            let mut units = 0u32;
-            line.char_indices()
-                .find(|(_, c)| {
-                    let hit = units >= target;
-                    units += c.len_utf16() as u32;
-                    hit
-                })
-                .map_or(line.len(), |(i, _)| i)
-        };
-        let start = byte_at(from_units);
-        let skipped = text::utf16_len(&line[..start]) as u32;
-        let end = start + {
-            let rest = &line[start..];
-            let mut units = 0u32;
-            rest.char_indices()
-                .find(|(_, c)| {
-                    units += c.len_utf16() as u32;
-                    units > MAX_SHOWN_LINE
-                })
-                .map_or(rest.len(), |(i, _)| i)
-        };
-        let shown = text::utf16_len(&line[start..end]) as u32;
-        let clip = |(a, b): (u32, u32)| {
-            let (a, b) = (a.max(skipped) - skipped, b.saturating_sub(skipped).min(shown));
-            (a < b).then_some((a, b))
-        };
-        LineView {
-            n,
-            t: line[start..end].to_string(),
-            s: spans.into_iter().filter_map(|Span(a, b, c)| clip((a, b)).map(|(a, b)| Span(a, b, c))).collect(),
-            m: marks.into_iter().filter_map(clip).collect(),
-            x: (total > skipped + shown).then_some(total - skipped - shown),
-            o: (skipped > 0).then_some(skipped),
-            nn: false,
-        }
-    }
-}
-
-#[derive(Serialize)]
-pub struct RowView {
-    k: RowKind,
-    l: Option<LineView>,
-    r: Option<LineView>,
-}
-
-fn line_range(rows: &[textdiff::Row], pick: impl Fn(&textdiff::Row) -> Option<u32>) -> Option<(usize, usize)> {
-    let first = rows.iter().find_map(&pick)? as usize;
-    let last = rows.iter().rev().find_map(&pick)? as usize;
-    Some((first, last + 1))
-}
-
-#[derive(Clone, Copy, Deserialize)]
-pub struct LineFocus {
-    row: u32,
-    side: u8,
-    start: u32,
-}
-
 #[tauri::command]
 pub async fn file_rows(
     state: State<'_, AppState>,
@@ -1564,66 +1470,21 @@ pub async fn file_rows(
     blocking(move || {
         let mut fd = diff.lock();
         let fd = &mut *fd;
-        let (doc_left, doc_right) = (fd.edit.doc(Side::Left), fd.edit.doc(Side::Right));
-        let all_rows = &fd.edit.diff().rows;
-        let end = (start as usize + count as usize).min(all_rows.len());
-        let rows = &all_rows[(start as usize).min(end)..end];
         if fd.highlighters.as_ref().is_none_or(|(t, _, _)| *t != theme) {
             let syntax = fd.syntax.as_deref().and_then(highlight::find_syntax);
             fd.highlighters = Some((theme, DocHighlighter::new(syntax, theme), DocHighlighter::new(syntax, theme)));
         }
         let (_, hl_left, hl_right) = fd.highlighters.as_mut().expect("highlighters set above");
-        let spans = |hl: &mut DocHighlighter, doc: &TextDoc, range: Option<(usize, usize)>| match range {
-            Some((a, b)) => (a, hl.highlight(doc, a, b)),
-            None => (0, Vec::new()),
-        };
-        let (left_base, left_spans) = spans(hl_left, doc_left, line_range(rows, |r| r.left));
-        let (right_base, right_spans) = spans(hl_right, doc_right, line_range(rows, |r| r.right));
-        // A last line whose terminator only the other side has.
-        let no_newline = |doc: &TextDoc, other: &TextDoc, n: u32| {
-            n as usize + 1 == doc.len() && !doc.ends_with_newline() && other.ends_with_newline()
-        };
-        let view = |doc: &TextDoc, n: u32, base: usize, all: &Vec<Vec<Span>>, marks: Vec<(u32, u32)>, column| {
-            LineView::window(
-                n,
-                doc.line(n as usize),
-                all.get(n as usize - base).cloned().unwrap_or_default(),
-                marks,
-                column,
-            )
-        };
-        Ok(rows
-            .iter()
-            .enumerate()
-            .map(|(index, row)| {
-                let (lm, rm) = match (row.kind, row.left, row.right) {
-                    (RowKind::Changed, Some(l), Some(r)) => {
-                        let (a, b) = textdiff::intraline(doc_left.line(l as usize), doc_right.line(r as usize));
-                        (
-                            a.into_iter().map(|r| (r.start, r.end)).collect(),
-                            b.into_iter().map(|r| (r.start, r.end)).collect(),
-                        )
-                    }
-                    _ => (Vec::new(), Vec::new()),
-                };
-                let line = |doc: &TextDoc, other: &TextDoc, n: u32, base, spans, marks, side| LineView {
-                    nn: no_newline(doc, other, n),
-                    ..view(
-                        doc,
-                        n,
-                        base,
-                        spans,
-                        marks,
-                        focus.filter(|f| f.row as usize == start as usize + index && f.side == side).map(|f| f.start),
-                    )
-                };
-                RowView {
-                    k: row.kind,
-                    l: row.left.map(|n| line(doc_left, doc_right, n, left_base, &left_spans, lm, 0)),
-                    r: row.right.map(|n| line(doc_right, doc_left, n, right_base, &right_spans, rm, 1)),
-                }
-            })
-            .collect())
+        let (left, right) = (fd.edit.doc(Side::Left), fd.edit.doc(Side::Right));
+        Ok(rows::side_by_side(
+            left,
+            right,
+            &fd.edit.diff().rows,
+            start as usize,
+            count as usize,
+            [hl_left, hl_right],
+            focus,
+        ))
     })
     .await
 }
@@ -2000,50 +1861,6 @@ pub struct PathsChanged {
     /// The file comparison whose save this was.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin: Option<u64>,
-}
-
-#[cfg(test)]
-mod line_window_tests {
-    use super::*;
-
-    #[test]
-    fn distant_search_hits_override_the_first_difference_without_unbounding_rows() {
-        let line = format!("{}left{}needle", "a".repeat(300_000), "z".repeat(300_000));
-        let marks = vec![(300_000, 300_004)];
-        let initial = LineView::new(0, &line, Vec::new(), marks.clone());
-        assert!(initial.t.contains("left"));
-        assert!(!initial.t.contains("needle"));
-        let found = LineView::window(0, &line, vec![Span(600_004, 600_010, 0x123456)], marks, Some(600_004));
-        assert!(found.t.contains("needle"));
-        assert!(text::utf16_len(&found.t) <= MAX_SHOWN_LINE as usize);
-        assert_eq!(found.o, Some(599_804));
-        assert!(found.x.is_none());
-        assert_eq!(found.s.iter().map(|s| (s.0, s.1, s.2)).collect::<Vec<_>>(), [(200, 206, 0x123456)]);
-        assert!(found.m.is_empty());
-        let beginning = LineView::window(0, &line, Vec::new(), Vec::new(), Some(0));
-        assert!(beginning.o.is_none());
-        assert!(beginning.x.is_some());
-    }
-
-    #[test]
-    fn search_windows_keep_utf16_boundaries_and_clip_marks() {
-        let line = format!("{}needle{}", "😀".repeat(20_000), "😀".repeat(20_000));
-        let found = LineView::window(3, &line, Vec::new(), vec![(40_000, 40_006)], Some(40_000));
-        assert_eq!(found.o, Some(39_800));
-        assert_eq!(found.m, [(200, 206)]);
-        assert_eq!(
-            String::from_utf16(&found.t.encode_utf16().skip(200).take(6).collect::<Vec<_>>()).unwrap(),
-            "needle"
-        );
-        assert!(text::utf16_len(&found.t) <= MAX_SHOWN_LINE as usize);
-        assert_eq!(
-            found.o.unwrap() + text::utf16_len(&found.t) as u32 + found.x.unwrap(),
-            text::utf16_len(&line) as u32
-        );
-        let ordinary = LineView::window(0, "a😀b", Vec::new(), Vec::new(), Some(3));
-        assert_eq!(ordinary.t, "a😀b");
-        assert!(ordinary.o.is_none() && ordinary.x.is_none());
-    }
 }
 
 #[cfg(test)]

@@ -18,7 +18,8 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
-use crate::commands::{AppState, CmdResult, LineView, blocking, err};
+use crate::commands::{AppState, CmdResult, blocking, err};
+use parallax_core::rows::LineView;
 
 /// The files of a merge given on the command line, as `git mergetool` passes them.
 #[derive(Debug, Clone, Default)]

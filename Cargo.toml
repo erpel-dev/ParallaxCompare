@@ -2,6 +2,8 @@
 resolver = "3"
 members = ["crates/parallax-core", "crates/parallax-cli", "app/src-tauri"]
 default-members = ["crates/parallax-core", "crates/parallax-cli"]
+# The GPUI prototype is a workspace of its own (see app-gpui/Cargo.toml).
+exclude = ["app-gpui"]
 
 [workspace.package]
 version = "0.0.20"

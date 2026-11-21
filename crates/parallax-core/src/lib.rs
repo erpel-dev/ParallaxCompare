@@ -21,6 +21,7 @@ pub mod process;
 pub mod progress;
 pub mod pull_request;
 pub mod remote;
+pub mod rows;
 pub mod search;
 pub mod source;
 pub mod source_preview;
