@@ -9,6 +9,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::highlight::{DocHighlighter, Span};
+use crate::merge::BlockKind;
+use crate::merge_session::{Choice, MergeSession};
 use crate::text::{self, TextDoc};
 use crate::textdiff::{self, Row, RowKind};
 
@@ -188,6 +190,121 @@ pub fn side_by_side(
         .collect()
 }
 
+/// One row of a three-way merge's inputs: local, base and remote side by side.
+#[derive(Debug, Clone, Serialize)]
+pub struct MergeInputRow {
+    #[serde(rename = "k")]
+    pub kind: BlockKind,
+    /// Index of the block.
+    #[serde(rename = "i")]
+    pub block: u32,
+    #[serde(rename = "b")]
+    pub base: Option<LineView>,
+    #[serde(rename = "l")]
+    pub local: Option<LineView>,
+    #[serde(rename = "r")]
+    pub remote: Option<LineView>,
+}
+
+/// One row of a merge's result: a line, or the header above a conflict's lines.
+#[derive(Debug, Clone, Serialize)]
+pub struct MergeResultRow {
+    #[serde(rename = "k")]
+    pub kind: BlockKind,
+    #[serde(rename = "c")]
+    pub choice: Choice,
+    #[serde(rename = "i")]
+    pub block: u32,
+    /// A line; a conflict's header row has none.
+    #[serde(rename = "l")]
+    pub line: Option<LineView>,
+}
+
+/// Syntax colours for the lines `lines` of a document, as one batch: the first
+/// line and the colours of each line from it.
+fn spans_of(
+    hl: &mut DocHighlighter,
+    doc: &TextDoc,
+    lines: impl Iterator<Item = u32> + Clone,
+) -> (usize, Vec<Vec<Span>>) {
+    let (Some(first), Some(last)) = (lines.clone().min(), lines.max()) else { return (0, Vec::new()) };
+    (first as usize, hl.highlight(doc, first as usize, last as usize + 1))
+}
+
+/// Input rows `start..start + count` of a merge, with syntax colours from the
+/// highlighters of base, local and remote, and the characters each side changed
+/// against the base line beside it.
+pub fn merge_input_rows(
+    s: &MergeSession,
+    start: u32,
+    count: u32,
+    highlighters: [&mut DocHighlighter; 3],
+) -> Vec<MergeInputRow> {
+    let rows = s.input_rows(start, count);
+    let [hb, hl, hr] = highlighters;
+    let (bb, bs) = spans_of(hb, &s.base, rows.iter().filter_map(|r| r.base));
+    let (lb, ls) = spans_of(hl, &s.local, rows.iter().filter_map(|r| r.local));
+    let (rb, rs) = spans_of(hr, &s.remote, rows.iter().filter_map(|r| r.remote));
+    let line = |doc: &TextDoc, n: u32, first: usize, all: &Vec<Vec<Span>>, marks: Vec<(u32, u32)>| {
+        LineView::new(n, doc.line(n as usize), all.get(n as usize - first).cloned().unwrap_or_default(), marks)
+    };
+    // Changed characters of a changed line against the base line beside it.
+    let marks =
+        |kind: BlockKind, side: &TextDoc, n: Option<u32>, base: Option<u32>, changed: bool| -> Vec<(u32, u32)> {
+            match (n, base) {
+                (Some(n), Some(b)) if changed && kind != BlockKind::Unchanged => {
+                    let (_, m) = textdiff::intraline(s.base.line(b as usize), side.line(n as usize));
+                    m.into_iter().map(|r| (r.start, r.end)).collect()
+                }
+                _ => Vec::new(),
+            }
+        };
+    rows.iter()
+        .map(|row| {
+            let local_changed = matches!(row.kind, BlockKind::Local | BlockKind::Same | BlockKind::Conflict);
+            let remote_changed = matches!(row.kind, BlockKind::Remote | BlockKind::Same | BlockKind::Conflict);
+            MergeInputRow {
+                kind: row.kind,
+                block: row.block,
+                base: row.base.map(|n| line(&s.base, n, bb, &bs, Vec::new())),
+                local: row
+                    .local
+                    .map(|n| line(&s.local, n, lb, &ls, marks(row.kind, &s.local, Some(n), row.base, local_changed))),
+                remote: row.remote.map(|n| {
+                    line(&s.remote, n, rb, &rs, marks(row.kind, &s.remote, Some(n), row.base, remote_changed))
+                }),
+            }
+        })
+        .collect()
+}
+
+/// Result rows `start..start + count` of a merge, with syntax colours, except
+/// between conflict markers where the colouring goes astray.
+pub fn merge_result_rows(s: &MergeSession, start: u32, count: u32, hl: &mut DocHighlighter) -> Vec<MergeResultRow> {
+    let rows = s.result_rows(start, count);
+    let doc = s.result();
+    let (first, all) = spans_of(hl, doc, rows.iter().filter_map(|r| r.line));
+    rows.iter()
+        .map(|row| MergeResultRow {
+            kind: row.kind,
+            choice: row.choice,
+            block: row.block,
+            line: row.line.map(|n| {
+                let markers = row.choice == Choice::Unresolved
+                    || (row.choice == Choice::Syntax && s.syntax_left(row.block as usize) > 0);
+                let line = doc.line(n as usize);
+                let marker_line = ["<<<<<<<", "|||||||", "=======", ">>>>>>>"].iter().any(|m| line.starts_with(m));
+                let colours = if markers || marker_line {
+                    Vec::new()
+                } else {
+                    all.get(n as usize - first).cloned().unwrap_or_default()
+                };
+                LineView::new(n, line, colours, Vec::new())
+            }),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,6 +374,35 @@ mod tests {
         let window = side_by_side(l, r, &edit.diff().rows, 1, 2, [&mut hl, &mut hr], None);
         assert_eq!(window.iter().map(|r| r.left.as_ref().map(|l| l.number)).collect::<Vec<_>>(), [Some(1), Some(2)]);
         assert!(side_by_side(l, r, &edit.diff().rows, 10, 5, [&mut hl, &mut hr], None).is_empty());
+    }
+
+    #[test]
+    fn merge_rows_mark_changes_against_the_base_and_leave_markers_plain() {
+        use crate::merge::MergeOptions;
+        let doc = |t: &str| text::decode(t.as_bytes());
+        let s = MergeSession::new(
+            doc("fn a() {}\nlet x = 1;\nend\n"),
+            doc("fn a() {}\nlet x = 2;\nend\n"),
+            doc("fn a() {}\nlet x = 3;\nend\n"),
+            MergeOptions::default(),
+        );
+        let rust = find_syntax("Rust");
+        let mut hls: [DocHighlighter; 4] = std::array::from_fn(|_| DocHighlighter::new(rust, ThemeKind::Light));
+        let [hb, hl, hr, hres] = &mut hls;
+        let inputs = merge_input_rows(&s, 0, 100, [hb, hl, hr]);
+        let conflict = inputs.iter().find(|r| r.kind == BlockKind::Conflict).expect("a conflict row");
+        assert_eq!(conflict.local.as_ref().unwrap().marks, [(8, 9)]);
+        assert_eq!(conflict.remote.as_ref().unwrap().marks, [(8, 9)]);
+        assert!(conflict.base.as_ref().unwrap().marks.is_empty());
+        assert!(!inputs[0].local.as_ref().unwrap().spans.is_empty(), "Rust is highlighted");
+        let result = merge_result_rows(&s, 0, 100, hres);
+        assert!(result.iter().any(|r| r.line.is_none()), "a conflict has a header row");
+        let marker = result.iter().filter_map(|r| r.line.as_ref()).find(|l| l.text.starts_with("<<<<<<<")).unwrap();
+        assert!(marker.spans.is_empty());
+        let json = serde_json::to_value(&result[0]).unwrap();
+        assert!(
+            json.get("k").is_some() && json.get("c").is_some() && json.get("i").is_some() && json.get("l").is_some()
+        );
     }
 
     #[test]

@@ -596,6 +596,33 @@ mod tests {
     }
 
     #[test]
+    fn ecuc_values_save_back_into_the_arxml() {
+        let fixtures =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/parallax-core/tests/fixtures/ecuc");
+        let dir = tempfile::tempdir().unwrap();
+        for side in ["l", "r"] {
+            std::fs::create_dir_all(dir.path().join(side)).unwrap();
+        }
+        std::fs::copy(fixtures.join("Can-v1.arxml"), dir.path().join("l/Can.arxml")).unwrap();
+        std::fs::copy(fixtures.join("Can-v2.arxml"), dir.path().join("r/Can.arxml")).unwrap();
+        let p = |s: &str| dir.path().join(s).to_string_lossy().into_owned();
+        let session = Session::open(&p("l"), &p("r")).unwrap();
+        let mut diff = open_file(&session, "Can.arxml", Some(View::EcucValues), DiffOptions::default()).unwrap();
+        assert_eq!(diff.view, View::EcucValues);
+        assert_eq!(diff.editable, [true, true], "ECUC values write back into the file");
+        let before = diff.sections().len();
+        assert!(before > 0);
+        let first = diff.sections()[0].clone();
+        assert!(diff.copy_rows(first.start..first.end, Side::Left));
+        diff.save(&session, Side::Left, false).unwrap();
+        // The saved file is still ARXML, and read again it has one difference less.
+        let saved = std::fs::read_to_string(dir.path().join("l/Can.arxml")).unwrap();
+        assert!(saved.contains("<AUTOSAR") && saved.contains("ECUC-MODULE-CONFIGURATION-VALUES"));
+        let again = open_file(&session, "Can.arxml", Some(View::EcucValues), DiffOptions::default()).unwrap();
+        assert_eq!(again.sections().len(), before - 1);
+    }
+
+    #[test]
     fn json_opens_in_its_equal_view_and_text_on_request() {
         let (_dir, session) = folders(&[("", "x.json", Some(r#"{"a":1}"#), Some("{\n  \"a\": 1\n}\n"))]);
         let diff = open_file(&session, "x.json", None, DiffOptions::default()).unwrap();

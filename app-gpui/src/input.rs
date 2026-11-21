@@ -34,6 +34,7 @@ actions!(
         Copy,
         Submit,
         Cancel,
+        Complete,
     ]
 );
 
@@ -56,6 +57,7 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-x", Cut, ctx),
         KeyBinding::new("enter", Submit, ctx),
         KeyBinding::new("escape", Cancel, ctx),
+        KeyBinding::new("tab", Complete, ctx),
     ]
 }
 
@@ -66,6 +68,8 @@ pub enum InputEvent {
         shift: bool,
     },
     Cancel,
+    /// Tab: a field with completions takes the first.
+    Tab,
 }
 
 pub struct TextInput {
@@ -119,6 +123,19 @@ impl TextInput {
         self.selection_reversed = false;
         self.marked_range = None;
         cx.notify();
+    }
+
+    /// Replaces the text and puts the cursor at its end, as a completion does.
+    pub fn set_cursor_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.content = text.into();
+        self.selected_range = self.content.len()..self.content.len();
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.changed(cx);
+    }
+
+    fn complete(&mut self, _: &Complete, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(InputEvent::Tab);
     }
 
     fn changed(&mut self, cx: &mut Context<Self>) {
@@ -596,6 +613,7 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::submit))
             .on_action(cx.listener(Self::cancel))
+            .on_action(cx.listener(Self::complete))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))

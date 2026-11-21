@@ -27,7 +27,7 @@ use crate::actions::*;
 use crate::input::{InputEvent, TextInput};
 use crate::menu::{self, Item, Menu};
 use crate::session::{self, Session};
-use crate::style::{self, ROW};
+use crate::style;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Filter {
@@ -690,7 +690,7 @@ impl FolderView {
             let sub = cx.subscribe_in(input, window, |this, _, event: &InputEvent, window, cx| match event {
                 InputEvent::Submit { .. } => this.apply_patterns(cx),
                 InputEvent::Cancel => this.toggle_panel(window, cx),
-                InputEvent::Changed => {}
+                InputEvent::Changed | InputEvent::Tab => {}
             });
             self._subscriptions.push(sub);
         }
@@ -844,11 +844,11 @@ impl FolderView {
         let note = row.message.clone();
         div()
             .id(("row", index))
-            .h(px(ROW))
+            .h(px(style::row()))
             .w_full()
             .flex()
             .items_center()
-            .text_size(px(13.))
+            .text_size(px(style::code_size()))
             .when(selected, |d| d.bg(style::accent_bg()))
             .when(!selected, |d| d.hover(|s| s.bg(style::hover())))
             .when(cursor, |d| d.border_l_2().border_color(style::accent()))
@@ -1095,7 +1095,7 @@ impl Render for FolderView {
             .on_action(cx.listener(|this, _: &CopyLeft, window, cx| this.copy_selected(Side::Left, window, cx)))
             .on_action(cx.listener(|this, _: &DeleteSelected, window, cx| this.delete_selected(None, window, cx)))
             .on_action(cx.listener(|this, _: &ShowMenu, _, cx| {
-                let at = point(px(240.), px(160.) + px(ROW) * this.cursor.unwrap_or(0).min(20) as f32);
+                let at = point(px(240.), px(160.) + px(style::row()) * this.cursor.unwrap_or(0).min(20) as f32);
                 this.show_menu(at, None, cx)
             }))
             .on_action(cx.listener(|this, _: &NextDifference, _, cx| this.next_difference(true, cx)))

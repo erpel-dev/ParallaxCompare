@@ -13,8 +13,8 @@ use std::time::Instant;
 
 use gpui::{
     ClickEvent, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, Font, Hsla, Image, ImageFormat,
-    MouseButton, MouseDownEvent, ObjectFit, PromptLevel, ScrollStrategy, ScrollWheelEvent, SharedString, StyledImage,
-    StyledText, Subscription, TextRun, UniformListScrollHandle, Window, div, img, point, prelude::*, px, uniform_list,
+    MouseButton, MouseDownEvent, PromptLevel, ScrollStrategy, ScrollWheelEvent, SharedString, StyledText, Subscription,
+    TextRun, UniformListScrollHandle, Window, div, img, point, prelude::*, px, uniform_list,
 };
 use parallax_core::convert::View;
 use parallax_core::edit::Side;
@@ -27,7 +27,7 @@ use crate::actions::*;
 use crate::input::{InputEvent, TextInput};
 use crate::menu::{self, Item, Menu};
 use crate::session::{self, FileDiff, SIDES, SaveError, Session};
-use crate::style::{self, TEXT_ROW};
+use crate::style;
 
 pub enum TextEvent {
     Back,
@@ -91,7 +91,20 @@ pub struct TextView {
     menu: Option<Menu>,
     message: Option<SharedString>,
     show_mask: bool,
+    image_mode: ImageMode,
+    /// In blink mode: the right image is shown.
+    blink_right: bool,
     _subscriptions: Vec<Subscription>,
+}
+
+/// How the image compare shows the two images, as in the Svelte app.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ImageMode {
+    SideBySide,
+    /// The left image faded, with the differing pixels on top.
+    Difference,
+    /// Left and right in turn, in one place.
+    Blink,
 }
 
 impl EventEmitter<TextEvent> for TextView {}
@@ -136,6 +149,8 @@ impl TextView {
             menu: None,
             message: None,
             show_mask: true,
+            image_mode: ImageMode::SideBySide,
+            blink_right: false,
             _subscriptions: Vec::new(),
         };
         view.load(cx);
@@ -375,7 +390,7 @@ impl TextView {
                 window.focus(&this.focus);
                 cx.notify();
             }
-            InputEvent::Changed => {}
+            InputEvent::Changed | InputEvent::Tab => {}
         });
         window.focus(&input.focus_handle(cx));
         self.editing = Some((side, row, input));
@@ -391,6 +406,7 @@ impl TextView {
         let input = cx.new(|cx| TextInput::new("Find in both files", cx));
         let sub = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| match event {
             InputEvent::Changed => this.search(cx),
+            InputEvent::Tab => {}
             InputEvent::Submit { shift } => this.next_hit(!shift, cx),
             InputEvent::Cancel => {
                 this.find = None;
@@ -459,7 +475,7 @@ impl TextView {
     }
 
     fn on_wheel(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let delta = event.delta.pixel_delta(px(TEXT_ROW));
+        let delta = event.delta.pixel_delta(px(style::text_row()));
         let dx = if event.modifiers.shift { -f32::from(delta.y) } else { -f32::from(delta.x) };
         if dx != 0.0 {
             self.scroll_by(dx, cx);
@@ -589,7 +605,7 @@ impl TextView {
     fn render_row(&self, row: &RowView, ctx: RowContext, mono: &Font, cx: &mut Context<Self>) -> gpui::AnyElement {
         div()
             .id(("row", ctx.index as usize))
-            .h(px(TEXT_ROW))
+            .h(px(style::text_row()))
             .w_full()
             .flex()
             .child(div().w(px(3.)).h_full().when(ctx.current, |d| d.bg(style::accent())))
@@ -880,15 +896,136 @@ impl TextView {
             .when_some(self.message.clone(), |d, m| d.child(div().text_color(style::fg()).child(m)))
     }
 
-    fn render_image(&self, loaded: &Loaded, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn set_image_mode(&mut self, mode: ImageMode, cx: &mut Context<Self>) {
+        let start_blinking = mode == ImageMode::Blink && self.image_mode != ImageMode::Blink;
+        self.image_mode = mode;
+        if start_blinking {
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(std::time::Duration::from_millis(600)).await;
+                    let go_on = this
+                        .update(cx, |this, cx| {
+                            this.blink_right = !this.blink_right;
+                            cx.notify();
+                            this.image_mode == ImageMode::Blink
+                        })
+                        .unwrap_or(false);
+                    if !go_on {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    /// A strip beside the rows with a mark for every difference, where it is in
+    /// the file; clicking a mark jumps there.
+    fn render_overview(&self, diff: &FileDiff, cx: &mut Context<Self>) -> gpui::AnyElement {
+        const BUCKETS: usize = 300;
+        let total = diff.rows_total().max(1) as f32;
+        let rows = &diff.edit.diff().rows;
+        let mut marks: Vec<(usize, f32, f32, Hsla)> = Vec::new();
+        let mut last_bucket = usize::MAX;
+        for (i, s) in diff.sections().iter().enumerate() {
+            let top = s.start as f32 / total;
+            let bucket = (top * BUCKETS as f32) as usize;
+            let current = self.current == Some(i);
+            if bucket == last_bucket && !current {
+                continue;
+            }
+            last_bucket = bucket;
+            let color = if current {
+                style::accent()
+            } else {
+                match rows.get(s.start as usize).map(|r| r.kind) {
+                    Some(RowKind::Added) => style::added().1,
+                    Some(RowKind::Removed) => style::removed().1,
+                    Some(RowKind::Minor) => style::minor().1,
+                    _ => style::changed().1,
+                }
+            };
+            marks.push((i, top, (s.end - s.start) as f32 / total, color));
+        }
+        div()
+            .w(px(12.))
+            .h_full()
+            .flex_none()
+            .relative()
+            .bg(style::chrome())
+            .border_l_1()
+            .border_color(style::line())
+            .children(marks.into_iter().map(|(i, top, height, color)| {
+                div()
+                    .id(("mark", i))
+                    .absolute()
+                    .left(px(1.))
+                    .right(px(1.))
+                    .top(gpui::relative(top))
+                    .h(gpui::relative(height))
+                    .min_h(px(3.))
+                    .bg(color)
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.current = Some(i.saturating_sub(1));
+                        if i == 0 {
+                            this.current = None;
+                        }
+                        this.jump(true, cx);
+                    }))
+            }))
+            .into_any_element()
+    }
+
+    fn render_image(
+        &self,
+        loaded: &Loaded,
+        viewport: gpui::Size<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let Some(d) = &loaded.diff.image else { return div().into_any_element() };
-        let panel = |i: usize, label: &str, side: &Option<parallax_core::convert::ImageSide>| {
-            let caption = side
-                .as_ref()
-                .map(|s| format!("{label}: {} × {} · {}", s.width, s.height, s.format))
-                .unwrap_or_else(|| format!("{label}: missing"));
+        type Side = Option<parallax_core::convert::ImageSide>;
+        let dims = |s: &Side| s.as_ref().map(|s| (s.width.max(1) as f32, s.height.max(1) as f32));
+        let (left, right) = (dims(&d.left), dims(&d.right));
+        let max_w = left.iter().chain(right.iter()).map(|d| d.0).fold(1.0, f32::max);
+        let max_h = left.iter().chain(right.iter()).map(|d| d.1).fold(1.0, f32::max);
+        // One scale for both images, so they stay comparable, fitted to the room
+        // there is: GPUI's image fills the width when given the full size.
+        let single = self.image_mode != ImageMode::SideBySide;
+        let avail_w = if single { f32::from(viewport.width) - 60.0 } else { f32::from(viewport.width) / 2.0 - 60.0 };
+        let avail_h = f32::from(viewport.height) - 260.0;
+        let scale = (avail_w / max_w).min(avail_h / max_h).clamp(0.05, 8.0);
+        let picture = |i: usize, size: Option<(f32, f32)>, mask: bool, faded: bool| -> gpui::AnyElement {
+            let Some((w, h)) = size.map(|(w, h)| (w * scale, h * scale)) else {
+                return div().text_color(style::muted()).child("missing").into_any_element();
+            };
+            div()
+                .relative()
+                .w(px(w))
+                .h(px(h))
+                .when_some(loaded.images[i].clone(), |d, image| {
+                    d.child(
+                        div().absolute().inset_0().when(faded, |d| d.opacity(0.3)).child(img(image).w(px(w)).h(px(h))),
+                    )
+                })
+                .when(mask, |d| {
+                    d.when_some(loaded.images[2].clone(), |d, mask| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .opacity(if faded { 1.0 } else { 0.6 })
+                                .child(img(mask).w(px(w)).h(px(h))),
+                        )
+                    })
+                })
+                .into_any_element()
+        };
+        let panel = |caption: String, picture: gpui::AnyElement| {
             div()
                 .flex_1()
+                .w_0()
                 .min_w_0()
                 .flex()
                 .flex_col()
@@ -899,25 +1036,20 @@ impl TextView {
                     div()
                         .flex_1()
                         .min_h_0()
-                        .relative()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .overflow_hidden()
                         .border_1()
                         .border_color(style::line())
                         .bg(style::chrome())
-                        .when_some(loaded.images[i].clone(), |d, image| {
-                            d.child(img(image).size_full().object_fit(ObjectFit::Contain))
-                        })
-                        .when(i == 1 && self.show_mask, |d| {
-                            d.when_some(loaded.images[2].clone(), |d, mask| {
-                                d.child(
-                                    div()
-                                        .absolute()
-                                        .inset_0()
-                                        .opacity(0.6)
-                                        .child(img(mask).size_full().object_fit(ObjectFit::Contain)),
-                                )
-                            })
-                        }),
+                        .child(picture),
                 )
+        };
+        let caption = |label: &str, side: &Side| {
+            side.as_ref()
+                .map(|s| format!("{label}: {} × {} · {}", s.width, s.height, s.format))
+                .unwrap_or_else(|| format!("{label}: missing"))
         };
         let summary = if d.total_pixels > 0 {
             format!(
@@ -928,6 +1060,24 @@ impl TextView {
             )
         } else {
             String::new()
+        };
+        let body = match self.image_mode {
+            ImageMode::SideBySide => div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .child(panel(caption("Left", &d.left), picture(0, left, false, false)))
+                .child(panel(caption("Right", &d.right), picture(1, right, self.show_mask, false))),
+            ImageMode::Blink => {
+                let (i, label, side, size) =
+                    if self.blink_right { (1, "Right", &d.right, right) } else { (0, "Left", &d.left, left) };
+                div().flex_1().min_h_0().flex().child(panel(caption(label, side), picture(i, size, false, false)))
+            }
+            ImageMode::Difference => div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .child(panel("Left, faded, with the differing pixels".into(), picture(0, left.or(right), true, true))),
         };
         div()
             .flex_1()
@@ -954,9 +1104,23 @@ impl TextView {
                             this.show_mask = !this.show_mask;
                             cx.notify();
                         })),
+                    )
+                    .child(div().w(px(12.)))
+                    .children(
+                        [
+                            ("Side by side", ImageMode::SideBySide),
+                            ("Difference", ImageMode::Difference),
+                            ("Blink", ImageMode::Blink),
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(n, (label, mode))| {
+                            style::toggle(("image-mode", n), label, None, self.image_mode == mode)
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_image_mode(mode, cx)))
+                        }),
                     ),
             )
-            .child(div().flex_1().min_h_0().flex().child(panel(0, "Left", &d.left)).child(panel(1, "Right", &d.right)))
+            .child(body)
             .into_any_element()
     }
 }
@@ -996,7 +1160,12 @@ const TAB: usize = 4;
 /// The line as GPUI draws it: tabs expanded, cut ends marked, and text runs for
 /// the syntax colours (`spans`), changed characters (`marks`) and search hits,
 /// which the core gives in UTF-16 units.
-fn styled_line(line: &LineView, mono: &Font, mark: Hsla, hits: &[(u32, u32, bool)]) -> (SharedString, Vec<TextRun>) {
+pub(crate) fn styled_line(
+    line: &LineView,
+    mono: &Font,
+    mark: Hsla,
+    hits: &[(u32, u32, bool)],
+) -> (SharedString, Vec<TextRun>) {
     let src = line.text.as_str();
     // UTF-16 unit -> byte offset in `src`.
     let mut unit_to_byte = Vec::with_capacity(src.len() + 1);
@@ -1088,7 +1257,8 @@ fn styled_line(line: &LineView, mono: &Font, mark: Hsla, hits: &[(u32, u32, bool
 }
 
 impl Render for TextView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let viewport = window.viewport_size();
         let mono = style::mono(cx);
         let body = match &self.state {
             State::Loading => {
@@ -1100,8 +1270,9 @@ impl Render for TextView {
                 .text_color(style::status_color(parallax_core::compare::Status::Error))
                 .child(e.clone())
                 .into_any_element(),
-            State::Ready(loaded) if loaded.diff.view == View::Image => self.render_image(loaded, cx),
+            State::Ready(loaded) if loaded.diff.view == View::Image => self.render_image(loaded, viewport, cx),
             State::Ready(loaded) => {
+                let overview = self.render_overview(&loaded.diff, cx);
                 let rows = loaded.diff.rows_total();
                 let note = loaded
                     .diff
@@ -1144,16 +1315,25 @@ impl Render for TextView {
                         )
                     })
                     .child(
-                        uniform_list(
-                            "text-rows",
-                            rows,
-                            cx.processor(|this, range: Range<usize>, _window, cx| this.render_rows(range, cx)),
-                        )
-                        .track_scroll(self.scroll.clone())
-                        .flex_1()
-                        .font(mono)
-                        .text_size(px(13.))
-                        .on_scroll_wheel(cx.listener(Self::on_wheel)),
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .flex()
+                            .child(
+                                uniform_list(
+                                    "text-rows",
+                                    rows,
+                                    cx.processor(|this, range: Range<usize>, _window, cx| this.render_rows(range, cx)),
+                                )
+                                .track_scroll(self.scroll.clone())
+                                .flex_1()
+                                .w_0()
+                                .h_full()
+                                .font(mono)
+                                .text_size(px(style::code_size()))
+                                .on_scroll_wheel(cx.listener(Self::on_wheel)),
+                            )
+                            .child(overview),
                     )
                     .into_any_element()
             }
@@ -1385,5 +1565,36 @@ mod ui_tests {
         });
         cx.run_until_parked();
         view.read_with(cx, |view, _| assert_eq!(view.diff().unwrap().view, View::Text));
+    }
+
+    #[gpui::test]
+    fn image_modes_and_blinking(cx: &mut TestAppContext) {
+        use image::{ImageBuffer, Rgb};
+        let dir = tempfile::tempdir().unwrap();
+        let (l, r) = (dir.path().join("a.png"), dir.path().join("b.png"));
+        let mut img = ImageBuffer::from_pixel(40, 30, Rgb([250u8, 250, 250]));
+        img.save(&l).unwrap();
+        for x in 5..15 {
+            img.put_pixel(x, 10, Rgb([200, 30, 30]));
+        }
+        img.save(&r).unwrap();
+        let session = Arc::new(Session::open(&l.to_string_lossy(), &r.to_string_lossy()).unwrap());
+        cx.update(style::init);
+        let (view, cx) = cx.add_window_view(|_, cx| TextView::new(session, String::new(), "png".into(), false, cx));
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            let diff = view.diff().unwrap();
+            assert_eq!(diff.view, View::Image);
+            assert_eq!(diff.image.as_ref().unwrap().different_pixels, 10);
+        });
+        view.update(cx, |view, cx| view.set_image_mode(ImageMode::Blink, cx));
+        let first = view.read_with(cx, |view, _| view.blink_right);
+        cx.executor().advance_clock(std::time::Duration::from_millis(650));
+        cx.run_until_parked();
+        assert_ne!(view.read_with(cx, |view, _| view.blink_right), first, "blinks");
+        view.update(cx, |view, cx| view.set_image_mode(ImageMode::Difference, cx));
+        cx.executor().advance_clock(std::time::Duration::from_millis(1300));
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |view, _| view.image_mode), ImageMode::Difference);
     }
 }

@@ -114,6 +114,15 @@ pub struct SyntaxOutcome {
     pub mapped: bool,
 }
 
+/// What [`MergeSession::offer_syntax`] made of a syntax-aware result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyntaxOffer {
+    /// `None` when the engine declined the file.
+    pub outcome: Option<SyntaxOutcome>,
+    /// The engine's whole result, when it is offered only as a whole.
+    pub whole: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MergeStats {
@@ -705,6 +714,27 @@ impl MergeSession {
     }
 
     /// The text with Git's markers style for the result as saved now.
+    /// Whether a syntax-aware merge has nothing to add: a side is unchanged, or
+    /// both sides are the same.
+    pub fn syntax_has_nothing_to_add(&self) -> bool {
+        self.local.text == self.remote.text || self.base.text == self.local.text || self.base.text == self.remote.text
+    }
+
+    /// Offers a syntax-aware merge's result (`None`: the engine declined the
+    /// file): per conflict where it lines up with this merge, else as a whole,
+    /// which [`SyntaxOffer::whole`] then holds. The result itself is not changed.
+    pub fn offer_syntax(&mut self, merged: Option<&str>) -> SyntaxOffer {
+        let Some(text) = merged else {
+            self.clear_syntax();
+            return SyntaxOffer { outcome: None, whole: None };
+        };
+        let outcome = self.set_syntax_result(text);
+        // Offered as a whole when it changed text the line merge had merged, or
+        // found conflicts where the line merge has none.
+        let whole = !outcome.mapped || (self.stats().conflicts == 0 && outcome.conflicts > 0);
+        SyntaxOffer { outcome: Some(outcome), whole: whole.then(|| text.to_string()) }
+    }
+
     pub fn result_text(&self) -> &str {
         &self.result.text
     }
@@ -730,6 +760,17 @@ fn conflicting_lines(text: &str) -> (u32, u32) {
         }
     }
     (conflicts, lines)
+}
+
+/// Whether two texts are the same, but for the labels after conflict markers:
+/// Git names the sides after the refs it was given, a merge here after branches.
+pub fn same_but_labels(a: &str, b: &str) -> bool {
+    let marker = |l: &str| ["<<<<<<<", "|||||||", ">>>>>>>"].iter().find(|m| l.starts_with(**m)).copied();
+    a.split('\n').count() == b.split('\n').count()
+        && a.split('\n').zip(b.split('\n')).all(|(x, y)| match (marker(x), marker(y)) {
+            (Some(m), Some(n)) => m == n,
+            _ => x == y,
+        })
 }
 
 /// Decodes the three inputs of a merge.

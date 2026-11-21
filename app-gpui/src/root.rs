@@ -4,13 +4,14 @@
 
 use gpui::{
     ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, PathPromptOptions, SharedString, Subscription,
-    Window, div, prelude::*, px,
+    Window, anchored, deferred, div, point, prelude::*, px,
 };
 
 use crate::actions::*;
 use crate::input::{InputEvent, TextInput};
 use crate::style;
-use crate::workspace::Workspace;
+use crate::workspace::{Start, Workspace};
+use parallax_core::source::{Completion, CompletionKind, complete};
 
 enum Tab {
     New(Entity<NewCompare>),
@@ -21,19 +22,33 @@ pub struct Root {
     tabs: Vec<Tab>,
     active: usize,
     focus: FocusHandle,
+    palette: Option<Palette>,
     _subscriptions: Vec<Subscription>,
 }
 
+/// The command palette: a filter field over every command, with its keys.
+struct Palette {
+    input: Entity<TextInput>,
+    /// Where the keyboard was, to run the command there.
+    return_to: Option<FocusHandle>,
+}
+
 impl Root {
-    pub fn new(start: Option<(String, String)>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(start: Option<Start>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         style::follow(window.appearance());
         let appearance = cx.observe_window_appearance(window, |_, window, cx| {
             style::follow(window.appearance());
             cx.refresh_windows();
         });
-        let mut root = Root { tabs: Vec::new(), active: 0, focus: cx.focus_handle(), _subscriptions: vec![appearance] };
+        let mut root = Root {
+            tabs: Vec::new(),
+            active: 0,
+            focus: cx.focus_handle(),
+            palette: None,
+            _subscriptions: vec![appearance],
+        };
         match start {
-            Some((left, right)) => root.open(left, right, window, cx),
+            Some(start) => root.open(start, window, cx),
             None => root.new_tab(window, cx),
         }
         root
@@ -41,10 +56,10 @@ impl Root {
 
     fn new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let screen = cx.new(|cx| NewCompare::new(window, cx));
-        let sub = cx.subscribe_in(&screen, window, |this, screen, event: &Start, window, cx| {
-            let Start { left, right } = event;
+        let sub = cx.subscribe_in(&screen, window, |this, screen, event: &Begin, window, cx| {
+            let Begin(start) = event;
             if let Some(i) = this.tabs.iter().position(|t| matches!(t, Tab::New(s) if s == screen)) {
-                let view = cx.new(|cx| Workspace::new(left.clone(), right.clone(), window, cx));
+                let view = cx.new(|cx| Workspace::new(start.clone(), window, cx));
                 this.tabs[i] = Tab::Compare(view);
                 this.activate(i, window, cx);
             }
@@ -55,8 +70,8 @@ impl Root {
         self.activate(last, window, cx);
     }
 
-    pub fn open(&mut self, left: String, right: String, window: &mut Window, cx: &mut Context<Self>) {
-        let view = cx.new(|cx| Workspace::new(left, right, window, cx));
+    pub fn open(&mut self, start: Start, window: &mut Window, cx: &mut Context<Self>) {
+        let view = cx.new(|cx| Workspace::new(start, window, cx));
         self.tabs.push(Tab::Compare(view));
         let last = self.tabs.len() - 1;
         self.activate(last, window, cx);
@@ -92,16 +107,134 @@ impl Root {
         }
     }
 
+    fn show_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some() {
+            return;
+        }
+        let return_to = window.focused(cx);
+        let input = cx.new(|cx| TextInput::new("Type a command…", cx));
+        let sub = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| match event {
+            InputEvent::Changed => cx.notify(),
+            InputEvent::Tab => {}
+            InputEvent::Submit { .. } => {
+                let first = this.matching_commands(cx).into_iter().next();
+                if let Some(command) = first {
+                    this.run_command(command.action, window, cx);
+                }
+            }
+            InputEvent::Cancel => this.close_palette(window, cx),
+        });
+        self._subscriptions.push(sub);
+        window.focus(&input.focus_handle(cx));
+        self.palette = Some(Palette { input, return_to });
+        cx.notify();
+    }
+
+    fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(palette) = self.palette.take() {
+            match palette.return_to {
+                Some(focus) => window.focus(&focus),
+                None => self.activate(self.active, window, cx),
+            }
+        }
+        cx.notify();
+    }
+
+    fn matching_commands(&self, cx: &gpui::App) -> Vec<Command> {
+        let query = self.palette.as_ref().map(|p| p.input.read(cx).text().to_lowercase()).unwrap_or_default();
+        commands()
+            .into_iter()
+            .filter(|c| {
+                query
+                    .split_whitespace()
+                    .all(|w| c.label.to_lowercase().contains(w) || c.group.to_lowercase().contains(w))
+            })
+            .collect()
+    }
+
+    /// Runs a command where the keyboard was before the palette opened.
+    fn run_command(&mut self, action: fn() -> Box<dyn gpui::Action>, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_palette(window, cx);
+        window.dispatch_action(action(), cx);
+    }
+
+    fn render_palette(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let palette = self.palette.as_ref()?;
+        let width = px(560.);
+        let x = (window.viewport_size().width - width) / 2.;
+        let items = self.matching_commands(cx).into_iter().enumerate().map(|(i, c)| {
+            let action = c.action;
+            div()
+                .id(("command", i))
+                .flex()
+                .items_center()
+                .gap_3()
+                .px_3()
+                .py(px(5.))
+                .rounded(px(4.))
+                .text_size(px(13.))
+                .when(i == 0, |d| d.bg(style::accent_bg()))
+                .hover(|s| s.bg(style::hover()))
+                .cursor_pointer()
+                .child(div().w(px(70.)).text_size(px(11.)).text_color(style::faint()).child(c.group))
+                .child(div().flex_1().child(c.label))
+                .child(div().text_size(px(12.)).text_color(style::muted()).child(c.keys))
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.run_command(action, window, cx)))
+        });
+        Some(
+            deferred(
+                anchored().position(point(x, px(70.))).child(
+                    div()
+                        .id("palette")
+                        .occlude()
+                        .w(width)
+                        .p_2()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .rounded(px(8.))
+                        .border_1()
+                        .border_color(style::line())
+                        .bg(style::overlay())
+                        .shadow_lg()
+                        .on_mouse_down_out(cx.listener(|this, _, window, cx| this.close_palette(window, cx)))
+                        .child(div().flex().child(palette.input.clone()))
+                        .child(div().id("palette-list").max_h(px(420.)).overflow_y_scroll().children(items))
+                        .child(
+                            div()
+                                .px_1()
+                                .pt_1()
+                                .text_size(px(11.))
+                                .text_color(style::faint())
+                                .child("Enter runs the first match · Escape closes"),
+                        ),
+                ),
+            )
+            .with_priority(2)
+            .into_any_element(),
+        )
+    }
+
+    fn zoom(&mut self, percent: Option<i32>, cx: &mut Context<Self>) {
+        let next = match percent {
+            Some(step) => (style::zoom() as i32 + step).max(0) as u32,
+            None => 100,
+        };
+        style::set_zoom(next);
+        cx.refresh_windows();
+    }
+
     fn tab_title(&self, tab: &Tab, cx: &gpui::App) -> String {
         match tab {
             Tab::New(_) => "New comparison".into(),
-            Tab::Compare(v) => v.read(cx).title(),
+            Tab::Compare(v) => v.read(cx).title(cx),
         }
     }
 }
 
 impl Render for Root {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = self.render_palette(window, cx);
         let fonts = style::fonts(cx);
         let tabs = self.tabs.iter().enumerate().map(|(i, tab)| {
             let active = i == self.active;
@@ -166,6 +299,10 @@ impl Render for Root {
                 style::set_dark(!style::is_dark());
                 cx.refresh_windows();
             }))
+            .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom(Some(10), cx)))
+            .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom(Some(-10), cx)))
+            .on_action(cx.listener(|this, _: &ZoomReset, _, cx| this.zoom(None, cx)))
+            .on_action(cx.listener(|this, _: &ShowPalette, window, cx| this.show_palette(window, cx)))
             .child(
                 div()
                     .flex()
@@ -208,23 +345,36 @@ impl Render for Root {
                     ),
             )
             .child(div().flex_1().min_h_0().child(content))
+            .children(palette)
     }
 }
 
-/// Start a comparison of these two sources.
-pub struct Start {
-    pub left: String,
-    pub right: String,
+/// What a completion list shows: the part being completed (the last folder or
+/// file name, or the ref), since the rest is what was typed.
+fn completion_label(c: &Completion) -> String {
+    match c.kind {
+        CompletionKind::Ref => c.text.rsplit('@').next().unwrap_or(&c.text).to_string(),
+        _ => {
+            let dir = c.text.ends_with('/');
+            let name = c.text.trim_end_matches('/').rsplit(['/', '\\', '!']).next().unwrap_or(&c.text);
+            if dir { format!("{name}/") } else { name.to_string() }
+        }
+    }
 }
+
+/// Open this in the tab of the "New comparison" screen.
+pub struct Begin(pub Start);
 
 pub struct NewCompare {
     left: Entity<TextInput>,
     right: Entity<TextInput>,
     error: Option<SharedString>,
+    /// Completions for the field being typed in (true: the left one).
+    suggestions: Option<(bool, Vec<Completion>)>,
     _subscriptions: Vec<Subscription>,
 }
 
-impl EventEmitter<Start> for NewCompare {}
+impl EventEmitter<Begin> for NewCompare {}
 
 impl Focusable for NewCompare {
     fn focus_handle(&self, cx: &gpui::App) -> FocusHandle {
@@ -237,17 +387,39 @@ impl NewCompare {
         let left = cx.new(|cx| TextInput::new("Folder, file, archive or repo@revision", cx).monospaced());
         let right = cx.new(|cx| TextInput::new("Folder, file, archive or repo@revision", cx).monospaced());
         let mut subs = Vec::new();
-        for (input, next) in [(&left, Some(right.clone())), (&right, None)] {
-            subs.push(cx.subscribe_in(input, window, move |this, _, event: &InputEvent, window, cx| {
-                if let InputEvent::Submit { .. } = event {
+        for (input, next, is_left) in [(&left, Some(right.clone()), true), (&right, None, false)] {
+            subs.push(cx.subscribe_in(input, window, move |this, input, event: &InputEvent, window, cx| match event {
+                InputEvent::Submit { .. } => {
+                    this.suggestions = None;
                     match &next {
                         Some(next) => window.focus(&next.focus_handle(cx)),
                         None => this.start(cx),
                     }
                 }
+                // Completions as the Tauri app's path field offers them.
+                InputEvent::Changed => {
+                    let text = input.read(cx).text().to_string();
+                    let found = if text.is_empty() { Vec::new() } else { complete(&text, 8) };
+                    this.suggestions = (!found.is_empty()).then_some((is_left, found));
+                    cx.notify();
+                }
+                // Tab takes the first completion.
+                InputEvent::Tab => {
+                    if let Some((side, list)) = &this.suggestions
+                        && *side == is_left
+                        && let Some(first) = list.first()
+                    {
+                        let text = first.text.clone();
+                        input.update(cx, |i, cx| i.set_cursor_text(text, cx));
+                    }
+                }
+                InputEvent::Cancel => {
+                    this.suggestions = None;
+                    cx.notify();
+                }
             }));
         }
-        NewCompare { left, right, error: None, _subscriptions: subs }
+        NewCompare { left, right, error: None, suggestions: None, _subscriptions: subs }
     }
 
     fn start(&mut self, cx: &mut Context<Self>) {
@@ -257,7 +429,17 @@ impl NewCompare {
             self.error = Some("Enter both sides.".into());
             return cx.notify();
         }
-        cx.emit(Start { left, right });
+        cx.emit(Begin(Start::Compare { left, right }));
+    }
+
+    /// The conflicted files of the repository the left field names.
+    fn conflicts(&mut self, cx: &mut Context<Self>) {
+        let dir = self.left.read(cx).text().trim().to_string();
+        if dir.is_empty() {
+            self.error = Some("Enter the repository's folder on the left.".into());
+            return cx.notify();
+        }
+        cx.emit(Begin(Start::Conflicts { dir: dir.into() }));
     }
 
     fn swap(&mut self, cx: &mut Context<Self>) {
@@ -317,6 +499,63 @@ impl Render for NewCompare {
                                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.browse(left, false, cx))),
                         ),
                 )
+                .when_some(self.suggestions.as_ref().filter(|(l, _)| *l == left), |d, (_, list)| {
+                    d.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .p_1()
+                            .rounded(px(5.))
+                            .border_1()
+                            .border_color(style::line())
+                            .bg(style::overlay())
+                            .children(list.iter().enumerate().map(|(i, c)| {
+                                let text = c.text.clone();
+                                let input = input.clone();
+                                let icon = match c.kind {
+                                    CompletionKind::Dir => "▣",
+                                    CompletionKind::Archive => "▤",
+                                    CompletionKind::File => "·",
+                                    CompletionKind::Ref => "⑂",
+                                };
+                                div()
+                                    .id(("suggestion", i))
+                                    .flex()
+                                    .gap_2()
+                                    .px_2()
+                                    .py(px(2.))
+                                    .rounded(px(3.))
+                                    .text_size(px(12.5))
+                                    .when(i == 0, |d| d.bg(style::accent_bg()))
+                                    .hover(|s| s.bg(style::hover()))
+                                    .cursor_pointer()
+                                    .child(div().w(px(14.)).text_color(style::faint()).child(icon))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .child(completion_label(c)),
+                                    )
+                                    .child(div().text_color(style::muted()).child(c.detail.clone().unwrap_or_default()))
+                                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                        let text = text.clone();
+                                        input.update(cx, |i, cx| i.set_cursor_text(text, cx));
+                                        window.focus(&input.focus_handle(cx));
+                                        this.suggestions = None;
+                                    }))
+                            }))
+                            .child(
+                                div()
+                                    .px_2()
+                                    .pt_1()
+                                    .text_size(px(11.))
+                                    .text_color(style::faint())
+                                    .child("Tab takes the first"),
+                            ),
+                    )
+                })
         };
         div().size_full().flex().justify_center().pt(px(72.)).bg(style::bg()).child(
             div()
@@ -351,6 +590,10 @@ impl Render for NewCompare {
                                 .cursor_pointer()
                                 .child("Compare")
                                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.start(cx))),
+                        )
+                        .child(
+                            style::button("conflicts", "Resolve conflicts in the left folder's repository", true)
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.conflicts(cx))),
                         )
                         .when_some(self.error.clone(), |d, e| d.child(div().text_size(px(13.)).text_color(style::status_color(parallax_core::compare::Status::Error)).child(e))),
                 )
@@ -392,7 +635,7 @@ mod ui_tests {
         cx.run_until_parked();
         root.read_with(cx, |root, cx| {
             let [Tab::Compare(ws)] = &root.tabs[..] else { panic!("one comparison tab") };
-            assert_eq!(ws.read(cx).title(), "l ↔ r");
+            assert_eq!(ws.read(cx).title(cx), "l ↔ r");
         });
         // Ctrl+T adds a tab, Ctrl+W closes it, Ctrl+Shift+L switches the theme.
         cx.simulate_keystrokes("ctrl-t");
@@ -403,5 +646,52 @@ mod ui_tests {
         cx.simulate_keystrokes("ctrl-shift-l");
         assert_eq!(style::is_dark(), !dark);
         style::set_dark(dark);
+    }
+
+    #[gpui::test]
+    fn palette_zoom_and_path_completion(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("release-1.4")).unwrap();
+        std::fs::create_dir_all(dir.path().join("release-1.5")).unwrap();
+        cx.update(|cx| {
+            style::init(cx);
+            cx.bind_keys(crate::actions::bindings());
+            cx.bind_keys(crate::input::bindings());
+        });
+        let (root, cx) = cx.add_window_view(|window, cx| Root::new(None, window, cx));
+        // Typing a path offers the entries that start with it; Tab takes the first.
+        let partial = format!("{}/rel", dir.path().display());
+        cx.simulate_input(&partial);
+        let Tab::New(screen) = root.read_with(cx, |root, _| match &root.tabs[0] {
+            Tab::New(s) => Tab::New(s.clone()),
+            Tab::Compare(_) => panic!("the new comparison screen"),
+        }) else {
+            unreachable!()
+        };
+        screen.read_with(cx, |screen, _| {
+            let (left, list) = screen.suggestions.as_ref().expect("completions");
+            assert!(*left);
+            assert_eq!(list.len(), 2);
+        });
+        cx.simulate_keystrokes("tab");
+        let text = screen.read_with(cx, |screen, cx| screen.left.read(cx).text().to_string());
+        assert!(text.ends_with("release-1.4/"), "{text}");
+
+        // The palette runs a command by name; F1 shows it too.
+        let zoom = style::zoom();
+        cx.simulate_keystrokes("ctrl-shift-p");
+        assert!(root.read_with(cx, |root, _| root.palette.is_some()));
+        cx.simulate_input("larger");
+        let first = root.read_with(cx, |root, cx| root.matching_commands(cx).first().map(|c| c.label));
+        assert_eq!(first, Some("Larger text"));
+        cx.simulate_keystrokes("enter");
+        assert!(root.read_with(cx, |root, _| root.palette.is_none()));
+        assert_eq!(style::zoom(), zoom + 10);
+        cx.simulate_keystrokes("ctrl-0");
+        assert_eq!(style::zoom(), 100);
+        cx.simulate_keystrokes("f1");
+        assert_eq!(root.read_with(cx, |root, cx| root.matching_commands(cx).len()), commands().len());
+        cx.simulate_keystrokes("escape");
+        assert!(root.read_with(cx, |root, _| root.palette.is_none()));
     }
 }

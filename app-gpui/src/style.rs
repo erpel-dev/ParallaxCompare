@@ -1,7 +1,7 @@
 //! Colours, fonts and small shared pieces of the views. The palettes follow the
 //! Svelte app's light and dark themes, so the two front ends are easy to compare.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use gpui::{
     App, Div, ElementId, Font, FontFeatures, Global, Hsla, SharedString, Stateful, WindowAppearance, div, font,
@@ -10,8 +10,36 @@ use gpui::{
 use parallax_core::compare::Status;
 use parallax_core::highlight::ThemeKind;
 
-pub const ROW: f32 = 22.0;
-pub const TEXT_ROW: f32 = 20.0;
+static ZOOM: AtomicU32 = AtomicU32::new(100);
+
+/// The text size of file contents and rows, in percent (Ctrl+= / Ctrl+- / Ctrl+0).
+pub fn zoom() -> u32 {
+    ZOOM.load(Ordering::Relaxed)
+}
+
+/// Sets the text size, kept between 60 % and 200 %.
+pub fn set_zoom(percent: u32) {
+    ZOOM.store(percent.clamp(60, 200), Ordering::Relaxed);
+}
+
+fn zoomed(size: f32) -> f32 {
+    (size * zoom() as f32 / 100.0).round()
+}
+
+/// Height of a folder row.
+pub fn row() -> f32 {
+    zoomed(22.0)
+}
+
+/// Height of a text or merge row.
+pub fn text_row() -> f32 {
+    zoomed(20.0)
+}
+
+/// Size of file contents and folder rows.
+pub fn code_size() -> f32 {
+    zoomed(13.0)
+}
 
 static DARK: AtomicBool = AtomicBool::new(false);
 

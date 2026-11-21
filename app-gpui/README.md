@@ -14,6 +14,8 @@ cargo run --release -- old/ new/
 cargo run --release -- repo@main repo@feature      # Git revisions
 cargo run --release -- a.zip b.zip                  # archives
 cargo run --release -- left.txt right.txt           # two files: text compare
+cargo run --release -- path/to/repo                 # the repository's merge conflicts
+cargo run --release -- --merge BASE LOCAL REMOTE -o OUT   # as git mergetool runs it
 ```
 
 Sources are written as for the `parallax` CLI. On Linux the build needs the
@@ -56,6 +58,30 @@ changed, added and removed lines.
 - Options: whitespace (exact, normalized, ignored), ignore case, histogram diff.
 - Horizontal scrolling of long lines (Shift+wheel, Shift+←/→).
 
+**Merge.** A three-way merge of one file: local, base and remote side by side,
+the result below. Each conflict is resolved with a version (Alt+← local, Alt+→
+remote, Alt+↑ base, Alt+↓ both, Alt+Shift+↓ both remote first, as in the Svelte
+app) or with the chips on its header row; result lines are edited with F2;
+Ctrl+Z/Ctrl+Y undo and redo. The syntax-aware merge (the built-in engine,
+weave) solves conflicts the line merge cannot, offered per conflict (Alt+S) or
+as a whole result. "Use Git's result" takes the file Git wrote. Ctrl+S saves,
+asking before writing conflict markers or overwriting a file another program
+changed. As `git mergetool` (`--merge BASE LOCAL REMOTE -o OUT`), the exit status
+is 0 once the result was saved without conflicts, else 1.
+
+**Conflicts.** With a repository folder (or from the "New comparison" screen),
+the conflicted files of a merge, rebase or cherry-pick that stopped: Merge…
+opens a text file in the merge view, Take local / Take remote resolve a file as
+a whole, and Stage adds what is resolved to the index.
+
+**Overview, zoom, palette, completion.**
+
+- The text view has an overview strip beside the rows: a mark for every difference, where it is in the file; a click jumps there.
+- The image compare shows the images side by side, as the differing pixels over the faded left image, or blinking between left and right.
+- Ctrl+= and Ctrl+- make file contents larger or smaller, Ctrl+0 resets.
+- Ctrl+Shift+P or F1 opens the command palette: every command with its keys, filtered as you type; it is also the list of keyboard shortcuts.
+- The source fields of "New comparison" complete folders, files, archives and `repo@` refs as you type, with the same core function as the Tauri app's path field; Tab takes the first.
+
 **Theme.** Follows the system's light or dark appearance; Ctrl+Shift+L or the
 button in the tab bar switches by hand. Syntax colours switch with it.
 
@@ -76,28 +102,40 @@ directly while drawing.
 | Find in both files | `search::pattern`, `search::search` | `search_diff` | `FileDiff::search` |
 | Copy, delete, refresh | `ops::copy`, `ops::delete`, `compare::refresh_path` | `copy_entries`, `delete_entries`, `refresh_paths` | `Session::copy`, `delete`, `refresh` |
 | Watch for changes | `watch::Watcher` | `start_watching` | `Session::watch` |
+| Read a conflicted file's versions | `conflicts::merge_inputs`, `conflicts::conflict_of` | `open_merge` | `MergeDoc::open` |
+| Merge, resolve, undo | `merge_session::MergeSession` | `merge_resolve`, `merge_edit`, `merge_undo` | `MergeDoc` |
+| Build the merge rows in view | `rows::merge_input_rows`, `rows::merge_result_rows` | `merge_input_rows`, `merge_result_rows` | `MergeDoc::input_rows`, `result_rows` |
+| Offer a syntax-aware merge | `syntax_merge::Engine`, `MergeSession::offer_syntax` | `merge_structured` | `MergeDoc::apply_syntax` |
+| List, take and stage conflicts | `conflicts::repo_conflicts`, `write_stage`, `stage` | `repo_conflicts`, `take_conflict_side`, `stage_conflicts` | `merge::repo_state`, `take_side` |
+| Complete a source being typed | `source::complete` | `complete_path` | the "New comparison" fields |
 
-`rows::side_by_side` and `file_view::choose` were moved from the Tauri commands
-`file_rows` and `open_file_diff` into the core, so both apps build their rows
-and choose views with the same code. The JSON the Svelte app reads is unchanged.
+`rows::side_by_side`, `file_view::choose`, the merge row builders,
+`conflicts::merge_inputs` and `MergeSession::offer_syntax` were moved from the
+Tauri commands into the core, so both apps build their rows, choose views, read
+conflicts and offer syntax-aware solutions with the same code. The JSON the
+Svelte app reads is unchanged.
 
 ## What it does not do yet
 
-- three-way merge and conflict resolution (`--merge`, the conflicts view), and pull request review
-- typing directly into the text view: lines are edited one at a time in a field
-- saving converted views that write back into their file (ECUC values) is wired but untested
-- path completion, recent sources and the source pickers for Git revisions and archives (sources are typed)
-- the overview strip beside the text, wrapping long lines, the image compare's blink and overlay modes
-- preferences (text size), keyboard-shortcut help, the command palette
+- pull request review (comments, findings, CI annotations, writing reviews)
+- typing directly into the text and merge views: lines are edited one at a time in a field
+- choosing mergiraf as the syntax-aware engine (the built-in engine runs)
+- matching moved and renamed files in the Flat view, as the Svelte app's Flat view does
+- the version pickers beside the source fields (branches, tags, history); `repo@` completion lists refs
+- wrapping long lines (they scroll sideways)
+- remembering preferences (theme, text size) between runs
 - screen reader support (released GPUI versions have none)
 
 ## Tests
 
-`cargo test` runs unit tests and headless UI tests. The UI tests open the views
-in GPUI's test window and drive them like a user: F8 to a difference, Alt+→ to
+`cargo test` runs 28 unit and headless UI tests. The UI tests open the views in
+GPUI's test window and drive them like a user: F8 to a difference, Alt+→ to
 copy it, Delete and the answer to the prompt, F2 and typing to edit a line,
-Ctrl+S, Ctrl+F and Enter, Ctrl+T and Ctrl+W, and check the files on disk and the
-view's state afterwards.
+Ctrl+S, Ctrl+F and Enter, Ctrl+T and Ctrl+W, Alt+arrows in a merge, the command
+palette, path completion with Tab, blinking images. One test goes from a
+repository stopped in a merge through the conflicts list, the merge, saving and
+staging, and checks the index. The files on disk and the views' state are
+checked afterwards.
 
 ## Measurements
 
@@ -108,22 +146,25 @@ start. Time to rows: from launch until rows show in the window, median of 5.
 
 | | Tauri + Svelte | GPUI app |
 |---|---|---|
-| Two 1-million-line files (43 MB each): memory | 638 MiB (3 processes) | 318 MiB (1 process) |
-| Two 1-million-line files: time to rows | 2.11 s | 1.76 s |
-| Two folders of 40,000 files: memory | 548 MiB | 143 MiB |
-| Two folders of 40,000 files: time to rows | 1.95 s | 1.54 s |
-| Release binary, stripped | 95.5 MiB | 35.7 MiB |
+| Idle window: memory | 402 MiB (3 processes) | 127 MiB (1 process) |
+| Idle window: time to first UI | 1.46 s | 0.45 s |
+| Two 1-million-line files (43 MB each): memory | 615 MiB | 324 MiB |
+| Two 1-million-line files: time to rows | 2.37 s | 1.75 s |
+| Two folders of 40,000 files: memory | 554 MiB | 144 MiB |
+| Two folders of 40,000 files: time to rows | 2.24 s | 1.63 s |
+| Three-way merge of 200,000 lines (133 conflicts): memory | 607 MiB | 233 MiB |
+| Three-way merge of 200,000 lines: time to rows | 1.96 s | 1.35 s |
+| Release binary, stripped | 95.5 MiB | 102.9 MiB |
 
 Both apps open a file through the same `file_view::choose`, which also checks
 whether differing files are ≈ similar in a converted view; that check is part of
 both times. The GPUI times also include the tab bar and opening the sources in
 the background before the folder or text view starts.
 
-The binary sizes are not a fair comparison yet: the GPUI app links only the
-parts of the core it uses. The core with everything, as in the CLI, is
-85.7 MiB, so a GPUI app with all features would be about the size of today's.
-On Linux the Tauri app also needs WebKitGTK (about 121 MiB for its two main
-libraries), which this one does not.
+The GPUI binary now links nearly all of the core (converted views, merge,
+the syntax-aware engine) plus GPUI and is slightly larger than the Tauri
+binary. On Linux the Tauri app also needs WebKitGTK (about 121 MiB for its two
+main libraries) at run time, which this one does not.
 
 The folder view also differs in how rows appear: the Svelte view shows entries
 while the compare runs; this one shows the tree once the compare is done, with
@@ -148,12 +189,15 @@ a counter until then.
 ## Layout
 
 ```
-src/main.rs        command line, window, key bindings
-src/root.rs        tabs, the "New comparison" screen, light and dark
+src/main.rs        command line (compare, conflicts, --merge), window, key bindings
+src/root.rs        tabs, the "New comparison" screen with completion, the command palette, zoom, light and dark
 src/workspace.rs   one comparison: folder view, with the text view on top
 src/folder.rs      folder compare: rows, filters, Flat, selection, copy and delete, options, watching
 src/text_view.rs   text compare: rows from the core, views, image compare, editing, find
 src/session.rs     sources, files, saving, search and file operations through the core
+src/merge.rs       a three-way merge and a repository's conflicts through the core
+src/merge_view.rs  the merge view
+src/conflicts_view.rs  the conflicted files of a repository
 src/input.rs       a single-line text field (GPUI has none)
 src/menu.rs        popup menus
 src/style.rs       light and dark palettes, fonts, buttons and chips, number and date formats
