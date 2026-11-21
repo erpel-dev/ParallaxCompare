@@ -96,6 +96,13 @@ pub fn accent_bg() -> Hsla {
 pub fn hover() -> Hsla {
     pick(0xf1f4fa, 0x2a303c)
 }
+/// A background, unless it is the window's own: with software rendering every
+/// quad costs on each frame, and rows of unchanged text would cover the whole
+/// window once more for nothing.
+pub fn fill<E: gpui::Styled>(element: E, color: Hsla) -> E {
+    if color == bg() { element } else { element.bg(color) }
+}
+
 pub fn overlay() -> Hsla {
     pick(0xffffff, 0x262c37)
 }
@@ -151,12 +158,26 @@ pub struct Fonts {
 impl Global for Fonts {}
 
 pub fn init(cx: &mut App) {
-    let names = cx.text_system().all_font_names();
+    // `all_font_names` also lists GPUI's own fallback families ("Segoe UI",
+    // "Helvetica" …) whether they are installed or not. A family that does not
+    // load falls back on every text run, through a chain of failed lookups that
+    // each build an error (and capture a backtrace with RUST_BACKTRACE set). So
+    // a family counts only if resolving it finds that family.
+    let text = cx.text_system().clone();
+    let names = text.all_font_names();
+    let loads =
+        |name: &str| text.get_font_for_id(text.resolve_font(&font(name.to_string()))).is_some_and(|f| f.family == name);
+    // Without any of them: the family the fallback name ends up as, so the
+    // lookups succeed from the start.
+    let resolved = |name: &str| -> SharedString {
+        text.get_font_for_id(text.resolve_font(&font(name.to_string())))
+            .map_or_else(|| name.to_string().into(), |f| f.family)
+    };
     let pick = |wanted: &[&str], fallback: &str| -> SharedString {
         wanted
             .iter()
-            .find(|w| names.iter().any(|n| n == *w))
-            .map_or_else(|| fallback.to_string().into(), |w| w.to_string().into())
+            .find(|w| names.iter().any(|n| n == *w) && loads(w))
+            .map_or_else(|| resolved(fallback), |w| w.to_string().into())
     };
     let ui = pick(&["Segoe UI", "Inter", "Cantarell", "Noto Sans", "Ubuntu", "DejaVu Sans"], ".SystemUIFont");
     let mono = pick(

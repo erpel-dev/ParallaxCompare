@@ -211,6 +211,10 @@ impl MergeView {
         }
     }
 
+    pub fn dirty(&self) -> bool {
+        self.doc().is_some_and(|d| d.session.is_dirty())
+    }
+
     fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.can_go_back {
             return;
@@ -358,8 +362,11 @@ impl MergeView {
                 let block = row.block;
                 let current = current_block == Some(block) && row.kind == BlockKind::Conflict;
                 let cells = [(&row.local, Column::Local), (&row.base, Column::Base), (&row.remote, Column::Remote)];
+                // The font again on the row: see FolderView::render_row.
                 div()
                     .id(("in", index))
+                    .font(mono.clone())
+                    .text_size(px(style::code_size()))
                     .h(px(style::text_row()))
                     .w_full()
                     .flex()
@@ -405,7 +412,14 @@ impl MergeView {
                 let index = range.start + i;
                 let block = row.block;
                 let current = current_block == Some(block);
-                let base = div().id(("out", index)).h(px(style::text_row())).w_full().flex().items_center();
+                let base = div()
+                    .id(("out", index))
+                    .font(mono.clone())
+                    .text_size(px(style::code_size()))
+                    .h(px(style::text_row()))
+                    .w_full()
+                    .flex()
+                    .items_center();
                 let Some(line) = row.line else {
                     // A conflict's header: what it holds and how to resolve it.
                     let number = conflicts.iter().position(|c| c.block == block).map_or(0, |n| n + 1);
@@ -456,8 +470,7 @@ impl MergeView {
                 };
                 let n = line.number;
                 let bg = if selected == Some(n) { style::selection() } else { result_color(row.choice) };
-                let row_el = base
-                    .bg(bg)
+                let row_el = style::fill(base, bg)
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, e: &MouseDownEvent, window, cx| {
@@ -602,11 +615,10 @@ fn line_cell(line: Option<&LineView>, bg: Hsla, mark: Hsla, mono: &Font) -> gpui
         return div().size_full().bg(style::chrome()).into_any_element();
     };
     let (text, runs) = styled_line(line, mono, mark, &[]);
-    div()
+    style::fill(div(), bg)
         .size_full()
         .flex()
         .items_center()
-        .bg(bg)
         .child(number_cell(line.number))
         .child(
             div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().child(StyledText::new(text).with_runs(runs)),
@@ -733,7 +745,6 @@ impl Render for MergeView {
             .size_full()
             .flex()
             .flex_col()
-            .bg(style::bg())
             .text_color(style::fg())
             .child(header)
             .child(body)

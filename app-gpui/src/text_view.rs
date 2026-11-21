@@ -206,7 +206,7 @@ impl TextView {
         }
     }
 
-    fn dirty(&self) -> bool {
+    pub fn dirty(&self) -> bool {
         self.diff().is_some_and(|d| SIDES.iter().any(|&s| d.dirty(s)))
     }
 
@@ -257,6 +257,7 @@ impl TextView {
         if diff.copy_rows(rows, to) {
             let n = diff.sections().len();
             self.current = self.current.map(|i| i.min(n.saturating_sub(1))).filter(|_| n > 0);
+            self.search_again(cx);
             self.say(format!("Copied the difference to the {} side.", side_name(to)), cx);
         }
     }
@@ -267,44 +268,77 @@ impl TextView {
         if done {
             let n = diff.sections().len();
             self.current = self.current.filter(|&i| i < n);
+            self.search_again(cx);
             self.say(if redo { "Redone." } else { "Undone." }, cx);
         }
     }
 
-    fn save(&mut self, overwrite: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.save_sides(
+            SaveRun { sides: SIDES.to_vec(), overwrite: None, saved: Vec::new(), kept: Vec::new() },
+            window,
+            cx,
+        );
+    }
+
+    /// Saves the sides of `run` in turn. A side changed on disk is asked about
+    /// on its own, as in the Svelte view: the answer applies to that file only.
+    fn save_sides(&mut self, mut run: SaveRun, window: &mut Window, cx: &mut Context<Self>) {
         let session = self.session.clone();
         let Some(diff) = self.diff_mut() else { return };
-        let mut saved = Vec::new();
-        for side in SIDES {
+        while !run.sides.is_empty() {
+            let side = run.sides.remove(0);
             if !diff.dirty(side) {
                 continue;
             }
-            match diff.save(&session, side, overwrite) {
-                Ok(()) => saved.push(side_name(side)),
+            match diff.save(&session, side, run.overwrite == Some(side)) {
+                Ok(()) => run.saved.push(side_name(side)),
                 Err(SaveError::Stale) => {
                     let answer = window.prompt(
                         PromptLevel::Warning,
-                        "The file changed on disk",
-                        Some("Another program changed it since it was opened. Overwrite it with the text shown here?"),
-                        &["Overwrite", "Cancel"],
+                        &format!("The {} file changed on disk", side_name(side)),
+                        Some("Another program changed it after it was opened. Replace it with your version, losing those changes?"),
+                        &["Replace", "Keep the file"],
                         cx,
                     );
                     cx.spawn_in(window, async move |this, cx| {
-                        if answer.await == Ok(0) {
-                            let _ = this.update_in(cx, |this, window, cx| this.save(true, window, cx));
+                        let replace = answer.await == Ok(0);
+                        if replace {
+                            run.sides.insert(0, side);
+                            run.overwrite = Some(side);
+                        } else {
+                            run.kept.push(side_name(side));
+                            run.overwrite = None;
                         }
+                        let _ = this.update_in(cx, |this, window, cx| this.save_sides(run, window, cx));
                     })
                     .detach();
                     return;
                 }
-                Err(SaveError::Failed(e)) => return self.say(e, cx),
+                Err(SaveError::Failed(e)) => {
+                    if !run.saved.is_empty() {
+                        cx.emit(TextEvent::Saved(self.path.clone()));
+                    }
+                    return self.say(e, cx);
+                }
             }
         }
-        if saved.is_empty() {
-            return self.say("Nothing to save.", cx);
+        let mut message = match run.saved.as_slice() {
+            [] if run.kept.is_empty() => "Nothing to save.".to_string(),
+            [] => String::new(),
+            saved => format!("Saved the {} side.", saved.join(" and ")),
+        };
+        if !run.kept.is_empty() {
+            let kept = run.kept.join(" and ");
+            message.push_str(&format!(
+                "{}Kept the {kept} file as it is on disk; your edits are not saved.",
+                if message.is_empty() { "" } else { " " }
+            ));
         }
-        cx.emit(TextEvent::Saved(self.path.clone()));
-        self.say(format!("Saved the {} side.", saved.join(" and ")), cx);
+        if !run.saved.is_empty() {
+            cx.emit(TextEvent::Saved(self.path.clone()));
+        }
+        self.say(message, cx);
     }
 
     fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -383,6 +417,7 @@ impl TextView {
                 }
                 this.editing = None;
                 window.focus(&this.focus);
+                this.search_again(cx);
                 this.say("Line changed.", cx);
             }
             InputEvent::Cancel => {
@@ -421,24 +456,40 @@ impl TextView {
         cx.notify();
     }
 
-    /// Searches both files with the core's search, as the `search_diff` command does.
+    /// Searches both files with the core's search, as the `search_diff` command
+    /// does, and goes to the first hit.
     fn search(&mut self, cx: &mut Context<Self>) {
+        self.find_hits(None, cx);
+        self.next_hit(true, cx);
+    }
+
+    /// After an edit, undo or copy: the hits in the text as it is now, staying
+    /// at the hit that was current (or the next one) without moving the view.
+    fn search_again(&mut self, cx: &mut Context<Self>) {
+        let Some(find) = &self.find else { return };
+        let at = find.current.and_then(|i| find.hits.get(i)).map(|h| h.row);
+        self.find_hits(at, cx);
+        cx.notify();
+    }
+
+    /// Runs the search; the current hit becomes the first one at or after row `at`.
+    fn find_hits(&mut self, at: Option<u32>, cx: &gpui::App) {
         let Some(find) = &self.find else { return };
         let query = find.input.read(cx).text().to_string();
         let result = self.diff().map(|d| d.search(&query, &find.options)).unwrap_or(Ok(Vec::new()));
         let Some(find) = &mut self.find else { return };
         match result {
             Ok(hits) => {
+                find.current = at.and_then(|row| hits.iter().position(|h| h.row >= row).or(hits.len().checked_sub(1)));
                 find.hits = hits;
                 find.error = None;
-                find.current = None;
             }
             Err(e) => {
                 find.hits.clear();
+                find.current = None;
                 find.error = Some(e);
             }
         }
-        self.next_hit(true, cx);
     }
 
     fn next_hit(&mut self, forward: bool, cx: &mut Context<Self>) {
@@ -603,11 +654,14 @@ impl TextView {
     }
 
     fn render_row(&self, row: &RowView, ctx: RowContext, mono: &Font, cx: &mut Context<Self>) -> gpui::AnyElement {
+        // The font again on the row: see FolderView::render_row.
         div()
             .id(("row", ctx.index as usize))
             .h(px(style::text_row()))
             .w_full()
             .flex()
+            .font(mono.clone())
+            .text_size(px(style::code_size()))
             .child(div().w(px(3.)).h_full().when(ctx.current, |d| d.bg(style::accent())))
             .child(self.render_side(row.left.as_ref(), row.kind, Side::Left, &ctx, mono, cx))
             .child(div().w(px(1.)).h_full().bg(style::line()))
@@ -630,7 +684,7 @@ impl TextView {
             background = style::selection();
         }
         let row = ctx.index;
-        let base = div()
+        let base = style::fill(div(), background)
             .id(("side", row as usize * 2 + side as usize))
             .flex_1()
             .w_0()
@@ -638,7 +692,6 @@ impl TextView {
             .h_full()
             .flex()
             .items_center()
-            .bg(background)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, e: &MouseDownEvent, window, cx| {
@@ -769,7 +822,7 @@ impl TextView {
             )
             .child(
                 style::button("save", if dirty { "● Save" } else { "Save" }, dirty)
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.save(false, window, cx))),
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.save(window, cx))),
             )
             .child(sep())
             .child(
@@ -1136,6 +1189,15 @@ struct RowContext {
     offset: f32,
 }
 
+/// Where a save is: the sides still to save, the one the user agreed to
+/// overwrite, and what was saved or kept so far.
+struct SaveRun {
+    sides: Vec<Side>,
+    overwrite: Option<Side>,
+    saved: Vec<&'static str>,
+    kept: Vec<&'static str>,
+}
+
 fn side_name(side: Side) -> &'static str {
     match side {
         Side::Left => "left",
@@ -1358,7 +1420,7 @@ impl Render for TextView {
             .on_action(cx.listener(|this, _: &CopyDifferenceRight, _, cx| this.copy_difference(Side::Right, cx)))
             .on_action(cx.listener(|this, _: &Undo, _, cx| this.undo(false, cx)))
             .on_action(cx.listener(|this, _: &Redo, _, cx| this.undo(true, cx)))
-            .on_action(cx.listener(|this, _: &Save, window, cx| this.save(false, window, cx)))
+            .on_action(cx.listener(|this, _: &Save, window, cx| this.save(window, cx)))
             .on_action(cx.listener(|this, _: &CopyLines, _, cx| this.copy_lines(cx)))
             .on_action(cx.listener(|this, _: &EditLine, window, cx| this.edit_line(window, cx)))
             .on_action(cx.listener(|this, _: &Find, window, cx| this.open_find(window, cx)))
@@ -1375,7 +1437,6 @@ impl Render for TextView {
             .size_full()
             .flex()
             .flex_col()
-            .bg(style::bg())
             .text_color(style::fg())
             .child(self.header(cx))
             .children(find_bar)
@@ -1526,6 +1587,80 @@ mod ui_tests {
         });
         cx.simulate_keystrokes("ctrl-c");
         assert_eq!(cx.read_from_clipboard().and_then(|c| c.text()).as_deref(), Some("gamma\ndelta\n"));
+    }
+
+    fn open<'a>(
+        cx: &'a mut TestAppContext,
+        left: &str,
+        right: &str,
+    ) -> (tempfile::TempDir, Entity<TextView>, &'a mut gpui::VisualTestContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (l, r) = (dir.path().join("l.txt"), dir.path().join("r.txt"));
+        std::fs::write(&l, left).unwrap();
+        std::fs::write(&r, right).unwrap();
+        let session = Arc::new(Session::open(&l.to_string_lossy(), &r.to_string_lossy()).unwrap());
+        cx.update(|cx| {
+            style::init(cx);
+            cx.bind_keys(crate::actions::bindings());
+            cx.bind_keys(crate::input::bindings());
+        });
+        let (view, cx) = cx.add_window_view(|_, cx| TextView::new(session, String::new(), "l ↔ r".into(), false, cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.focus(&view.read(cx).focus));
+        (dir, view, cx)
+    }
+
+    fn edit_line(view: &Entity<TextView>, cx: &mut gpui::VisualTestContext, side: Side, row: u32, text: &str) {
+        view.update(cx, |view, cx| view.select_row(side, row, false, cx));
+        cx.simulate_keystrokes("f2 ctrl-a");
+        cx.simulate_input(text);
+        cx.simulate_keystrokes("enter");
+    }
+
+    /// The review's data loss: with both files changed on disk, agreeing to
+    /// replace one must not replace the other. Each side is asked about.
+    #[gpui::test]
+    fn overwriting_asks_for_each_side(cx: &mut TestAppContext) {
+        let (dir, view, cx) = open(cx, "a\nb\n", "a\nc\n");
+        edit_line(&view, cx, Side::Left, 0, "L");
+        edit_line(&view, cx, Side::Right, 0, "R");
+        let (l, r) = (dir.path().join("l.txt"), dir.path().join("r.txt"));
+        std::fs::write(&l, "changed elsewhere, left\n").unwrap();
+        std::fs::write(&r, "changed elsewhere, right\n").unwrap();
+        cx.simulate_keystrokes("ctrl-s");
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Replace");
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt(), "the right file is asked about too");
+        cx.simulate_prompt_answer("Keep the file");
+        cx.run_until_parked();
+        assert_eq!(std::fs::read_to_string(&l).unwrap(), "L\nb\n");
+        assert_eq!(std::fs::read_to_string(&r).unwrap(), "changed elsewhere, right\n");
+        view.read_with(cx, |view, _| {
+            let diff = view.diff().unwrap();
+            assert!(!diff.dirty(Side::Left) && diff.dirty(Side::Right));
+            assert!(view.message.as_ref().unwrap().contains("Kept the right file"));
+        });
+    }
+
+    /// Find counts the text as it is after a copy, an undo or a line edit.
+    #[gpui::test]
+    fn find_follows_edits(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open(cx, "x\nfoo\n", "x\nbar\n");
+        let hits = |view: &Entity<TextView>, cx: &mut gpui::VisualTestContext| {
+            view.read_with(cx, |view, _| view.find.as_ref().unwrap().hits.len())
+        };
+        cx.simulate_keystrokes("ctrl-f");
+        cx.simulate_input("foo");
+        assert_eq!(hits(&view, cx), 1);
+        cx.update(|window, cx| window.focus(&view.read(cx).focus));
+        cx.simulate_keystrokes("f8 alt-right");
+        assert_eq!(hits(&view, cx), 2, "the copy put foo on the right");
+        cx.simulate_keystrokes("ctrl-z");
+        assert_eq!(hits(&view, cx), 1);
+        edit_line(&view, cx, Side::Left, 0, "foo foo");
+        assert_eq!(hits(&view, cx), 3);
     }
 
     #[gpui::test]

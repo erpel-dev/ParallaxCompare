@@ -101,6 +101,17 @@ impl Session {
         }
     }
 
+    /// Ends watching, e.g. to start again with other exclusions.
+    pub fn stop_watching(&self) {
+        self.watcher.lock().take();
+    }
+
+    /// Whether `rel` lies inside an archive on that side, where deleting is for good.
+    pub fn inside_archive(&self, side: Side, rel: &str) -> bool {
+        let source = self.source(side);
+        source.vfs.local_path(&source.path(rel)).is_none()
+    }
+
     fn writing(&self, paths: &[String]) -> Option<parallax_core::watch::WriteGuard> {
         self.watcher.lock().as_ref().map(|w| w.writing(paths))
     }
@@ -116,10 +127,11 @@ impl Session {
         ops::copy(from, dest, paths, &filter, &Progress::default()).map(|_| ()).map_err(|e| e.to_string())
     }
 
-    /// Deletes `paths` on one side, into the trash where possible.
-    pub fn delete(&self, paths: &[String], side: Side) -> Result<Vec<String>, String> {
+    /// Deletes `paths` on one side, into the trash or for good. Returns the paths
+    /// that could not go to the trash and are still there.
+    pub fn delete(&self, paths: &[String], side: Side, removal: Removal) -> Result<Vec<String>, String> {
         let _guard = self.writing(paths);
-        ops::delete(self.source(side), paths, Removal::Trash, &Progress::default()).map_err(|e| e.to_string())
+        ops::delete(self.source(side), paths, removal, &Progress::default()).map_err(|e| e.to_string())
     }
 
     /// The fresh node for each path (`None` where it is gone), as `refresh_paths` does.
@@ -587,7 +599,7 @@ mod tests {
         assert_eq!((s.files, s.same, s.different, s.left_only), (3, 1, 1, 1));
         session.copy(&["left.txt".into()], Side::Right, &options).unwrap();
         assert!(dir.path().join("r/left.txt").exists());
-        session.delete(&["sub/changed.txt".into()], Side::Left).unwrap();
+        session.delete(&["sub/changed.txt".into()], Side::Left, Removal::Trash).unwrap();
         let paths = vec!["left.txt".to_string(), "sub/changed.txt".to_string()];
         let nodes = session.refresh(&paths, &options);
         apply_refresh(&mut root, &paths, nodes);

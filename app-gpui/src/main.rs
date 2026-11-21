@@ -12,6 +12,7 @@ mod input;
 mod menu;
 mod merge;
 mod merge_view;
+mod prompt;
 mod root;
 mod session;
 mod style;
@@ -80,11 +81,16 @@ fn main() {
         style::init(cx);
         cx.bind_keys(actions::bindings());
         cx.bind_keys(input::bindings());
+        // The window asks about unsaved edits first (see Root); this is for when
+        // no window is left to handle it.
         cx.on_action(|_: &Quit, cx| cx.quit());
-        // Closing the window ends the app, as in the Tauri app.
+        prompt::install(cx);
+        // Closing the window ends the app, as in the Tauri app. Not right away:
+        // on X11 this runs inside the platform's close handler, which still holds
+        // the state that quitting needs.
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
-                cx.quit();
+                cx.spawn(async |cx| cx.update(|cx| cx.quit()).ok()).detach();
             }
         })
         .detach();

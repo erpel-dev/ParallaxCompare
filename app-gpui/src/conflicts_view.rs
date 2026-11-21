@@ -24,7 +24,7 @@ pub struct ConflictsView {
     focus: FocusHandle,
     state: Option<Result<RepoState, String>>,
     /// Files resolved here, and how to stage each.
-    resolved: BTreeMap<String, Resolution>,
+    pub(crate) resolved: BTreeMap<String, Resolution>,
     message: Option<SharedString>,
 }
 
@@ -44,12 +44,18 @@ impl ConflictsView {
         view
     }
 
-    fn load(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn load(&mut self, cx: &mut Context<Self>) {
         let dir = self.dir.clone();
         let work = cx.background_executor().spawn(async move { merge::repo_state(&dir) });
         cx.spawn(async move |this, cx| {
             let state = work.await;
             let _ = this.update(cx, |this, cx| {
+                // Files staged or resolved elsewhere (Git, another tool) are no
+                // longer listed; their records here would be staged again.
+                match &state {
+                    Ok(state) => this.resolved.retain(|path, _| state.files.iter().any(|f| f.path == *path)),
+                    Err(_) => this.resolved.clear(),
+                }
                 this.state = Some(state);
                 cx.notify();
             });
@@ -80,8 +86,8 @@ impl ConflictsView {
         let side = if remote { "remote" } else { "local" };
         let answer = window.prompt(
             PromptLevel::Warning,
-            &format!("Take the {side} version of {path}?"),
-            Some("The file in the work tree is replaced with that version as a whole."),
+            &format!("Take the {side} version?"),
+            Some(&format!("{path} in the work tree is replaced with the {side} version as a whole.")),
             &["Take it", "Cancel"],
             cx,
         );
@@ -107,14 +113,18 @@ impl ConflictsView {
 
     pub(crate) fn stage(&mut self, cx: &mut Context<Self>) {
         let Some(workdir) = self.workdir() else { return };
-        let paths: Vec<(String, Resolution)> = std::mem::take(&mut self.resolved).into_iter().collect();
+        let paths: Vec<(String, Resolution)> = self.resolved.iter().map(|(p, r)| (p.clone(), *r)).collect();
         if paths.is_empty() {
             self.message = Some("Resolve files first: merge them and save, or take a side.".into());
             return cx.notify();
         }
         let n = paths.len();
         match conflicts::stage(&workdir, &paths) {
-            Ok(()) => self.message = Some(format!("Staged {n} file{}.", if n == 1 { "" } else { "s" }).into()),
+            Ok(()) => {
+                self.resolved.clear();
+                self.message = Some(format!("Staged {n} file{}.", if n == 1 { "" } else { "s" }).into());
+            }
+            // The records stay, to stage again once the problem is solved.
             Err(e) => self.message = Some(format!("Staging failed: {e}").into()),
         }
         self.load(cx);
@@ -130,7 +140,6 @@ impl Render for ConflictsView {
             .size_full()
             .flex()
             .flex_col()
-            .bg(style::bg())
             .text_color(style::fg());
         let state = match &self.state {
             None => return root.child(div().p_4().text_color(style::muted()).child("Reading the repository…")),

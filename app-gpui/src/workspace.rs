@@ -125,6 +125,15 @@ impl Workspace {
         workspace
     }
 
+    /// Whether a text or merge view in this tab holds edits that are not saved.
+    pub fn unsaved(&self, cx: &gpui::App) -> bool {
+        self.stack.iter().any(|screen| match screen {
+            Screen::Text(v) => v.read(cx).dirty(),
+            Screen::Merge(v) => v.read(cx).dirty(),
+            Screen::Folder(_) | Screen::Conflicts(_) => false,
+        })
+    }
+
     pub fn title(&self, cx: &gpui::App) -> String {
         match &self.start {
             Start::Compare { left, right } => {
@@ -274,5 +283,24 @@ mod tests {
         cx.run_until_parked();
         let left = crate::merge::repo_state(repo.path()).unwrap();
         assert_eq!(left.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), ["b.txt"], "a.txt is staged");
+    }
+
+    /// Records of files no longer conflicted (staged elsewhere) are dropped
+    /// when the list is read again, so Stage does not stage them a second time.
+    #[gpui::test]
+    fn refreshing_the_conflicts_drops_stale_records(cx: &mut TestAppContext) {
+        use parallax_core::conflicts::Resolution;
+        let repo = crate::merge::tests::conflicted_repo();
+        cx.update(style::init);
+        let dir = repo.path().to_path_buf();
+        let (list, cx) = cx.add_window_view(|_, cx| ConflictsView::new(dir, cx));
+        cx.run_until_parked();
+        list.update(cx, |list, cx| {
+            list.merged("a.txt", true, cx);
+            list.resolved.insert("staged-elsewhere.txt".into(), Resolution::WorkTree(None));
+            list.load(cx);
+        });
+        cx.run_until_parked();
+        list.read_with(cx, |list, _| assert_eq!(list.resolved.keys().collect::<Vec<_>>(), ["a.txt"]));
     }
 }

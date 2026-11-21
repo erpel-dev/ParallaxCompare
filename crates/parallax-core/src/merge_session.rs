@@ -13,7 +13,7 @@ use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
 
-use crate::edit::Pos;
+use crate::edit::{Pos, Unsaved};
 use crate::merge::{self, Block, BlockKind, MergeOptions};
 use crate::text::{self, TextDoc};
 
@@ -145,6 +145,7 @@ pub struct MergeSession {
     undo: Vec<Step>,
     redo: Vec<Step>,
     saved: u64,
+    unsaved: Unsaved,
     /// The syntax-aware solution of each block, where there is one, and the
     /// conflicts it still holds.
     syntax: Vec<Option<(String, u32)>>,
@@ -238,6 +239,7 @@ impl MergeSession {
             undo: Vec::new(),
             redo: Vec::new(),
             saved: 0,
+            unsaved: Unsaved::default(),
             syntax: Vec::new(),
         };
         let mut text = String::new();
@@ -254,13 +256,14 @@ impl MergeSession {
         }
         session.input_starts.push(row);
         session.set_result_text(text);
-        session.saved = hash(&session.result.text);
+        session.mark_saved();
         session
     }
 
     fn set_result_text(&mut self, text: String) {
         let len = self.result.text.len();
         self.result.splice(0..len, &text);
+        self.unsaved.changed();
     }
 
     pub fn result(&self) -> &TextDoc {
@@ -345,11 +348,12 @@ impl MergeSession {
     }
 
     pub fn is_dirty(&self) -> bool {
-        hash(&self.result.text) != self.saved
+        self.unsaved.get(|| hash(&self.result.text) != self.saved)
     }
 
     pub fn mark_saved(&mut self) {
         self.saved = hash(&self.result.text);
+        self.unsaved.saved();
     }
 
     pub fn can_undo(&self) -> bool {
@@ -464,6 +468,7 @@ impl MergeSession {
     fn splice(&mut self, range: Range<usize>, inserted: String, before: Vec<BlockState>, after: Vec<BlockState>) {
         let at = range.start;
         let removed = self.result.splice(range, &inserted);
+        self.unsaved.changed();
         self.state = after.clone();
         self.undo.push(Step { at, removed, inserted, before, after });
         self.redo.clear();
@@ -473,6 +478,7 @@ impl MergeSession {
     pub fn undo(&mut self) -> Option<usize> {
         let step = self.undo.pop()?;
         self.result.splice(step.at..step.at + step.inserted.len(), &step.removed);
+        self.unsaved.changed();
         self.state = step.before.clone();
         let line = self.line_of(step.at);
         self.redo.push(step);
@@ -482,6 +488,7 @@ impl MergeSession {
     pub fn redo(&mut self) -> Option<usize> {
         let step = self.redo.pop()?;
         self.result.splice(step.at..step.at + step.removed.len(), &step.inserted);
+        self.unsaved.changed();
         self.state = step.after.clone();
         let line = self.line_of(step.at);
         self.undo.push(step);

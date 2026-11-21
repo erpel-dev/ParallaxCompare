@@ -3,8 +3,8 @@
 //! Ctrl+Shift+L switches by hand.
 
 use gpui::{
-    ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, PathPromptOptions, SharedString, Subscription,
-    Window, anchored, deferred, div, point, prelude::*, px,
+    ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, PathPromptOptions, PromptLevel, SharedString,
+    Subscription, Window, anchored, deferred, div, point, prelude::*, px,
 };
 
 use crate::actions::*;
@@ -39,6 +39,11 @@ impl Root {
         let appearance = cx.observe_window_appearance(window, |_, window, cx| {
             style::follow(window.appearance());
             cx.refresh_windows();
+        });
+        // The window manager's close button and Alt+F4 ask first, as Ctrl+W does.
+        let weak = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            weak.update(cx, |this, cx| this.close_window(window, cx)).unwrap_or(true)
         });
         let mut root = Root {
             tabs: Vec::new(),
@@ -87,10 +92,70 @@ impl Root {
         cx.notify();
     }
 
+    fn unsaved(tab: &Tab, cx: &gpui::App) -> bool {
+        matches!(tab, Tab::Compare(w) if w.read(cx).unsaved(cx))
+    }
+
+    /// Closes a tab, after asking when it holds unsaved edits.
     fn close(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if index >= self.tabs.len() {
-            return;
+        let Some(tab) = self.tabs.get(index) else { return };
+        let Tab::Compare(workspace) = tab else { return self.remove_tab(index, window, cx) };
+        if !Self::unsaved(tab, cx) {
+            return self.remove_tab(index, window, cx);
         }
+        let workspace = workspace.clone();
+        self.activate(index, window, cx);
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            "Close the tab without saving?",
+            Some("The changes in this tab have not been saved."),
+            &["Close without saving", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await == Ok(0) {
+                let _ = this.update_in(cx, |this, window, cx| {
+                    let index = this.tabs.iter().position(|t| matches!(t, Tab::Compare(w) if *w == workspace));
+                    if let Some(index) = index {
+                        this.remove_tab(index, window, cx);
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Whether the window may close now; with unsaved edits it asks, and closes
+    /// once the answer is to discard them.
+    fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let unsaved = self.tabs.iter().filter(|t| Self::unsaved(t, cx)).count();
+        if unsaved == 0 {
+            return true;
+        }
+        if let Some(first) = self.tabs.iter().position(|t| Self::unsaved(t, cx)) {
+            self.activate(first, window, cx);
+        }
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &if unsaved == 1 {
+                "Quit without saving?".to_string()
+            } else {
+                format!("Quit without saving {unsaved} tabs?")
+            },
+            Some("Changes that have not been saved are lost."),
+            &["Quit without saving", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |_, cx| {
+            if answer.await == Ok(0) {
+                let _ = cx.update(|window, _| window.remove_window());
+            }
+        })
+        .detach();
+        false
+    }
+
+    fn remove_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.tabs.remove(index);
         if self.tabs.is_empty() {
             return self.new_tab(window, cx);
@@ -289,6 +354,11 @@ impl Render for Root {
             .text_color(style::fg())
             .font_family(fonts.ui.clone())
             .on_action(cx.listener(|this, _: &NewTab, window, cx| this.new_tab(window, cx)))
+            .on_action(cx.listener(|this, _: &Quit, window, cx| {
+                if this.close_window(window, cx) {
+                    cx.quit();
+                }
+            }))
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
                 let active = this.active;
                 this.close(active, window, cx)
@@ -646,6 +716,35 @@ mod ui_tests {
         cx.simulate_keystrokes("ctrl-shift-l");
         assert_eq!(style::is_dark(), !dark);
         style::set_dark(dark);
+    }
+
+    /// Ctrl+W on a tab with unsaved edits asks; Cancel keeps the tab.
+    #[gpui::test]
+    fn closing_a_tab_with_unsaved_edits_asks(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (l, r) = (dir.path().join("l.txt"), dir.path().join("r.txt"));
+        std::fs::write(&l, "a\n").unwrap();
+        std::fs::write(&r, "b\n").unwrap();
+        cx.update(|cx| {
+            style::init(cx);
+            cx.bind_keys(crate::actions::bindings());
+        });
+        let start = Start::Compare { left: l.to_string_lossy().into(), right: r.to_string_lossy().into() };
+        let (root, cx) = cx.add_window_view(|window, cx| Root::new(Some(start), window, cx));
+        cx.run_until_parked();
+        // F8 and Alt+→ change the right side in the text view.
+        cx.simulate_keystrokes("f8 alt-right");
+        root.read_with(cx, |root, cx| assert!(Root::unsaved(&root.tabs[0], cx)));
+        cx.simulate_keystrokes("ctrl-w");
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        root.read_with(cx, |root, _| assert!(matches!(root.tabs[..], [Tab::Compare(_)])));
+        cx.simulate_keystrokes("ctrl-w");
+        cx.simulate_prompt_answer("Close without saving");
+        cx.run_until_parked();
+        root.read_with(cx, |root, _| assert!(matches!(root.tabs[..], [Tab::New(_)])));
+        assert_eq!(std::fs::read_to_string(&r).unwrap(), "b\n");
     }
 
     #[gpui::test]

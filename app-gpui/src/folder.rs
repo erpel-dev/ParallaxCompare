@@ -20,6 +20,7 @@ use gpui::{
 };
 use parallax_core::compare::{self, CompareOptions, Control, Node, Side as Entry, Status, Summary};
 use parallax_core::edit::Side;
+use parallax_core::ops::Removal;
 use parallax_core::tree;
 use parallax_core::vfs::EntryKind;
 
@@ -70,6 +71,19 @@ pub struct FlatRow {
     pub left: Option<Entry>,
     pub right: Option<Entry>,
     pub message: Option<SharedString>,
+}
+
+/// "1 entry", "3 entries".
+fn entries(n: usize) -> String {
+    format!("{n} entr{}", if n == 1 { "y" } else { "ies" })
+}
+
+fn trash_name() -> &'static str {
+    if cfg!(windows) { "Recycle Bin" } else { "trash" }
+}
+
+fn trash_button() -> &'static str {
+    if cfg!(windows) { "Move to Recycle Bin" } else { "Move to trash" }
 }
 
 fn join(dir: &str, name: &str) -> String {
@@ -169,6 +183,8 @@ pub struct FolderView {
     menu: Option<Menu>,
     panel: Option<OptionsPanel>,
     watching: bool,
+    /// The exclusions the watcher ignores changes under.
+    watched_excludes: Vec<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -180,8 +196,94 @@ impl Focusable for FolderView {
     }
 }
 
-fn split_patterns(text: &str) -> Vec<String> {
-    text.split([';', ',']).map(str::trim).filter(|p| !p.is_empty()).map(str::to_string).collect()
+/// Splits a pattern list as the Svelte view's `splitPatterns` does: glob
+/// alternatives (`*.{rs,md}`), character classes and quoted names stay whole.
+/// File patterns are separated by spaces, commas or semicolons; exclusions only by
+/// commas, so they can name folders with spaces.
+fn split_patterns(text: &str, excludes: bool) -> Result<Vec<String>, String> {
+    struct Token {
+        text: String,
+        end: usize,
+        started: bool,
+    }
+    impl Token {
+        fn append(&mut self, s: &str, literal: bool) {
+            let blank = s.trim().is_empty();
+            if !self.started && !literal && blank {
+                return;
+            }
+            self.text.push_str(s);
+            self.started = true;
+            if literal || !blank {
+                self.end = self.text.len();
+            }
+        }
+        fn emit(&mut self, out: &mut Vec<String>) {
+            if self.end > 0 {
+                out.push(self.text[..self.end].to_string());
+            }
+            *self = Token { text: String::new(), end: 0, started: false };
+        }
+    }
+    let separator = |c: char| if excludes { c == ',' } else { c.is_whitespace() || c == ',' || c == ';' };
+    let mut out = Vec::new();
+    let mut token = Token { text: String::new(), end: 0, started: false };
+    let (mut braces, mut bracket, mut quote) = (0usize, false, None::<char>);
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' && chars.peek().is_some() {
+            let next = chars.next().unwrap_or_default();
+            // Escaped list separators are literal names, but an escaped comma inside
+            // a glob alternative belongs to the glob compiler.
+            if quote == Some(next) || (!bracket && braces == 0 && separator(next)) {
+                token.append(&next.to_string(), true);
+            } else {
+                token.append(&format!("{c}{next}"), true);
+            }
+        } else if quote == Some(c) {
+            quote = None;
+        } else if quote.is_none() && !bracket && !token.started && (c == '"' || c == '\'') {
+            quote = Some(c);
+            token.started = true;
+        } else if c == '[' && !bracket {
+            bracket = true;
+            token.append("[", true);
+        } else if c == ']' && bracket {
+            bracket = false;
+            token.append("]", true);
+        } else if !bracket && c == '{' {
+            braces += 1;
+            token.append("{", true);
+        } else if !bracket && c == '}' {
+            braces = braces.saturating_sub(1);
+            token.append("}", true);
+        } else if quote.is_none() && !bracket && braces == 0 && separator(c) {
+            token.emit(&mut out);
+        } else {
+            token.append(&c.to_string(), quote.is_some() || bracket || braces > 0);
+        }
+    }
+    if quote.is_some() {
+        return Err("Close the quote around the file pattern.".into());
+    }
+    token.emit(&mut out);
+    Ok(out)
+}
+
+/// The text for a pattern box, quoting a pattern only where splitting would
+/// otherwise change it.
+fn join_patterns(patterns: &[String], excludes: bool) -> String {
+    patterns
+        .iter()
+        .map(|p| {
+            if split_patterns(p, excludes).is_ok_and(|split| split == std::slice::from_ref(p)) {
+                p.clone()
+            } else {
+                format!("\"{}\"", p.replace('"', "\\\""))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(if excludes { ", " } else { " " })
 }
 
 impl FolderView {
@@ -206,6 +308,7 @@ impl FolderView {
             menu: None,
             panel: None,
             watching: false,
+            watched_excludes: Vec::new(),
             _subscriptions: Vec::new(),
         };
         view.run(cx);
@@ -288,6 +391,7 @@ impl FolderView {
         }
         let Some(rx) = self.session.watch(&self.options.excludes) else { return };
         self.watching = true;
+        self.watched_excludes = self.options.excludes.clone();
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_millis(250)).await;
@@ -379,7 +483,10 @@ impl FolderView {
     }
 
     fn rebuild(&mut self) {
-        let cursor = self.cursor.and_then(|i| self.rows.get(i)).map(|r| r.path.clone());
+        // The cursor, the Shift anchor and the selection follow their paths into
+        // the new rows; indices into the old rows would point anywhere.
+        let path_at = |i: Option<usize>| i.and_then(|i| self.rows.get(i)).map(|r| r.path.clone());
+        let (cursor, anchor) = (path_at(self.cursor), path_at(self.anchor));
         self.rows.clear();
         if let Some(root) = &self.root {
             if self.flat {
@@ -388,9 +495,21 @@ impl FolderView {
                 flatten(root, "", 0, &self.expanded, self.filter, &mut self.rows);
             }
         }
-        let shown: HashSet<&str> = self.rows.iter().map(|r| r.path.as_str()).collect();
-        self.selected.retain(|p| shown.contains(p.as_str()));
-        self.cursor = cursor.and_then(|p| self.rows.iter().position(|r| r.path == p));
+        let (mut kept, mut new_cursor, mut new_anchor) = (BTreeSet::new(), None, None);
+        for (i, row) in self.rows.iter().enumerate() {
+            if cursor.as_ref() == Some(&row.path) {
+                new_cursor = Some(i);
+            }
+            if anchor.as_ref() == Some(&row.path) {
+                new_anchor = Some(i);
+            }
+            if !self.selected.is_empty() && self.selected.contains(&row.path) {
+                kept.insert(row.path.clone());
+            }
+        }
+        self.selected = kept;
+        self.cursor = new_cursor;
+        self.anchor = new_anchor;
     }
 
     fn set_filter(&mut self, filter: Filter, cx: &mut Context<Self>) {
@@ -416,7 +535,8 @@ impl FolderView {
             return;
         }
         if extend {
-            let anchor = self.anchor.or(self.cursor).unwrap_or(index);
+            let valid = |i: &usize| *i < self.rows.len();
+            let anchor = self.anchor.filter(valid).or(self.cursor.filter(valid)).unwrap_or(index);
             let (a, b) = (anchor.min(index), anchor.max(index));
             self.selected = self.rows[a..=b].iter().map(|r| r.path.clone()).collect();
             self.anchor = Some(anchor);
@@ -508,6 +628,27 @@ impl FolderView {
         self.rows.iter().filter(|r| self.selected.contains(&r.path)).cloned().collect()
     }
 
+    /// Archives at or below `paths` on the side copied from: they are copied whole,
+    /// with entries the patterns or the status filter hide.
+    fn archives_copied(&self, paths: &[String], to: Side) -> usize {
+        fn walk(node: &Node, to: Side, n: &mut usize) {
+            let from = if to == Side::Right { node.left() } else { node.right() };
+            if from.is_some_and(|e| e.kind == EntryKind::Archive) {
+                *n += 1;
+            } else {
+                node.children().iter().for_each(|c| walk(c, to, n));
+            }
+        }
+        let Some(root) = &self.root else { return 0 };
+        let mut n = 0;
+        for path in paths {
+            if let Some(node) = tree::find(root, path) {
+                walk(node, to, &mut n);
+            }
+        }
+        n
+    }
+
     /// Copies the selected entries to one side, then refreshes them.
     fn copy_selected(&mut self, to: Side, window: &mut Window, cx: &mut Context<Self>) {
         let from_present = |r: &FlatRow| if to == Side::Right { r.left.is_some() } else { r.right.is_some() };
@@ -521,21 +662,32 @@ impl FolderView {
         let replaces =
             rows.iter().filter(|r| if to == Side::Right { r.right.is_some() } else { r.left.is_some() }).count();
         let paths: Vec<String> = rows.into_iter().map(|r| r.path).collect();
+        let archives = self.archives_copied(&paths, to);
         let go = move |this: &mut Self, cx: &mut Context<Self>| this.run_copy(paths.clone(), to, cx);
-        if replaces == 0 {
+        if replaces == 0 && archives == 0 {
             return go(self, cx);
         }
-        let answer = window.prompt(
-            PromptLevel::Warning,
-            &format!(
-                "Replace {replaces} entr{} on the {} side?",
-                if replaces == 1 { "y" } else { "ies" },
-                side_name(to)
-            ),
-            Some("Files that exist on both sides are overwritten."),
-            &["Replace", "Cancel"],
-            cx,
-        );
+        let side = side_name(to);
+        let message = if replaces > 0 {
+            format!("Replace {} on the {side} side?", entries(replaces))
+        } else {
+            format!(
+                "Copy {} to the {side} side?",
+                if archives == 1 { "the archive".into() } else { format!("{archives} archives") }
+            )
+        };
+        let mut detail = String::new();
+        if replaces > 0 {
+            detail.push_str("Files that exist on both sides are overwritten.");
+        }
+        if archives > 0 {
+            detail.push_str(if detail.is_empty() { "" } else { " " });
+            detail.push_str(
+                "Archives are copied whole, including entries hidden by file patterns, exclusions or the status filter.",
+            );
+        }
+        let ok = if replaces > 0 { "Replace" } else { "Copy" };
+        let answer = window.prompt(PromptLevel::Warning, &message, Some(&detail), &[ok, "Cancel"], cx);
         cx.spawn(async move |this, cx| {
             if answer.await == Ok(0) {
                 let _ = this.update(cx, go);
@@ -551,15 +703,12 @@ impl FolderView {
             let paths = paths.clone();
             async move { session.copy(&paths, to, &options) }
         });
-        self.say(format!("Copying {n} entr{} to the {} side…", if n == 1 { "y" } else { "ies" }, side_name(to)), cx);
+        self.say(format!("Copying {} to the {} side…", entries(n), side_name(to)), cx);
         cx.spawn(async move |this, cx| {
             let result = work.await;
             let _ = this.update(cx, |this, cx| {
                 match result {
-                    Ok(()) => this.say(
-                        format!("Copied {n} entr{} to the {} side.", if n == 1 { "y" } else { "ies" }, side_name(to)),
-                        cx,
-                    ),
+                    Ok(()) => this.say(format!("Copied {} to the {} side.", entries(n), side_name(to)), cx),
                     Err(e) => this.say(format!("Copy failed: {e}"), cx),
                 }
                 this.refresh_paths(paths, cx);
@@ -568,68 +717,137 @@ impl FolderView {
         .detach();
     }
 
-    /// Deletes the selected entries from one side, after asking.
+    /// Deletes the selected entries from one side, after asking. Only writable
+    /// sides are offered: a Git revision cannot be changed.
     fn delete_selected(&mut self, side: Option<Side>, window: &mut Window, cx: &mut Context<Self>) {
         let rows = self.selected_rows();
         if rows.is_empty() {
             return;
         }
-        // Without a side, the one the entries are on; asked when they are on both.
-        let side = side.or_else(|| {
-            let left = rows.iter().any(|r| r.left.is_some());
-            let right = rows.iter().any(|r| r.right.is_some());
-            match (left, right) {
-                (true, false) => Some(Side::Left),
-                (false, true) => Some(Side::Right),
-                _ => None,
-            }
-        });
-        let n = rows.len();
-        let what = format!("{n} entr{}", if n == 1 { "y" } else { "ies" });
-        let paths: Vec<String> = rows.into_iter().map(|r| r.path).collect();
-        let (message, answers): (String, &[&str]) = match side {
-            Some(s) => (format!("Delete {what} from the {} side?", side_name(s)), &["Delete", "Cancel"]),
-            None => (format!("Delete {what} from which side?"), &["Left", "Right", "Cancel"]),
+        let on = |s: Side| rows.iter().any(|r| if s == Side::Left { r.left.is_some() } else { r.right.is_some() });
+        let sides: Vec<Side> = match side {
+            Some(s) => vec![s],
+            None => [Side::Left, Side::Right].into_iter().filter(|&s| on(s)).collect(),
         };
-        let answer = window.prompt(PromptLevel::Warning, &message, Some("Local files go to the trash."), answers, cx);
-        cx.spawn(async move |this, cx| {
-            let chosen = match (side, answer.await) {
-                (Some(s), Ok(0)) => s,
-                (None, Ok(0)) => Side::Left,
-                (None, Ok(1)) => Side::Right,
-                _ => return,
+        let writable: Vec<Side> = sides.iter().copied().filter(|&s| self.session.writable(s)).collect();
+        if writable.is_empty() {
+            let which = match sides.as_slice() {
+                [s] => format!("The {} side cannot be written.", side_name(*s)),
+                _ => "Neither side can be written.".to_string(),
             };
-            let _ = this.update(cx, |this, cx| this.run_delete(paths, chosen, cx));
+            return self.say(which, cx);
+        }
+        let present = |s: Side| -> Vec<String> {
+            rows.iter()
+                .filter(|r| if s == Side::Left { r.left.is_some() } else { r.right.is_some() })
+                .map(|r| r.path.clone())
+                .collect()
+        };
+        let per_side: Vec<(Side, Vec<String>)> = writable.iter().map(|&s| (s, present(s))).collect();
+        let in_archive = |s: Side, paths: &[String]| paths.iter().filter(|p| self.session.inside_archive(s, p)).count();
+        let (message, detail, answers): (String, String, Vec<&str>) = match per_side.as_slice() {
+            [(s, paths)] => {
+                let archived = in_archive(*s, paths);
+                let what = entries(paths.len());
+                let detail = if archived == 0 {
+                    format!("They go to the {}.", trash_name())
+                } else if archived == paths.len() {
+                    "They are inside an archive and are deleted for good; this cannot be undone.".to_string()
+                } else {
+                    format!(
+                        "{archived} of them are inside an archive and are deleted for good; this cannot be undone. The others go to the {}.",
+                        trash_name()
+                    )
+                };
+                let ok = if archived == 0 { trash_button() } else { "Delete" };
+                (format!("Delete {what} from the {} side?", side_name(*s)), detail, vec![ok, "Cancel"])
+            }
+            _ => {
+                let archived: usize = per_side.iter().map(|(s, p)| in_archive(*s, p)).sum();
+                let detail = if archived == 0 {
+                    format!("They go to the {}.", trash_name())
+                } else {
+                    format!("Entries inside archives are deleted for good. Others go to the {}.", trash_name())
+                };
+                (format!("Delete {} from which side?", entries(rows.len())), detail, vec!["Left", "Right", "Cancel"])
+            }
+        };
+        let answer = window.prompt(PromptLevel::Warning, &message, Some(&detail), &answers[..], cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let chosen = match (per_side.len(), answer.await) {
+                (1, Ok(0)) => per_side.into_iter().next(),
+                (2, Ok(i @ (0 | 1))) => per_side.into_iter().nth(i),
+                _ => None,
+            };
+            if let Some((side, paths)) = chosen {
+                let _ = this.update_in(cx, |this, window, cx| this.run_delete(paths, side, Removal::Trash, window, cx));
+            }
         })
         .detach();
     }
 
-    fn run_delete(&mut self, paths: Vec<String>, side: Side, cx: &mut Context<Self>) {
+    fn run_delete(
+        &mut self,
+        paths: Vec<String>,
+        side: Side,
+        removal: Removal,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.session.writable(side) {
             return self.say(format!("The {} side cannot be written.", side_name(side)), cx);
         }
         let session = self.session.clone();
         let work = cx.background_executor().spawn({
             let paths = paths.clone();
-            async move { session.delete(&paths, side) }
+            async move { session.delete(&paths, side, removal) }
         });
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let result = work.await;
-            let _ = this.update(cx, |this, cx| {
-                let n = paths.len();
+            let _ = this.update_in(cx, |this, window, cx| {
                 match result {
-                    Ok(_) => this.say(
-                        format!(
-                            "Deleted {n} entr{} from the {} side.",
-                            if n == 1 { "y" } else { "ies" },
-                            side_name(side)
-                        ),
-                        cx,
-                    ),
+                    Ok(left_over) => {
+                        let deleted = paths.len() - left_over.len();
+                        let mut message = format!("Deleted {} from the {} side.", entries(deleted), side_name(side));
+                        if !left_over.is_empty() {
+                            message.push_str(&format!(
+                                " {} could not be moved to the {} and {} still there.",
+                                entries(left_over.len()),
+                                trash_name(),
+                                if left_over.len() == 1 { "is" } else { "are" }
+                            ));
+                            this.offer_permanent_delete(left_over, side, window, cx);
+                        }
+                        this.say(message, cx);
+                    }
                     Err(e) => this.say(format!("Delete failed: {e}"), cx),
                 }
                 this.refresh_paths(paths, cx);
             });
+        })
+        .detach();
+    }
+
+    /// For entries the trash refused (on a network drive, for example), as the
+    /// Svelte view asks.
+    fn offer_permanent_delete(&mut self, paths: Vec<String>, side: Side, window: &mut Window, cx: &mut Context<Self>) {
+        let first = paths.first().cloned().unwrap_or_default();
+        let message = match paths.len() {
+            1 => format!("\"{first}\" could not be moved to the {}.", trash_name()),
+            n => format!("{n} entries could not be moved to the {}.", trash_name()),
+        };
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &message,
+            Some("Delete them permanently? This cannot be undone."),
+            &["Delete permanently", "Keep them"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await == Ok(0) {
+                let _ =
+                    this.update_in(cx, |this, window, cx| this.run_delete(paths, side, Removal::Permanent, window, cx));
+            }
         })
         .detach();
     }
@@ -677,13 +895,13 @@ impl FolderView {
             return cx.notify();
         }
         let includes = cx.new(|cx| {
-            let mut input = TextInput::new("Only these files, e.g. *.rs; src/**", cx).monospaced();
-            input.set_text(self.options.includes.join("; "), cx);
+            let mut input = TextInput::new("Only these files, e.g. *.rs src/**", cx).monospaced();
+            input.set_text(join_patterns(&self.options.includes, false), cx);
             input
         });
         let excludes = cx.new(|cx| {
-            let mut input = TextInput::new("Leave out, e.g. target; *.o", cx).monospaced();
-            input.set_text(self.options.excludes.join("; "), cx);
+            let mut input = TextInput::new("Leave out, separated by commas, e.g. target, *.o", cx).monospaced();
+            input.set_text(join_patterns(&self.options.excludes, true), cx);
             input
         });
         for input in [&includes, &excludes] {
@@ -701,8 +919,11 @@ impl FolderView {
 
     fn apply_patterns(&mut self, cx: &mut Context<Self>) {
         let Some(panel) = &self.panel else { return };
-        let includes = split_patterns(panel.includes.read(cx).text());
-        let excludes = split_patterns(panel.excludes.read(cx).text());
+        let split = |input: &Entity<TextInput>, excludes| split_patterns(input.read(cx).text(), excludes);
+        let (includes, excludes) = match (split(&panel.includes, false), split(&panel.excludes, true)) {
+            (Ok(i), Ok(e)) => (i, e),
+            (Err(e), _) | (_, Err(e)) => return self.say(e, cx),
+        };
         if let Err(e) = compare::Filter::new(&CompareOptions {
             includes: includes.clone(),
             excludes: excludes.clone(),
@@ -712,6 +933,12 @@ impl FolderView {
         }
         self.options.includes = includes;
         self.options.excludes = excludes;
+        // The watcher ignores changes under the old exclusions: start it again
+        // with the new ones once this compare is done.
+        if self.watching && self.watched_excludes != self.options.excludes {
+            self.session.stop_watching();
+            self.watching = false;
+        }
         self.run(cx);
     }
 
@@ -842,12 +1069,15 @@ impl FolderView {
         let selected = self.selected.contains(&row.path);
         let cursor = self.cursor == Some(index);
         let note = row.message.clone();
+        // GPUI lays out list rows where the inherited text style does not reach
+        // (prepaint): each row names its font, or text falls back to GPUI's default.
         div()
             .id(("row", index))
             .h(px(style::row()))
             .w_full()
             .flex()
             .items_center()
+            .font_family(style::fonts(cx).ui.clone())
             .text_size(px(style::code_size()))
             .when(selected, |d| d.bg(style::accent_bg()))
             .when(!selected, |d| d.hover(|s| s.bg(style::hover())))
@@ -1104,7 +1334,8 @@ impl Render for FolderView {
             .size_full()
             .flex()
             .flex_col()
-            .bg(style::bg())
+            // No background of its own: the window's (Root) shows through. Every
+            // full-window quad is shaded again on each frame.
             .text_color(style::fg())
             .child(
                 div()
@@ -1240,8 +1471,20 @@ mod tests {
 
     #[test]
     fn patterns_split_on_semicolons_and_commas() {
-        assert_eq!(split_patterns(" *.rs; target ,, build/** "), ["*.rs", "target", "build/**"]);
-        assert!(split_patterns("  ").is_empty());
+        fn split(text: &str, excludes: bool) -> Vec<String> {
+            split_patterns(text, excludes).unwrap()
+        }
+        assert_eq!(split(" *.rs; target ,, build/** ", false), ["*.rs", "target", "build/**"]);
+        assert!(split("  ", false).is_empty());
+        // Glob alternatives, classes and quotes stay whole, as in the Svelte view.
+        assert_eq!(split("*.{txt,md} [a,b]*.c 'my file.txt'", false), ["*.{txt,md}", "[a,b]*.c", "my file.txt"]);
+        // Exclusions are split at commas only: folder names may have spaces.
+        assert_eq!(split("build output, *.{o,obj}, a\\,b", true), ["build output", "*.{o,obj}", "a,b"]);
+        assert!(split_patterns("\"open", false).is_err());
+        for (list, excludes) in [(vec!["*.{a,b}", "x y", "q\"uote"], false), (vec!["a,b", "c d"], true)] {
+            let list: Vec<String> = list.into_iter().map(String::from).collect();
+            assert_eq!(split(&join_patterns(&list, excludes), excludes), list);
+        }
     }
 }
 
@@ -1279,6 +1522,7 @@ mod ui_tests {
     fn keyboard_copy_and_delete(cx: &mut TestAppContext) {
         let (dir, session) = sides();
         cx.update(|cx| cx.bind_keys(crate::actions::bindings()));
+        cx.update(style::init);
         let (view, cx) = cx.add_window_view(|_, cx| FolderView::new(session, cx));
         cx.run_until_parked();
         view.read_with(cx, |view, _| {
@@ -1315,7 +1559,7 @@ mod ui_tests {
         view.update(cx, |view, cx| view.select(new, false, cx));
         cx.simulate_keystrokes("delete");
         assert!(cx.has_pending_prompt());
-        cx.simulate_prompt_answer("Delete");
+        cx.simulate_prompt_answer(trash_button());
         cx.run_until_parked();
         assert!(!dir.path().join("r/b/new.txt").exists());
         view.read_with(cx, |view, _| assert_eq!(view.summary.right_only, 0));
@@ -1325,6 +1569,7 @@ mod ui_tests {
     fn filters_flat_view_and_folders(cx: &mut TestAppContext) {
         let (_dir, session) = sides();
         cx.update(|cx| cx.bind_keys(crate::actions::bindings()));
+        cx.update(style::init);
         let (view, cx) = cx.add_window_view(|_, cx| FolderView::new(session, cx));
         cx.run_until_parked();
         view.update(cx, |view, cx| view.set_filter(Filter::Differences, cx));
@@ -1341,5 +1586,54 @@ mod ui_tests {
         view.read_with(cx, |view, _| assert_eq!(paths(view), ["a", "b", "b/new.txt", "only-left.txt"]));
         cx.simulate_keystrokes("right");
         view.read_with(cx, |view, _| assert_eq!(paths(view).len(), 6));
+    }
+    /// The review's crash: Shift+click after a filter dropped the row the
+    /// selection started from. The anchor follows its path, or is gone.
+    #[gpui::test]
+    fn shift_selection_after_the_rows_changed(cx: &mut TestAppContext) {
+        let (_dir, session) = sides();
+        cx.update(style::init);
+        let (view, cx) = cx.add_window_view(|_, cx| FolderView::new(session, cx));
+        cx.run_until_parked();
+        let selected = |view: &FolderView| view.selected.iter().cloned().collect::<Vec<_>>();
+        view.update(cx, |view, cx| {
+            let at = |p: &str| view.rows.iter().position(|r| r.path == p).unwrap();
+            // The anchor's row is filtered out: Shift+click selects just the row.
+            let new = at("b/new.txt");
+            view.select(new, false, cx);
+            view.set_filter(Filter::LeftOnly, cx);
+            assert_eq!(paths(view), ["only-left.txt"]);
+            view.select(0, true, cx);
+            assert_eq!(selected(view), ["only-left.txt"]);
+            // The anchor's row moves: the range starts where it is now.
+            view.set_filter(Filter::All, cx);
+            let b = view.rows.iter().position(|r| r.path == "b").unwrap();
+            view.select(b, false, cx);
+            view.set_filter(Filter::Differences, cx);
+            let last = view.rows.len() - 1;
+            view.select(last, true, cx);
+            assert_eq!(selected(view), ["b", "b/new.txt", "only-left.txt"]);
+        });
+    }
+
+    /// Changed exclusions apply to the watcher too: it starts again with them.
+    #[gpui::test]
+    fn the_watcher_follows_changed_exclusions(cx: &mut TestAppContext) {
+        let (_dir, session) = sides();
+        cx.update(style::init);
+        let (view, cx) = cx.add_window_view(|_, cx| FolderView::new(session, cx));
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| assert!(view.watching && view.watched_excludes == view.options.excludes));
+        cx.update(|window, cx| view.update(cx, |view, cx| view.toggle_panel(window, cx)));
+        let excludes = view.read_with(cx, |view, _| view.panel.as_ref().unwrap().excludes.clone());
+        excludes.update(cx, |input, cx| input.set_text("b, *.{md,txt}", cx));
+        view.update(cx, |view, cx| view.apply_patterns(cx));
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.options.excludes, ["b", "*.{md,txt}"]);
+            assert!(view.watching);
+            assert_eq!(view.watched_excludes, view.options.excludes);
+            assert_eq!(paths(view), ["a"]);
+        });
     }
 }

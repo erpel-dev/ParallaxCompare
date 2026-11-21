@@ -7,6 +7,7 @@
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -63,12 +64,45 @@ pub struct EditSession {
     redo: Vec<Splice>,
     /// Hashes of the texts as last loaded or saved, to tell unsaved changes.
     saved: [u64; 2],
+    unsaved: [Unsaved; 2],
 }
 
 fn hash(text: &str) -> u64 {
     let mut h = DefaultHasher::new();
     text.hash(&mut h);
     h.finish()
+}
+
+/// Whether a text differs from its saved version. Telling means hashing the
+/// whole text (tens of milliseconds for a large file), and views ask on every
+/// frame, so the answer is kept until the text changes again.
+#[derive(Debug, Default)]
+pub(crate) struct Unsaved(AtomicU8);
+
+impl Unsaved {
+    const UNKNOWN: u8 = 0;
+    const CLEAN: u8 = 1;
+    const DIRTY: u8 = 2;
+
+    pub(crate) fn changed(&self) {
+        self.0.store(Self::UNKNOWN, Ordering::Relaxed);
+    }
+
+    pub(crate) fn saved(&self) {
+        self.0.store(Self::CLEAN, Ordering::Relaxed);
+    }
+
+    pub(crate) fn get(&self, dirty: impl FnOnce() -> bool) -> bool {
+        match self.0.load(Ordering::Relaxed) {
+            Self::CLEAN => false,
+            Self::DIRTY => true,
+            _ => {
+                let dirty = dirty();
+                self.0.store(if dirty { Self::DIRTY } else { Self::CLEAN }, Ordering::Relaxed);
+                dirty
+            }
+        }
+    }
 }
 
 /// Converts any line terminator in typed or pasted text to the document's.
@@ -83,7 +117,15 @@ impl EditSession {
     pub fn new(left: TextDoc, right: TextDoc, options: DiffOptions) -> Self {
         let diff = textdiff::diff_docs(&left, &right, &options);
         let saved = [hash(&left.text), hash(&right.text)];
-        EditSession { docs: [left, right], diff, options, undo: Vec::new(), redo: Vec::new(), saved }
+        EditSession {
+            docs: [left, right],
+            diff,
+            options,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            saved,
+            unsaved: Default::default(),
+        }
     }
 
     pub fn doc(&self, side: Side) -> &TextDoc {
@@ -115,11 +157,12 @@ impl EditSession {
 
     /// Whether the side differs from what was loaded or last saved.
     pub fn is_dirty(&self, side: Side) -> bool {
-        hash(&self.doc(side).text) != self.saved[side.index()]
+        self.unsaved[side.index()].get(|| hash(&self.doc(side).text) != self.saved[side.index()])
     }
 
     pub fn mark_saved(&mut self, side: Side) {
         self.saved[side.index()] = hash(&self.doc(side).text);
+        self.unsaved[side.index()].saved();
     }
 
     /// Replaces the text between two positions; `\n` in `text` starts new lines.
@@ -288,6 +331,7 @@ impl EditSession {
     fn apply(&mut self, side: Side, range: Range<usize>, inserted: String) -> Edited {
         let at = range.start;
         let removed = self.docs[side.index()].splice(range, &inserted);
+        self.unsaved[side.index()].changed();
         self.undo.push(Splice { side, at, removed, inserted });
         self.redo.clear();
         self.finish(side, at)
@@ -303,6 +347,7 @@ impl EditSession {
     pub fn undo(&mut self) -> Option<Edited> {
         let s = self.undo.pop()?;
         self.docs[s.side.index()].splice(s.at..s.at + s.inserted.len(), &s.removed);
+        self.unsaved[s.side.index()].changed();
         let edited = self.finish(s.side, s.at);
         self.redo.push(s);
         Some(edited)
@@ -311,6 +356,7 @@ impl EditSession {
     pub fn redo(&mut self) -> Option<Edited> {
         let s = self.redo.pop()?;
         self.docs[s.side.index()].splice(s.at..s.at + s.removed.len(), &s.inserted);
+        self.unsaved[s.side.index()].changed();
         let edited = self.finish(s.side, s.at);
         self.undo.push(s);
         Some(edited)
@@ -351,6 +397,23 @@ mod tests {
 
     fn text(s: &EditSession, side: Side) -> &str {
         &s.doc(side).text
+    }
+
+    /// The unsaved state is kept between questions, and follows every change.
+    #[test]
+    fn unsaved_follows_edits_undo_redo_and_save() {
+        let mut s = session("a\nb\n", "a\nc\n");
+        assert!(!s.is_dirty(Side::Left) && !s.is_dirty(Side::Right));
+        s.copy_rows(0..s.diff.rows.len() as u32, Side::Left).unwrap();
+        assert!(s.is_dirty(Side::Left) && !s.is_dirty(Side::Right));
+        s.undo().unwrap();
+        assert!(!s.is_dirty(Side::Left), "undone back to the saved text");
+        s.redo().unwrap();
+        assert!(s.is_dirty(Side::Left));
+        s.mark_saved(Side::Left);
+        assert!(!s.is_dirty(Side::Left));
+        s.undo().unwrap();
+        assert!(s.is_dirty(Side::Left), "undoing past a save is a change");
     }
 
     #[test]

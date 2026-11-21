@@ -128,14 +128,17 @@ Svelte app reads is unchanged.
 
 ## Tests
 
-`cargo test` runs 28 unit and headless UI tests. The UI tests open the views in
+`cargo test` runs 34 unit and headless UI tests. The UI tests open the views in
 GPUI's test window and drive them like a user: F8 to a difference, Alt+→ to
 copy it, Delete and the answer to the prompt, F2 and typing to edit a line,
 Ctrl+S, Ctrl+F and Enter, Ctrl+T and Ctrl+W, Alt+arrows in a merge, the command
 palette, path completion with Tab, blinking images. One test goes from a
 repository stopped in a merge through the conflicts list, the merge, saving and
-staging, and checks the index. The files on disk and the views' state are
-checked afterwards.
+staging, and checks the index. Others cover the review findings: Shift+click
+after a filter changed the rows, a save that asks about each file changed on
+disk, Ctrl+W on a tab with unsaved edits, Find after edits, a watcher that
+follows new exclusions, and conflict records dropped on refresh. The files on
+disk and the views' state are checked afterwards.
 
 ## Measurements
 
@@ -165,6 +168,45 @@ The GPUI binary now links nearly all of the core (converted views, merge,
 the syntax-aware engine) plus GPUI and is slightly larger than the Tauri
 binary. On Linux the Tauri app also needs WebKitGTK (about 121 MiB for its two
 main libraries) at run time, which this one does not.
+
+### Reaction times
+
+From X11 input to the first changed pixel in the result area: Xvfb at
+1400 × 900, software rendering through Mesa llvmpipe, both apps pinned to two
+CPUs, 20 trials each, after warm-up. Milliseconds, median / 90th percentile.
+
+| | Tauri + Svelte | GPUI before | GPUI now |
+|---|---|---|---|
+| Mouse-wheel step, 40,000 files | 62 / 82 | 66 / 82 | 67 / 96 |
+| Filter All ↔ Left only, 40,000 files | 90 / 111 | 76 / 97 | 60 / 73 |
+| F8 / F7, two 1-million-line files | 137 / 161 | 214 / 250 | 70 / 103 |
+| Mouse-wheel step, with `RUST_BACKTRACE=1` | – | 340 / 382 | 66 / 88 |
+| F8 / F7, with `RUST_BACKTRACE=1` | – | 230 / 255 | 70 / 89 |
+
+What made the GPUI app slow, found with `perf`:
+
+- **Fonts.** `TextSystem::all_font_names` also lists GPUI's own fallback
+  families ("Segoe UI", "Helvetica" …) whether they are installed or not, so on
+  Linux the app picked "Segoe UI". Every text run then tried it and walked the
+  fallback list, eight failed lookups before DejaVu Sans, each building an
+  `anyhow` error; with `RUST_BACKTRACE=1` each also captured a backtrace, two
+  thirds of the main thread's time. The app now checks which family a name
+  really resolves to (and the interface is drawn in Inter as meant).
+- **Rows in lists.** `uniform_list` lays rows out during prepaint, where the
+  text style of the list and its parents does not apply; rows now name their
+  font and size themselves instead of falling back to GPUI's default font.
+- **Unsaved state.** `EditSession::is_dirty` and `MergeSession::is_dirty` in
+  the core hashed the whole text on each call, and the views ask on every
+  frame: about 60 ms per frame for two 43 MB files. The answer is now kept
+  until the text changes.
+- **Overdraw.** The views no longer paint full-window backgrounds over the
+  window's own, and unchanged rows no longer paint the window colour again.
+
+What remains is mostly rendering: GPUI redraws the whole window on every frame
+through Vulkan, and with llvmpipe that rasterising takes 80–90 % of the CPU
+time of an interaction. WebKit repaints only the changed parts on the CPU. With
+a GPU a GPUI frame takes a few milliseconds, so these timings are the worst
+case for GPUI and say little about a desktop with graphics drivers.
 
 The folder view also differs in how rows appear: the Svelte view shows entries
 while the compare runs; this one shows the tree once the compare is done, with
@@ -198,6 +240,7 @@ src/session.rs     sources, files, saving, search and file operations through th
 src/merge.rs       a three-way merge and a repository's conflicts through the core
 src/merge_view.rs  the merge view
 src/conflicts_view.rs  the conflicted files of a repository
+src/prompt.rs      the app's dialog for questions (GPUI's own clips text on Linux)
 src/input.rs       a single-line text field (GPUI has none)
 src/menu.rs        popup menus
 src/style.rs       light and dark palettes, fonts, buttons and chips, number and date formats
