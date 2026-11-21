@@ -43,8 +43,8 @@
     type Counts,
     type Filter,
     type FlatRow,
+    type MatchedStatus,
     type Partial,
-    type PairStatus,
     type RowSide,
   } from "./tree";
 
@@ -146,8 +146,8 @@
 
   /** Files of all folders in one list, files of the same name matched across folders. */
   let flat = $state(false);
-  /** Comparisons of matched files, by `left\nright` path. */
-  let pairStatus = new Map<string, PairStatus>();
+  let pairStatus = new Map<string, MatchedStatus>();
+  let pairGeneration = 0;
   const moved = $derived.by(() => {
     void version;
     return flat && result ? movedPairs(result.root) : [];
@@ -213,16 +213,19 @@
   // Matched files are compared once they are shown.
   let comparing = false;
   $effect(() => {
-    const todo = moved.filter(([l, r]) => !pairStatus.has(`${l}\n${r}`));
+    if (running) return;
+    const todo = moved.filter(([left, right]) => pairStatus.get(left)?.right !== right);
     if (!todo.length || comparing) return;
     comparing = true;
     const id = session.id;
+    const generation = pairGeneration;
     api
       .comparePairs(id, todo, $state.snapshot(options))
       .then((statuses) => {
-        todo.forEach(([l, r], i) => pairStatus.set(`${l}\n${r}`, statuses[i]));
+        if (generation !== pairGeneration) return;
+        todo.forEach(([left, right], i) => pairStatus.set(left, { right, result: statuses[i] }));
       })
-      .catch((e) => (error = String(e)))
+      .catch((e) => { if (generation === pairGeneration) error = String(e); })
       .finally(() => {
         comparing = false;
         version++;
@@ -245,69 +248,80 @@
 
   /** Entries that could not be loaded, so they are not asked for again and again. */
   let unloadable = new Set<string>();
-  let loading = false;
+  let loading: Promise<void> | undefined;
+
+  function loadEntries(load: () => Promise<void>) {
+    loading = load().finally(() => {
+      loading = undefined;
+      version++;
+    });
+    return loading;
+  }
 
   /**
    * Loads all entries that are not loaded yet (identical folders, folders skipped
    * by Git tree id, closed archives) with everything below them, so all files show.
    */
-  async function loadSkipped() {
-    if (!result || provisional || loading) return;
+  function loadSkipped() {
+    if (!result || provisional || loading) return loading;
     const root = result.root;
     const pending = unloaded(root).filter((p) => !unloadable.has(p));
     if (!pending.length) return;
-    loading = true;
     busy = "Loading all entries…";
-    try {
-      if (pending.length > 8) {
-        // Many: the whole tree at once.
-        const fresh = await api.expand(session.id, "", $state.snapshot(options), true);
-        if (result?.root === root) result = { root: fresh, summary: result.summary };
-      } else {
-        for (const p of pending) {
-          try {
-            const fresh = await api.expand(session.id, p, $state.snapshot(options), true);
-            if (result?.root !== root) break;
-            replaceNode(root, p, fresh);
-          } catch (e) {
-            unloadable.add(p);
-            error = String(e);
+    return loadEntries(async () => {
+      try {
+        if (pending.length > 8) {
+          // Many: the whole tree at once.
+          const fresh = await api.expand(session.id, "", $state.snapshot(options), true);
+          if (result?.root === root) result = { root: fresh, summary: result.summary };
+        } else {
+          for (const p of pending) {
+            try {
+              const fresh = await api.expand(session.id, p, $state.snapshot(options), true);
+              if (result?.root !== root) break;
+              replaceNode(root, p, fresh);
+            } catch (e) {
+              if (result?.root !== root) break;
+              unloadable.add(p);
+              error = String(e);
+            }
           }
         }
+      } catch (e) {
+        if (result?.root === root) {
+          for (const p of pending) unloadable.add(p);
+          error = String(e);
+        }
+      } finally {
+        busy = "";
       }
-    } catch (e) {
-      for (const p of pending) unloadable.add(p);
-      error = String(e);
-    } finally {
-      loading = false;
-      busy = "";
-      version++;
-    }
+    });
   }
 
   /** Loads the entries of folders that are open but came without them, e.g. after a refresh. */
-  async function loadOpened() {
-    if (!result || provisional || loading) return;
+  function loadOpened() {
+    if (!result || provisional || loading) return loading;
     const root = result.root;
     const missing = (p: string) => !unloadable.has(p) && !!findNode(root, p)?.unexpanded;
-    const pending = [...expanded].filter(missing).sort((a, b) => a.length - b.length);
-    if (!pending.length) return;
-    loading = true;
-    try {
+    const pending = [...expanded];
+    if (!pending.some(missing)) return;
+    // Nested open folders can be absent until their lazy parent is loaded.
+    pending.sort((a, b) => a.length - b.length);
+    return loadEntries(async () => {
       for (const p of pending) {
         if (result?.root !== root) break;
-        if (!missing(p)) continue;
+        if (!expanded.has(p) || !missing(p)) continue;
         try {
-          replaceNode(root, p, await api.expand(session.id, p, $state.snapshot(options)));
+          const fresh = await api.expand(session.id, p, $state.snapshot(options));
+          if (result?.root !== root) break;
+          replaceNode(root, p, fresh);
         } catch {
+          if (result?.root !== root) break;
           unloadable.add(p);
           expanded.delete(p);
         }
       }
-    } finally {
-      loading = false;
-      version++;
-    }
+    });
   }
 
   // The tree holds identical folders without their entries. Whatever replaced a
@@ -320,7 +334,10 @@
 
   /** Switches the flat view; identical folders not walked yet are loaded first, so their files show. */
   async function setFlat(on: boolean) {
-    if (on) await loadSkipped();
+    if (on) {
+      if (loading) await loading;
+      await loadSkipped();
+    }
     flat = on;
     version++;
   }
@@ -332,8 +349,10 @@
 
   /** Forgets comparisons of matched files at or below `paths`. */
   function forgetPairs(paths: string[]) {
-    for (const key of [...pairStatus.keys()]) {
-      if (key.split("\n").some((p) => paths.some((q) => p === q || p.startsWith(q + "/") || q === ""))) pairStatus.delete(key);
+    pairGeneration++;
+    const affected = (path: string) => paths.some((p) => p === "" || path === p || path.startsWith(p + "/"));
+    for (const [left, { right }] of pairStatus) {
+      if (affected(left) || affected(right)) pairStatus.delete(left);
     }
   }
   const counts = $derived.by(() => {
@@ -480,14 +499,16 @@
     revealPath(reveal.path);
   });
 
-  async function revealPath(path: string) {
+  async function revealPath(path: string, keepFilter = false) {
     if (!result) return;
-    const parts = path.split("/");
-    for (let i = 1; i < parts.length; i++) {
-      const folder = parts.slice(0, i).join("/");
-      if (!expanded.has(folder)) await toggle(folder);
+    if (!flat) {
+      const parts = path.split("/");
+      for (let i = 1; i < parts.length; i++) {
+        const folder = parts.slice(0, i).join("/");
+        if (!expanded.has(folder)) await toggle(folder);
+      }
     }
-    if (filter !== "all" && !rows.some((r) => r.path === path)) {
+    if (!keepFilter && filter !== "all" && !rows.some((r) => r.path === path)) {
       filter = "all";
       version++;
     }
@@ -573,8 +594,9 @@
   let elapsed = $state(0);
   let ticker: ReturnType<typeof setInterval> | undefined;
   /** How the last comparison ended when it was cancelled: shown until the next one. */
-  let cancelled = $state<{ seconds: number } | null>(null);
+  let cancelled = $state<{ seconds: number; previous: boolean } | null>(null);
   let cancelling = $state(false);
+  let compareRun = 0;
 
   function cancelRun() {
     cancelling = true;
@@ -588,6 +610,10 @@
    * new one is there; otherwise the entries show as the compare finds them.
    */
   async function run(invalidate = false) {
+    const runId = ++compareRun;
+    pairGeneration++;
+    const keepView = invalidate && result !== null && !provisional;
+    const previous = keepView && (!cancelled || cancelled.previous);
     running = true;
     error = "";
     progress = 0;
@@ -614,9 +640,20 @@
     }
     try {
       const r = await api.runCompare(session.id, $state.snapshot(options), invalidate);
+      if (runId !== compareRun) return;
+      // The new tree already contains changes seen during the compare.
+      deferred.clear();
+      deferredFull = false;
+      if (keepView && loading) await loading;
+      if (runId !== compareRun) return;
+      const top = viewport?.scrollTop ?? 0;
+      const visibleTop = vTop;
+      const topPath = keepView ? rows[Math.floor(visibleTop / ROW)]?.path : undefined;
       // Open folders with differences, but keep huge trees collapsed.
-      const opened = provisional ? [...expanded] : [];
-      expanded = new Set([...differingFolders(r.root, r.summary.files > 20000 ? 0 : 400), ...opened]);
+      if (!keepView) {
+        const opened = provisional ? [...expanded] : [];
+        expanded = new Set([...differingFolders(r.root, r.summary.files > 20000 ? 0 : 400), ...opened]);
+      }
       unloadable = new Set();
       pairStatus = new Map();
       provisional = false;
@@ -626,12 +663,20 @@
         const state = restoring;
         restoring = null;
         await finishRestore(state);
+      } else if (keepView) {
+        await (flat ? loadSkipped() : loadOpened());
+        await tick();
+        if (runId === compareRun && viewport) {
+          const index = topPath === undefined ? -1 : rows.findIndex((row) => row.path === topPath);
+          viewport.scrollTop = index < 0 ? top : (index * ROW + visibleTop % ROW) / scale;
+          scrollTop = viewport.scrollTop;
+        }
       }
     } catch (e) {
+      if (runId !== compareRun) return;
       const wasCancelled = String(e) === "cancelled";
       if (wasCancelled && cancelling) {
-        // What was found so far stays on screen, said to be partial.
-        cancelled = { seconds: (performance.now() - startedAt) / 1000 };
+        cancelled = { seconds: (performance.now() - startedAt) / 1000, previous };
         provisional = false;
         version++;
       } else if (!wasCancelled) {
@@ -643,14 +688,15 @@
         version++;
       }
     } finally {
-      running = false;
-      cancelling = false;
-      activity = null;
-      clearInterval(ticker);
+      if (runId === compareRun) {
+        running = false;
+        cancelling = false;
+        activity = null;
+        clearInterval(ticker);
+      }
     }
-    // Changes that came in during the compare are in the new result already.
-    deferred.clear();
-    deferredFull = false;
+    // Keep watcher events that arrived while the refreshed view was being restored.
+    if (runId === compareRun && !cancelled) void flushChanges();
   }
 
   onMount(() => {
@@ -695,16 +741,20 @@
 
   async function toggle(path: string) {
     if (!result) return;
+    const root = result.root;
     if (expanded.has(path)) {
       expanded.delete(path);
     } else {
-      const node = findNode(result.root, path);
+      const node = findNode(root, path);
       if (node?.unexpanded) {
         busy = `Loading ${path}…`;
         try {
           // An archive compared as a file may turn out to have the same entries.
-          replaceNode(result.root, path, await api.expand(session.id, path, $state.snapshot(options)));
+          const fresh = await api.expand(session.id, path, $state.snapshot(options));
+          if (result?.root !== root) return;
+          replaceNode(root, path, fresh);
         } catch (e) {
+          if (result?.root !== root) return;
           error = String(e);
         } finally {
           busy = "";
@@ -717,16 +767,24 @@
 
   async function setAll(open: boolean) {
     if (!result) return;
-    if (open) await loadSkipped();
+    if (open) {
+      if (loading) await loading;
+      await loadSkipped();
+    }
+    if (!result) return;
     expanded = open ? new Set(allFolders(result.root)) : new Set();
     version++;
   }
 
   function activate(path: string, container: boolean) {
     selectOnly(path);
-    const right = rowByPath.get(path)?.rightPath;
     if (container) toggle(path);
-    else if (right && onCompareRows) onCompareRows({ path, left: true }, { path: right, left: false });
+    else openComparison(path);
+  }
+
+  function openComparison(path: string) {
+    const right = sidePath(path, false);
+    if (right !== path && onCompareRows) onCompareRows({ path, left: true }, { path: right, left: false });
     else onOpenFile(path);
   }
 
@@ -766,37 +824,51 @@
     else if (top + ROW > at + viewHeight) viewport.scrollTop = (top + 2 * ROW - viewHeight) / scale;
   }
 
-  /** Files that differ (or exist on one side only, or failed), in tree order, also in closed folders. */
-  function differingFiles(): string[] {
-    if (!result) return [];
+  /** Files that differ in the current view, including files inside closed tree folders. */
+  const differingFiles = $derived.by(() => {
+    void version;
+    if (!result || filter === "same") return [];
+    const scope = filter === "all" ? "diffs" : filter;
+    const accepts = (node: Node, path: string) =>
+      node.status !== "same" && node.status !== "pending" && selfMatches(node, scope) &&
+      (!onlyCommented || !prCounts || prCounts.has(path));
+    if (flat) return rows.filter((row) => !row.pending && accepts(row.node, row.path)).map((row) => row.path);
+
     const out: string[] = [];
     const walk = (node: Node, dir: string) => {
       for (const child of node.children ?? []) {
-        const path = dir ? `${dir}/${child.name}` : child.name;
-        const container = (child.children?.length ?? 0) > 0;
-        if (container) walk(child, path);
-        else if (child.status !== "same" && child.status !== "pending" && filterAccepts(child)) out.push(path);
+        const path = joinPath(dir, child.name);
+        if (isContainer(child) && child.status !== "error" && !closedArchive(child)) walk(child, path);
+        else if (accepts(child, path)) out.push(path);
       }
     };
     walk(result.root, "");
     return out;
-  }
-
-  const filterAccepts = (node: Node) => filter === "all" || filter === "diffs" || selfMatches(node, filter);
+  });
 
   /** Selects the next (or previous) file that differs, opening folders on the way. */
   function nextDifference(dir: 1 | -1) {
-    const files = differingFiles();
+    const files = differingFiles;
     if (!files.length) return;
     const at = selected ? files.findIndex((p) => p === selected) : -1;
     let index: number;
     if (at >= 0) index = (at + dir + files.length) % files.length;
-    else {
+    else if (flat) {
+      const candidates = new Set(files);
+      for (let i = selectedIndex < 0 ? (dir > 0 ? 0 : rows.length - 1) : selectedIndex + dir;
+        i >= 0 && i < rows.length; i += dir) {
+        if (candidates.has(rows[i].path)) {
+          revealPath(rows[i].path, true);
+          return;
+        }
+      }
+      index = dir > 0 ? 0 : files.length - 1;
+    } else {
       // From a row that is not a differing file: the next one after it in tree order.
       const after = selected ? files.findIndex((p) => p.localeCompare(selected!) > 0) : 0;
       index = dir > 0 ? (after < 0 ? 0 : after) : (after <= 0 ? files.length - 1 : after - 1);
     }
-    revealPath(files[index]);
+    revealPath(files[index], true);
   }
 
   function onKey(e: KeyboardEvent) {
@@ -1124,7 +1196,7 @@
     const items: MenuItem[] = [
       row.container
         ? { label: row.expanded ? "Collapse" : "Expand", keys: row.expanded ? "←" : "→", run: () => toggle(path) }
-        : { label: multiple ? "Open clicked comparison" : "Open comparison", detail: multiple ? path : undefined, keys: "Enter", run: () => onOpenFile(path) },
+        : { label: multiple ? "Open clicked comparison" : "Open comparison", detail: multiple ? path : undefined, keys: "Enter", run: () => openComparison(path) },
     ];
     if (pair && onCompareRows) {
       const [a, b] = pair;
@@ -1313,8 +1385,8 @@
     <button onclick={() => run(true)} disabled={running} title="Compare again (F5)">⟳{#if !compact}{" "}Refresh{/if}</button>
     <button onclick={onSwap} title="Swap left and right">⇄{#if !compact}{" "}Swap{/if}</button>
     <span class="sep"></span>
-    <button onclick={() => nextDifference(-1)} disabled={!counts || matchingCount(counts, "diffs") === 0} title="Previous difference (F7)">‹{#if !compact}{" "}Previous{/if}</button>
-    <button onclick={() => nextDifference(1)} disabled={!counts || matchingCount(counts, "diffs") === 0} title="Next difference (F8)">{#if !compact}Next difference{" "}{/if}›</button>
+    <button onclick={() => nextDifference(-1)} disabled={!differingFiles.length} title="Previous difference (F7)">‹{#if !compact}{" "}Previous{/if}</button>
+    <button onclick={() => nextDifference(1)} disabled={!differingFiles.length} title="Next difference (F8)">{#if !compact}Next difference{" "}{/if}›</button>
     <span class="sep"></span>
     <span class="patterns" class:active={options.includes.length > 0}>
       <input
@@ -1402,9 +1474,9 @@
     <div class="progress done" role="status">
       <div class="pline">
         <b class="warn">Cancelled after {cancelled.seconds.toFixed(1)} s</b>
-        <span>The list is partial: it holds what was finished before the stop.</span>
+        <span>{cancelled.previous ? "Showing the results from before the refresh." : "The list is partial: it holds what was finished before the stop."}</span>
         <span class="grow"></span>
-        <button class="small primary" onclick={() => run()}>Compare again</button>
+        <button class="small primary" onclick={() => run(cancelled?.previous)}>Compare again</button>
       </div>
     </div>
   {/if}
@@ -1569,7 +1641,7 @@
         <span class="dim">{options.mode === "quick" ? "same size and date" : "same bytes"}</span>
       {/if}
       <span class="grow"></span>
-      {#if !selectedRow.container && n.left && n.right}<button class="link" onclick={() => onOpenFile(selectedRow!.path)}>Open comparison (Enter)</button>{/if}
+      {#if !selectedRow.container && n.left && n.right}<button class="link" onclick={() => openComparison(selectedRow!.path)}>Open comparison (Enter)</button>{/if}
     </div>
   {/if}
 
@@ -1579,7 +1651,7 @@
     {:else if result && counts}
       {@const s = result.summary}
       <span>Showing <b>{matchingFiles.toLocaleString()}</b> of <b>{counts.files.toLocaleString()}</b> files</span>
-      {#if cancelled}<span>partial: cancelled</span>{:else}<span>compared in <b>{s.elapsedMs < 1000 ? `${s.elapsedMs} ms` : `${(s.elapsedMs / 1000).toFixed(2)} s`}</b>{s.identicalSubtrees ? ` · ${s.identicalSubtrees.toLocaleString()} identical folders skipped via Git tree ids` : ""}</span>{/if}
+      {#if cancelled}<span>{cancelled.previous ? "refresh cancelled · previous results" : "partial: cancelled"}</span>{:else}<span>compared in <b>{s.elapsedMs < 1000 ? `${s.elapsedMs} ms` : `${(s.elapsedMs / 1000).toFixed(2)} s`}</b>{s.identicalSubtrees ? ` · ${s.identicalSubtrees.toLocaleString()} identical folders skipped via Git tree ids` : ""}</span>{/if}
     {/if}
     {#if busy}<span>{busy}</span>{/if}
     {#if op}

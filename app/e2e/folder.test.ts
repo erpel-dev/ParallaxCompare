@@ -127,6 +127,103 @@ test('flat view asks for everything once', async () => {
   assert.match(await statusLine(), /Showing 23 of 23 files/);
 });
 
+async function openMatchedFolder() {
+  await page.goto(origin + '/?matched');
+  await page.getByText('Showing').waitFor();
+}
+
+test('difference navigation follows the active filter and resolved Flat rows', async () => {
+  await openMatchedFolder();
+  const diffs = page.getByRole('button', { name: /^All differences / });
+  const next = page.getByRole('button', { name: /Next difference/ });
+  const changed = row('changed-move.txt');
+  await diffs.click();
+  await next.click();
+  await rows().and(page.locator('[aria-selected=true]')).waitFor();
+  assert.equal(await diffs.getAttribute('aria-pressed'), 'true');
+  await filter('Errors').click();
+  assert.equal(await next.isDisabled(), true);
+
+  await page.getByRole('button', { name: 'Flat', exact: true }).click();
+  await page.getByRole('button', { name: 'Different 1', exact: true }).click();
+  await next.click();
+  assert.equal(await changed.getAttribute('aria-selected'), 'true');
+  await diffs.click();
+  await next.click();
+  assert.equal(await diffs.getAttribute('aria-pressed'), 'true');
+  assert.equal(await changed.getAttribute('aria-selected'), 'true');
+});
+
+test('opening matched comparisons uses their actual right-hand paths', async () => {
+  await openMatchedFolder();
+  const same = row('same␊name.txt');
+  const changed = row('changed-move.txt');
+  const folderTab = page.getByRole('tab', { name: /left.*right/ });
+  await page.getByRole('button', { name: 'Flat', exact: true }).click();
+  await page.getByRole('button', { name: 'Different 1', exact: true }).waitFor();
+  for (const open of [
+    () => page.keyboard.press('Enter'),
+    () => page.getByRole('button', { name: 'Open comparison (Enter)' }).click(),
+    async () => {
+      await same.locator('[data-side=right]').click({ button: 'right' });
+      await page.getByRole('menuitem', { name: /^Open comparison/ }).click();
+    },
+  ]) {
+    await same.click();
+    const before = await count('open_session');
+    await open();
+    await page.locator('.code:visible').first().waitFor();
+    assert.equal(await count('open_session'), before + 1);
+    const request = (await calls('open_session')).at(-1);
+    assert.equal(request.right.path, '/work/right/after/same\nname.txt');
+    await folderTab.click();
+  }
+  await changed.click();
+  await same.click({ modifiers: ['Control'] });
+  await page.getByRole('button', { name: /Compare these/ }).click();
+  await page.locator('.code:visible').first().waitFor();
+  const request = (await calls('open_session')).at(-1);
+  assert.equal(request.left.path, '/work/left/before/changed-move.txt');
+  assert.equal(request.right.path, '/work/right/after/same\nname.txt');
+});
+
+test('a watcher change invalidates a matched filename containing a line break', async () => {
+  await openMatchedFolder();
+  await page.getByRole('button', { name: 'Flat', exact: true }).click();
+  await page.getByRole('button', { name: 'Same 1', exact: true }).waitFor();
+  await page.evaluate(() => (window as any).__backend.editMovedFile('same\nname.txt'));
+  await page.getByRole('button', { name: 'Different 2', exact: true }).waitFor({ timeout: 5000 });
+  assert.deepEqual((await calls('compare_pairs')).at(-1).pairs, [['before/same\nname.txt', 'after/same\nname.txt']]);
+});
+
+test('refresh preserves open folders and selection, including after a cancelled refresh', async () => {
+  await page.setViewportSize({ width: 1400, height: 420 });
+  await row('mixed').locator('.chev').first().click();
+  await row('equal').locator('.chev').first().click();
+  await row('inner').locator('.chev').first().click();
+  const selected = row('i02.txt');
+  await selected.click();
+  const tree = page.getByRole('tree');
+  const scrollTop = await tree.evaluate((node) => (node.scrollTop = 80, node.scrollTop));
+  assert.ok(scrollTop > 0);
+  const refresh = page.getByRole('button', { name: /Refresh/ });
+
+  await page.evaluate(() => (window as any).__backend.holdRefresh());
+  await refresh.click();
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await page.getByText('Showing the results from before the refresh.').waitFor();
+  assert.match(await statusLine(), /refresh cancelled · previous results/);
+  assert.equal(await selected.getAttribute('aria-selected'), 'true');
+
+  await page.getByRole('button', { name: 'Compare again', exact: true }).click();
+  await page.locator('.status').getByText('compared in', { exact: false }).waitFor();
+  await selected.waitFor();
+  assert.equal(await selected.getAttribute('aria-selected'), 'true');
+  assert.equal(await row('mixed').getAttribute('aria-expanded'), 'false');
+  assert.equal(await tree.evaluate((node) => node.scrollTop), scrollTop);
+  assert.equal((await calls('run_compare')).at(-1).invalidate, true);
+});
+
 test('a superseded find-side search leaves the row filter and selection in place', async () => {
   await row('changed.txt').dblclick();
   await page.getByText('needle', { exact: true }).first().waitFor();

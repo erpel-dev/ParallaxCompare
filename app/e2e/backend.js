@@ -11,7 +11,14 @@
 
   // equal/: identical, with a folder inside. mixed/: one changed file, one only
   // on the left, an identical folder. odd/: names with a tab and a line break.
-  const root = folder("", [
+  const matched = new URLSearchParams(location.search).has("matched");
+  const movedNames = ["same\nname.txt", "changed-move.txt"];
+  const orphan = (name, left) => ({ name, left: left ? file() : null, right: left ? null : file(), status: left ? "leftOnly" : "rightOnly" });
+  const root = matched ? folder("", [
+    folder("aaa", [pair("line-endings.txt", "similar")]),
+    folder("before", movedNames.map((name) => orphan(name, true))),
+    folder("after", movedNames.map((name) => orphan(name, false))),
+  ]) : folder("", [
     folder("equal", [folder("inner", names(3, "i").map((n) => pair(n))), ...names(12, "e").map((n) => pair(n))]),
     folder("mixed", [
       folder("quiet", names(2, "q").map((n) => pair(n))),
@@ -75,15 +82,32 @@
   ];
   const fileSide = { exists: true, size: 14, binary: false, encoding: "UTF-8", lineEnding: "LF", bom: false, lines: 2, editable: false };
   const pendingSearches = new Map();
+  const listeners = new Map();
+  const changedPairs = new Set(["changed-move.txt"]);
+  let holdRefresh = false;
+  let rejectRefresh;
 
   const calls = [];
   const commands = {
     app_info: () => ({ version: "0.0.0", revision: "test", os: "linux", arch: "x86_64", tempDir: "/tmp" }),
     startup_request: () => ({ kind: "compare", left: { type: "local", path: "/work/left" }, right: { type: "local", path: "/work/right" }, mergeBase: false }),
-    open_session: () => ({ id: 1, left: source("/work/left"), right: source("/work/right"), isFile: false }),
+    open_session: ({ left, right }) => ({
+      id: left.path === "/work/left" ? 1 : 3,
+      left: source(left.path),
+      right: source(right.path),
+      isFile: left.path.endsWith(".txt"),
+    }),
     close_session: () => null,
-    side_source: ({ left, path }) => ({ type: "local", path: `/work/${left ? "left" : "right"}/${path}` }),
-    run_compare: () => ({ root: view(root, false), summary: summary() }),
+    side_source: ({ left, rel }) => ({ type: "local", path: `/work/${left ? "left" : "right"}/${rel}` }),
+    run_compare: ({ invalidate }) => {
+      if (invalidate && holdRefresh) {
+        holdRefresh = false;
+        return new Promise((_, reject) => (rejectRefresh = reject));
+      }
+      return { root: view(root, false), summary: summary() };
+    },
+    cancel_compare: () => rejectRefresh?.("cancelled"),
+    compare_pairs: ({ pairs }) => pairs.map(([, right]) => ({ status: changedPairs.has(right.split("/").at(-1)) ? "different" : "same", message: null })),
     expand: ({ path, deep }) => view(find(path), !!deep),
     refresh_paths: ({ paths }) => paths.map((p) => (find(p) ? entry(find(p)) : null)),
     delete_entries: ({ paths, left }) => ({ nodes: paths.map((p) => remove(p, left)), error: null, notTrashed: [] }),
@@ -125,14 +149,24 @@
     async invoke(command, args = {}) {
       calls.push({ command, args });
       if (command in commands) return structuredClone(await commands[command](args));
-      // Window, event and other plugin calls, and commands these tests do not need.
-      return command.startsWith("plugin:event|listen") ? ++callbacks : null;
+      if (command === "plugin:event|listen") {
+        listeners.set(args.event, [...(listeners.get(args.event) ?? []), args.handler]);
+        return ++callbacks;
+      }
+      return null;
     },
   };
   window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
   window.__backend = {
     calls,
     count: (name) => calls.filter((c) => c.command === name).length,
+    holdRefresh() { holdRefresh = true; },
+    editMovedFile(name) {
+      changedPairs.add(name);
+      for (const handler of listeners.get("paths-changed") ?? []) {
+        window[`_${handler}`]({ event: "paths-changed", payload: { session: 1, paths: [`after/${name}`] } });
+      }
+    },
     async finishSearch(side) {
       const finish = pendingSearches.get(side);
       if (!finish) throw new Error(`No pending ${side} search`);
