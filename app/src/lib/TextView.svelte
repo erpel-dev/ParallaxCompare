@@ -601,14 +601,15 @@
     problems = [null, null];
     const top = viewport?.scrollTop ?? 0;
     try {
-      const opened = await api.openFileDiff(session.id, path, $state.snapshot(options), syntaxOverride || null, view, $state.snapshot(flatbufferSchemas));
+      const comparison = await api.openFileDiff(session.id, path, $state.snapshot(options), syntaxOverride || null, view, $state.snapshot(flatbufferSchemas));
       // The tab was closed or loaded again meanwhile: nothing shows this diff.
       if (destroyed || run !== loads) {
-        api.closeFileDiff(opened.id);
+        api.closeFileDiff(comparison.id);
         return;
       }
       const previous = info?.id;
-      info = opened;
+      const sameView = info?.view === comparison.view;
+      info = comparison;
       view = info.view;
       dirty = [false, false];
       canUndo = canRedo = false;
@@ -616,6 +617,8 @@
       caretWanted = null;
       ahead = [];
       anchor = null;
+      if (!sameView) opened = [];
+      if (!sameView || (selected !== null && selected >= info.rows)) selected = null;
       resetRows();
       section = -1;
       if (previous !== undefined) api.closeFileDiff(previous);
@@ -625,9 +628,12 @@
         selected = restoring.selected !== null && restoring.selected < info.rows ? restoring.selected : null;
         restoring = null;
         ensureLoaded();
-      } else if (keepPosition && viewport) viewport.scrollTop = top;
+      } else if (keepPosition && sameView && viewport) viewport.scrollTop = top;
       else if (info.sections.length) goTo(0);
-      else ensureLoaded();
+      else {
+        if (!sameView && viewport) viewport.scrollTop = 0;
+        ensureLoaded();
+      }
       if (findOpen && findQuery) runSearch(keepPosition);
     } catch (e) {
       if (run === loads && !destroyed) error = String(e);
