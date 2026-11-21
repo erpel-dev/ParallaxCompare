@@ -19,6 +19,13 @@ parallax-core = { path = "../crates/parallax-core" }
 # The last release on crates.io (October 2025). Newer GPUI exists only in Zed's
 # repository; see README.md.
 gpui = "=0.2.2"
+unicode-segmentation = "1"
+parking_lot = "0.12"
+
+[dev-dependencies]
+tempfile = "3"
+# Headless window, simulated keystrokes and prompt answers for the UI tests.
+gpui = { version = "=0.2.2", features = ["test-support"] }
 
 [patch.crates-io]
 # gpui 0.2.2 needs xattr 0.2.3, which no longer builds against current libc on

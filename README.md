@@ -370,12 +370,12 @@ npm run tauri build              # installers: MSI/NSIS on Windows, deb/rpm/AppI
 
 ### GPUI prototype
 
-`app-gpui/` is a second desktop front end, written with [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) instead of Tauri and Svelte, on the same `parallax-core`. It has the folder compare (filters, lazy folders, F7/F8) and the side-by-side text compare (highlighting, changed characters, F7/F8); both front ends build their text rows with `parallax_core::rows`. It is a workspace of its own, so its dependencies stay out of the main lockfile and CI. On Linux it needs the X11/Wayland, Vulkan and fontconfig development packages:
+`app-gpui/` is a second desktop front end, written with [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) instead of Tauri and Svelte, on the same `parallax-core`. It has tabs and a new-comparison screen, the folder compare (filters, Flat, copy and delete, include/exclude options, watching for changes) and the text compare (converted views, image compare, copying differences, line editing, undo, save, find), in light and dark; it does not have three-way merge or pull request review. Both front ends choose views with `parallax_core::file_view` and build their text rows with `parallax_core::rows`. It is a workspace of its own, so its dependencies stay out of the main lockfile and CI. On Linux it needs the X11/Wayland, Vulkan and fontconfig development packages:
 
 ```sh
 sudo apt install libxkbcommon-x11-dev libxcb1-dev libwayland-dev libvulkan-dev libfontconfig-dev libfreetype-dev
 cd app-gpui
-cargo run --release -- old/ new/   # any sources, as for the CLI: repo@main, a.zip!/dir …
+cargo run --release -- old/ new/   # any sources, as for the CLI: repo@main, a.zip!/dir …; no arguments: New comparison
 ```
 
 See [app-gpui/README.md](app-gpui/README.md) for what it covers, what it does not, and how it compares in size, memory and start-up.
@@ -397,6 +397,7 @@ crates/parallax-core/     UI-agnostic engine (also used by the CLI)
   syntaxes/               extra grammars (A2L, DBC, Intel HEX, S-record, FreeMarker, Conan, Xpand/Xtend/Check, view output)
   highlight.rs            syntect highlighting with checkpoints
   rows.rs                 side-by-side rows as both front ends show them
+  file_view.rs            which view two files open in, shared by both front ends
   source.rs               source syntax and opening, merge-base
 crates/parallax-cli/      the `parallax` command
 ```

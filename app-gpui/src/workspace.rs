@@ -1,10 +1,11 @@
-//! The window's content: opens the two sides, then shows the folder comparison
-//! (or, for two files, the text comparison). Opening a file from the folder view
-//! shows its text comparison on top; Back returns to the folders as they were.
+//! One comparison (one tab): opens the two sides, then shows the folder
+//! comparison (or, for two files, the text comparison). Opening a file from the
+//! folder view shows its text comparison on top; Back returns to the folders as
+//! they were, and a save there refreshes the file's row.
 
 use std::sync::Arc;
 
-use gpui::{AnyView, Context, Entity, FocusHandle, Focusable, SharedString, Subscription, Window, div, prelude::*, px};
+use gpui::{AnyView, Context, Entity, FocusHandle, Focusable, SharedString, Subscription, Window, div, prelude::*};
 
 use crate::folder::{FolderEvent, FolderView};
 use crate::session::Session;
@@ -32,11 +33,24 @@ impl Screen {
 }
 
 pub struct Workspace {
-    labels: [SharedString; 2],
+    pub labels: [SharedString; 2],
     session: Option<Arc<Session>>,
     error: Option<String>,
     stack: Vec<Screen>,
+    focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
+}
+
+impl Focusable for Workspace {
+    fn focus_handle(&self, cx: &gpui::App) -> FocusHandle {
+        self.stack.last().map_or_else(|| self.focus.clone(), |s| s.focus(cx))
+    }
+}
+
+/// The last part of a path or source, for tab titles.
+pub fn short_name(text: &str) -> String {
+    let trimmed = text.trim_end_matches(['/', '\\']);
+    trimmed.rsplit(['/', '\\']).next().filter(|s| !s.is_empty()).unwrap_or(trimmed).to_string()
 }
 
 impl Workspace {
@@ -62,17 +76,21 @@ impl Workspace {
             session: None,
             error: None,
             stack: Vec::new(),
+            focus: cx.focus_handle(),
             _subscriptions: Vec::new(),
         }
+    }
+
+    pub fn title(&self) -> String {
+        let (l, r) = (short_name(&self.labels[0]), short_name(&self.labels[1]));
+        if l == r { l } else { format!("{l} ↔ {r}") }
     }
 
     fn opened(&mut self, session: Session, window: &mut Window, cx: &mut Context<Self>) {
         let session = Arc::new(session);
         self.session = Some(session.clone());
         if session.is_file {
-            // The window header already shows both paths; the view names the files.
-            let name = |s: &SharedString| s.rsplit(['/', '\\']).next().unwrap_or_default().to_string();
-            let title = format!("{}  ↔  {}", name(&self.labels[0]), name(&self.labels[1])).into();
+            let title = self.title().into();
             let view = cx.new(|cx| TextView::new(session, String::new(), title, false, cx));
             self.push(Screen::Text(view), window, cx);
         } else {
@@ -91,6 +109,11 @@ impl Workspace {
         let view = cx.new(|cx| TextView::new(session, path, title, true, cx));
         let sub = cx.subscribe_in(&view, window, |this, _, event: &TextEvent, window, cx| match event {
             TextEvent::Back => this.back(window, cx),
+            TextEvent::Saved(path) => {
+                if let Some(Screen::Folder(folder)) = this.stack.first() {
+                    folder.update(cx, |folder, cx| folder.refresh_paths(vec![path.clone()], cx));
+                }
+            }
         });
         self._subscriptions.push(sub);
         self.push(Screen::Text(view), window, cx);
@@ -114,39 +137,30 @@ impl Workspace {
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let fonts = style::fonts(cx);
-        let root =
-            div().size_full().flex().flex_col().bg(style::bg()).text_color(style::fg()).font_family(fonts.ui.clone());
-        let tabs = div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .px_3()
-            .h(px(32.))
-            .border_b_1()
-            .border_color(style::line())
-            .text_size(px(13.))
-            .child(
-                div()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child(format!("{}  ↔  {}", self.labels[0], self.labels[1])),
-            )
-            .child(div().flex_1())
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(style::faint())
-                    .child("GPUI prototype · same core as the Tauri app"),
-            );
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let root = div().size_full().flex().flex_col().track_focus(&self.focus);
         match (self.stack.last(), &self.error) {
-            (Some(screen), _) => root.child(tabs).child(div().flex_1().min_h_0().child(screen.view())),
-            (None, Some(e)) => root.child(tabs).child(
-                div().p_4().text_color(style::status_color(parallax_core::compare::Status::Error)).child(e.clone()),
+            (Some(screen), _) => root.child(div().flex_1().min_h_0().child(screen.view())),
+            (None, Some(e)) => root.child(
+                div()
+                    .p_4()
+                    .text_color(style::status_color(parallax_core::compare::Status::Error))
+                    .child(format!("Could not open the comparison: {e}")),
             ),
-            (None, None) => {
-                root.child(tabs).child(div().p_4().text_color(style::muted()).child("Opening the sources…"))
-            }
+            (None, None) => root.child(div().p_4().text_color(style::muted()).child("Opening the sources…")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::short_name;
+
+    #[test]
+    fn short_names_for_tabs() {
+        assert_eq!(short_name("/home/me/project/"), "project");
+        assert_eq!(short_name(r"C:\work\old"), "old");
+        assert_eq!(short_name("repo@main"), "repo@main");
+        assert_eq!(short_name("/"), "");
     }
 }

@@ -13,6 +13,7 @@ pub mod conflicts;
 pub mod convert;
 pub mod edit;
 pub mod error;
+pub mod file_view;
 pub mod highlight;
 pub mod merge;
 pub mod merge_session;

@@ -1,35 +1,76 @@
 //! The text comparison: two files side by side in one virtualized list. Each
 //! frame asks the core for the rows in view ([`parallax_core::rows::side_by_side`],
 //! the same function behind the Tauri app's `file_rows` command) and draws them.
-//! There is no row cache and no placeholder: building ~45 rows takes well under
-//! a frame, and the core's highlighter keeps its parse state between calls.
+//!
+//! Files open in the view the core chooses ([`parallax_core::file_view::choose`],
+//! shared with the Tauri app): text, a converted view, a hex dump or the image
+//! compare. Editing goes through the core's [`parallax_core::edit::EditSession`]:
+//! copying differences, editing a line, undo and redo, saving.
 
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{
-    ClickEvent, Context, EventEmitter, FocusHandle, Focusable, Font, Hsla, ScrollStrategy, SharedString, StyledText,
-    TextRun, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
+    ClickEvent, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, Font, Hsla, Image, ImageFormat,
+    MouseButton, MouseDownEvent, ObjectFit, PromptLevel, ScrollStrategy, ScrollWheelEvent, SharedString, StyledImage,
+    StyledText, Subscription, TextRun, UniformListScrollHandle, Window, div, img, point, prelude::*, px, uniform_list,
 };
+use parallax_core::convert::View;
+use parallax_core::edit::Side;
 use parallax_core::highlight::Span;
 use parallax_core::rows::{LineView, RowView};
-use parallax_core::textdiff::RowKind;
+use parallax_core::search::{Hit, SearchOptions};
+use parallax_core::textdiff::{DiffOptions, RowKind, WhitespaceMode};
 
 use crate::actions::*;
-use crate::session::{self, FileDiff, Session};
+use crate::input::{InputEvent, TextInput};
+use crate::menu::{self, Item, Menu};
+use crate::session::{self, FileDiff, SIDES, SaveError, Session};
 use crate::style::{self, TEXT_ROW};
 
 pub enum TextEvent {
     Back,
+    /// A side was saved: the folder view refreshes that path.
+    Saved(String),
+}
+
+struct Loaded {
+    diff: FileDiff,
+    /// Left, right and the mask of differing pixels, for the image compare.
+    images: [Option<Arc<Image>>; 3],
 }
 
 enum State {
     Loading,
-    Ready(Box<FileDiff>),
+    Ready(Box<Loaded>),
     Failed(String),
 }
 
+/// Rows selected on one side: from `anchor` to `head`, inclusive.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Selection {
+    side: Side,
+    anchor: u32,
+    head: u32,
+}
+
+impl Selection {
+    fn rows(&self) -> Range<u32> {
+        self.anchor.min(self.head)..self.anchor.max(self.head) + 1
+    }
+}
+
+struct FindState {
+    input: Entity<TextInput>,
+    options: SearchOptions,
+    hits: Vec<Hit>,
+    current: Option<usize>,
+    error: Option<String>,
+}
+
 pub struct TextView {
+    session: Arc<Session>,
     path: String,
     title: SharedString,
     focus: FocusHandle,
@@ -40,6 +81,17 @@ pub struct TextView {
     /// Opened from a folder comparison, so there is a way back.
     can_go_back: bool,
     opened_in: Option<f32>,
+    requested: Option<View>,
+    options: DiffOptions,
+    selection: Option<Selection>,
+    editing: Option<(Side, u32, Entity<TextInput>)>,
+    find: Option<FindState>,
+    /// Horizontal scroll of the text columns, in pixels.
+    h_offset: f32,
+    menu: Option<Menu>,
+    message: Option<SharedString>,
+    show_mask: bool,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl EventEmitter<TextEvent> for TextView {}
@@ -50,6 +102,13 @@ impl Focusable for TextView {
     }
 }
 
+fn image(side: Option<&parallax_core::convert::ImageSide>) -> Option<Arc<Image>> {
+    side.map(|s| {
+        let format = ImageFormat::from_mime_type(&s.mime).unwrap_or(ImageFormat::Png);
+        Arc::new(Image::from_bytes(format, s.bytes.clone()))
+    })
+}
+
 impl TextView {
     pub fn new(
         session: Arc<Session>,
@@ -58,24 +117,8 @@ impl TextView {
         can_go_back: bool,
         cx: &mut Context<Self>,
     ) -> Self {
-        let started = Instant::now();
-        let work = cx.background_executor().spawn({
-            let path = path.clone();
-            async move { session::open_file(&session, &path) }
-        });
-        cx.spawn(async move |this, cx| {
-            let result = work.await;
-            let _ = this.update(cx, |this, cx| {
-                this.opened_in = Some(started.elapsed().as_secs_f32());
-                this.state = match result {
-                    Ok(diff) => State::Ready(Box::new(diff)),
-                    Err(e) => State::Failed(e),
-                };
-                cx.notify();
-            });
-        })
-        .detach();
-        TextView {
+        let mut view = TextView {
+            session,
             path,
             title,
             focus: cx.focus_handle(),
@@ -84,11 +127,81 @@ impl TextView {
             current: None,
             can_go_back,
             opened_in: None,
+            requested: None,
+            options: DiffOptions::default(),
+            selection: None,
+            editing: None,
+            find: None,
+            h_offset: 0.0,
+            menu: None,
+            message: None,
+            show_mask: true,
+            _subscriptions: Vec::new(),
+        };
+        view.load(cx);
+        view
+    }
+
+    /// Opens the files (again) in the requested view, on a background thread.
+    fn load(&mut self, cx: &mut Context<Self>) {
+        let started = Instant::now();
+        let (session, path, requested, options) =
+            (self.session.clone(), self.path.clone(), self.requested, self.options);
+        let work =
+            cx.background_executor().spawn(async move { session::open_file(&session, &path, requested, options) });
+        cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let _ = this.update(cx, |this, cx| {
+                this.opened_in = Some(started.elapsed().as_secs_f32());
+                this.current = None;
+                this.selection = None;
+                this.editing = None;
+                this.state = match result {
+                    Ok(diff) => {
+                        let images = match &diff.image {
+                            Some(d) => [
+                                image(d.left.as_ref()),
+                                image(d.right.as_ref()),
+                                d.mask.as_ref().map(|m| Arc::new(Image::from_bytes(ImageFormat::Png, m.clone()))),
+                            ],
+                            None => [None, None, None],
+                        };
+                        State::Ready(Box::new(Loaded { diff, images }))
+                    }
+                    Err(e) => State::Failed(e),
+                };
+                this.search(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn diff(&self) -> Option<&FileDiff> {
+        match &self.state {
+            State::Ready(l) => Some(&l.diff),
+            _ => None,
         }
     }
 
+    fn diff_mut(&mut self) -> Option<&mut FileDiff> {
+        match &mut self.state {
+            State::Ready(l) => Some(&mut l.diff),
+            _ => None,
+        }
+    }
+
+    fn dirty(&self) -> bool {
+        self.diff().is_some_and(|d| SIDES.iter().any(|&s| d.dirty(s)))
+    }
+
+    fn say(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.message = Some(message.into());
+        cx.notify();
+    }
+
     fn jump(&mut self, forward: bool, cx: &mut Context<Self>) {
-        let State::Ready(diff) = &self.state else { return };
+        let Some(diff) = self.diff() else { return };
         let n = diff.sections().len();
         if n == 0 {
             return;
@@ -99,36 +212,496 @@ impl TextView {
             Some(i) if forward => (i + 1) % n,
             Some(i) => (i + n - 1) % n,
         };
-        self.current = Some(next);
         let row = diff.sections()[next].start as usize;
+        self.current = Some(next);
         self.scroll.scroll_to_item(row, ScrollStrategy::Center);
         cx.notify();
     }
 
-    fn render_rows(&mut self, range: std::ops::Range<usize>, mono: &Font) -> Vec<gpui::AnyElement> {
-        let State::Ready(diff) = &mut self.state else { return Vec::new() };
+    /// The difference to copy: the one jumped to, or the one holding the selection.
+    fn target_section(&self) -> Option<Range<u32>> {
+        let diff = self.diff()?;
+        if let Some(sel) = self.selection {
+            let row = sel.head;
+            if let Some(s) = diff.sections().iter().find(|s| s.start <= row && row < s.end) {
+                return Some(s.start..s.end);
+            }
+        }
+        let s = diff.sections().get(self.current?)?;
+        Some(s.start..s.end)
+    }
+
+    fn copy_difference(&mut self, to: Side, cx: &mut Context<Self>) {
+        let Some(rows) = self.target_section() else {
+            return self.say("Jump to a difference (F7/F8) or select a line in one first.", cx);
+        };
+        let Some(diff) = self.diff_mut() else { return };
+        if !diff.editable[to as usize] {
+            return self.say(format!("The {} side cannot be edited.", side_name(to)), cx);
+        }
+        if diff.copy_rows(rows, to) {
+            let n = diff.sections().len();
+            self.current = self.current.map(|i| i.min(n.saturating_sub(1))).filter(|_| n > 0);
+            self.say(format!("Copied the difference to the {} side.", side_name(to)), cx);
+        }
+    }
+
+    fn undo(&mut self, redo: bool, cx: &mut Context<Self>) {
+        let Some(diff) = self.diff_mut() else { return };
+        let done = if redo { diff.redo() } else { diff.undo() };
+        if done {
+            let n = diff.sections().len();
+            self.current = self.current.filter(|&i| i < n);
+            self.say(if redo { "Redone." } else { "Undone." }, cx);
+        }
+    }
+
+    fn save(&mut self, overwrite: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let session = self.session.clone();
+        let Some(diff) = self.diff_mut() else { return };
+        let mut saved = Vec::new();
+        for side in SIDES {
+            if !diff.dirty(side) {
+                continue;
+            }
+            match diff.save(&session, side, overwrite) {
+                Ok(()) => saved.push(side_name(side)),
+                Err(SaveError::Stale) => {
+                    let answer = window.prompt(
+                        PromptLevel::Warning,
+                        "The file changed on disk",
+                        Some("Another program changed it since it was opened. Overwrite it with the text shown here?"),
+                        &["Overwrite", "Cancel"],
+                        cx,
+                    );
+                    cx.spawn_in(window, async move |this, cx| {
+                        if answer.await == Ok(0) {
+                            let _ = this.update_in(cx, |this, window, cx| this.save(true, window, cx));
+                        }
+                    })
+                    .detach();
+                    return;
+                }
+                Err(SaveError::Failed(e)) => return self.say(e, cx),
+            }
+        }
+        if saved.is_empty() {
+            return self.say("Nothing to save.", cx);
+        }
+        cx.emit(TextEvent::Saved(self.path.clone()));
+        self.say(format!("Saved the {} side.", saved.join(" and ")), cx);
+    }
+
+    fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_go_back {
+            return;
+        }
+        if !self.dirty() {
+            return cx.emit(TextEvent::Back);
+        }
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            "Discard the unsaved changes?",
+            Some("The edits in this file have not been saved."),
+            &["Discard", "Cancel"],
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            if answer.await == Ok(0) {
+                let _ = this.update(cx, |_, cx| cx.emit(TextEvent::Back));
+            }
+        })
+        .detach();
+    }
+
+    fn select_row(&mut self, side: Side, row: u32, extend: bool, cx: &mut Context<Self>) {
+        self.selection = Some(match self.selection {
+            Some(s) if extend && s.side == side => Selection { head: row, ..s },
+            _ => Selection { side, anchor: row, head: row },
+        });
+        cx.notify();
+    }
+
+    fn move_selection(&mut self, down: bool, cx: &mut Context<Self>) {
+        let total = self.diff().map_or(0, FileDiff::rows_total) as u32;
+        if total == 0 {
+            return;
+        }
+        let sel = self.selection.unwrap_or(Selection { side: Side::Left, anchor: 0, head: 0 });
+        let row = if down { (sel.head + 1).min(total - 1) } else { sel.head.saturating_sub(1) };
+        self.selection = Some(Selection { side: sel.side, anchor: row, head: row });
+        self.scroll.scroll_to_item(row as usize, ScrollStrategy::Center);
+        cx.notify();
+    }
+
+    fn copy_lines(&mut self, cx: &mut Context<Self>) {
+        let (Some(sel), Some(diff)) = (self.selection, self.diff()) else { return };
+        let text = diff.rows_text(sel.side, sel.rows());
+        let lines = sel.rows().len();
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.say(
+            format!("Copied {lines} line{} from the {} side.", if lines == 1 { "" } else { "s" }, side_name(sel.side)),
+            cx,
+        );
+    }
+
+    fn edit_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(sel) = self.selection else { return self.say("Select a line to edit.", cx) };
+        let row = sel.head;
+        let Some(diff) = self.diff_mut() else { return };
+        if !diff.editable[sel.side as usize] {
+            return self.say(format!("The {} side cannot be edited.", side_name(sel.side)), cx);
+        }
+        let text = diff.rows_text(sel.side, row..row + 1);
+        let text = text.strip_suffix('\n').unwrap_or(&text).trim_end_matches('\r').to_string();
+        let input = cx.new(|cx| {
+            let mut input = TextInput::new("", cx).monospaced();
+            input.set_text(text, cx);
+            input
+        });
+        let side = sel.side;
+        let sub = cx.subscribe_in(&input, window, move |this, input, event: &InputEvent, window, cx| match event {
+            InputEvent::Submit { .. } => {
+                let text = input.read(cx).text().to_string();
+                if let Some(diff) = this.diff_mut() {
+                    diff.replace_row(side, row, &text);
+                }
+                this.editing = None;
+                window.focus(&this.focus);
+                this.say("Line changed.", cx);
+            }
+            InputEvent::Cancel => {
+                this.editing = None;
+                window.focus(&this.focus);
+                cx.notify();
+            }
+            InputEvent::Changed => {}
+        });
+        window.focus(&input.focus_handle(cx));
+        self.editing = Some((side, row, input));
+        self._subscriptions.push(sub);
+        cx.notify();
+    }
+
+    fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(find) = &self.find {
+            window.focus(&find.input.focus_handle(cx));
+            return;
+        }
+        let input = cx.new(|cx| TextInput::new("Find in both files", cx));
+        let sub = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| match event {
+            InputEvent::Changed => this.search(cx),
+            InputEvent::Submit { shift } => this.next_hit(!shift, cx),
+            InputEvent::Cancel => {
+                this.find = None;
+                window.focus(&this.focus);
+                cx.notify();
+            }
+        });
+        window.focus(&input.focus_handle(cx));
+        self.find =
+            Some(FindState { input, options: SearchOptions::default(), hits: Vec::new(), current: None, error: None });
+        self._subscriptions.push(sub);
+        cx.notify();
+    }
+
+    /// Searches both files with the core's search, as the `search_diff` command does.
+    fn search(&mut self, cx: &mut Context<Self>) {
+        let Some(find) = &self.find else { return };
+        let query = find.input.read(cx).text().to_string();
+        let result = self.diff().map(|d| d.search(&query, &find.options)).unwrap_or(Ok(Vec::new()));
+        let Some(find) = &mut self.find else { return };
+        match result {
+            Ok(hits) => {
+                find.hits = hits;
+                find.error = None;
+                find.current = None;
+            }
+            Err(e) => {
+                find.hits.clear();
+                find.error = Some(e);
+            }
+        }
+        self.next_hit(true, cx);
+    }
+
+    fn next_hit(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let Some(find) = &mut self.find else { return };
+        let n = find.hits.len();
+        if n == 0 {
+            find.current = None;
+            return cx.notify();
+        }
+        let next = match find.current {
+            None => 0,
+            Some(i) if forward => (i + 1) % n,
+            Some(i) => (i + n - 1) % n,
+        };
+        find.current = Some(next);
+        let row = find.hits[next].row as usize;
+        self.scroll.scroll_to_item(row, ScrollStrategy::Center);
+        cx.notify();
+    }
+
+    fn set_options(&mut self, options: DiffOptions, cx: &mut Context<Self>) {
+        self.options = options;
+        if let Some(diff) = self.diff_mut() {
+            diff.set_options(options);
+        }
+        self.current = None;
+        self.search(cx);
+        cx.notify();
+    }
+
+    fn scroll_by(&mut self, dx: f32, cx: &mut Context<Self>) {
+        self.h_offset = (self.h_offset + dx).clamp(0.0, 200_000.0);
+        cx.notify();
+    }
+
+    fn on_wheel(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let delta = event.delta.pixel_delta(px(TEXT_ROW));
+        let dx = if event.modifiers.shift { -f32::from(delta.y) } else { -f32::from(delta.x) };
+        if dx != 0.0 {
+            self.scroll_by(dx, cx);
+            cx.stop_propagation();
+        }
+    }
+
+    fn view_menu(&mut self, position: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+        let Some(diff) = self.diff() else { return };
+        let current = diff.view;
+        let weak = cx.entity().downgrade();
+        let items = diff
+            .views
+            .iter()
+            .map(|&v| {
+                let weak = weak.clone();
+                Item::run(v.label(), v == current, move |_, cx| {
+                    let _ = weak.update(cx, |this, cx| {
+                        this.requested = Some(v);
+                        this.state = State::Loading;
+                        this.load(cx);
+                    });
+                })
+            })
+            .collect();
+        self.menu = Some(Menu { position, items });
+        cx.notify();
+    }
+
+    fn options_menu(&mut self, position: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+        let o = self.options;
+        let weak = cx.entity().downgrade();
+        let set = move |options: DiffOptions| {
+            let weak = weak.clone();
+            move |_: &mut Window, cx: &mut gpui::App| {
+                let _ = weak.update(cx, |this, cx| this.set_options(options, cx));
+            }
+        };
+        let items = vec![
+            Item::run(
+                "Every whitespace difference counts",
+                o.whitespace == WhitespaceMode::Exact,
+                set(DiffOptions { whitespace: WhitespaceMode::Exact, ..o }),
+            ),
+            Item::run(
+                "Ignore leading, trailing and repeated whitespace",
+                o.whitespace == WhitespaceMode::Normalize,
+                set(DiffOptions { whitespace: WhitespaceMode::Normalize, ..o }),
+            ),
+            Item::run(
+                "Ignore all whitespace",
+                o.whitespace == WhitespaceMode::IgnoreAll,
+                set(DiffOptions { whitespace: WhitespaceMode::IgnoreAll, ..o }),
+            ),
+            Item::Separator,
+            Item::run("Ignore case", o.ignore_case, set(DiffOptions { ignore_case: !o.ignore_case, ..o })),
+            Item::run("Histogram diff", o.histogram, set(DiffOptions { histogram: !o.histogram, ..o })),
+        ];
+        self.menu = Some(Menu { position, items });
+        cx.notify();
+    }
+
+    fn row_menu(&mut self, position: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+        let editable = self.diff().map_or([false, false], |d| d.editable);
+        let side = self.selection.map_or(Side::Left, |s| s.side);
+        let in_section = self.target_section().is_some();
+        let items = vec![
+            Item::action("Copy lines", "Ctrl+C", self.selection.is_some(), Box::new(CopyLines)),
+            Item::action("Edit line…", "F2", editable[side as usize], Box::new(EditLine)),
+            Item::Separator,
+            Item::action(
+                "Copy difference to the left",
+                "Alt+←",
+                in_section && editable[0],
+                Box::new(CopyDifferenceLeft),
+            ),
+            Item::action(
+                "Copy difference to the right",
+                "Alt+→",
+                in_section && editable[1],
+                Box::new(CopyDifferenceRight),
+            ),
+            Item::Separator,
+            Item::action("Find in both files…", "Ctrl+F", true, Box::new(Find)),
+        ];
+        self.menu = Some(Menu { position, items });
+        cx.notify();
+    }
+
+    fn render_rows(&mut self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        let mono = style::mono(cx);
+        let selection = self.selection;
+        let offset = self.h_offset;
+        let editing = self.editing.as_ref().map(|(s, r, input)| (*s, *r, input.clone()));
+        let (hits, current_hit) = match &self.find {
+            Some(f) => {
+                let first = f.hits.partition_point(|h| (h.row as usize) < range.start);
+                let last = f.hits.partition_point(|h| (h.row as usize) < range.end);
+                (f.hits[first..last].to_vec(), f.current.and_then(|i| f.hits.get(i).cloned()))
+            }
+            None => (Vec::new(), None),
+        };
+        let current = self.current;
+        let State::Ready(loaded) = &mut self.state else { return Vec::new() };
+        let diff = &mut loaded.diff;
+        let current = current.and_then(|i| diff.sections().get(i)).map(|s| s.start as usize..s.end as usize);
         let start = range.start;
-        let current = self.current.and_then(|i| diff.sections().get(i)).map(|s| s.start as usize..s.end as usize);
-        diff.rows(range.start, range.len())
-            .into_iter()
+        let rows = diff.rows(range.start, range.len());
+        rows.into_iter()
             .enumerate()
-            .map(|(i, row)| render_row(&row, current.as_ref().is_some_and(|c| c.contains(&(start + i))), mono))
+            .map(|(i, row)| {
+                let index = start + i;
+                let ctx = RowContext {
+                    index: index as u32,
+                    current: current.as_ref().is_some_and(|c| c.contains(&index)),
+                    selection,
+                    hits: hits.iter().filter(|h| h.row as usize == index).cloned().collect(),
+                    current_hit: current_hit.clone().filter(|h| h.row as usize == index),
+                    editing: editing.clone().filter(|(_, r, _)| *r as usize == index).map(|(s, _, input)| (s, input)),
+                    offset,
+                };
+                self.render_row(&row, ctx, &mono, cx)
+            })
             .collect()
     }
 
-    fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (stats, position, sections) = match &self.state {
-            State::Ready(diff) => {
-                let s = diff.stats();
-                let n = diff.sections().len();
-                let position = match self.current {
-                    Some(i) => format!("{} / {}", i + 1, n),
-                    None => format!("– / {n}"),
-                };
-                (format!("{} changed · {} added · {} removed", s.changed, s.added, s.removed), position, n)
-            }
-            _ => (String::new(), String::new(), 0),
+    fn render_row(&self, row: &RowView, ctx: RowContext, mono: &Font, cx: &mut Context<Self>) -> gpui::AnyElement {
+        div()
+            .id(("row", ctx.index as usize))
+            .h(px(TEXT_ROW))
+            .w_full()
+            .flex()
+            .child(div().w(px(3.)).h_full().when(ctx.current, |d| d.bg(style::accent())))
+            .child(self.render_side(row.left.as_ref(), row.kind, Side::Left, &ctx, mono, cx))
+            .child(div().w(px(1.)).h_full().bg(style::line()))
+            .child(self.render_side(row.right.as_ref(), row.kind, Side::Right, &ctx, mono, cx))
+            .into_any_element()
+    }
+
+    fn render_side(
+        &self,
+        line: Option<&LineView>,
+        kind: RowKind,
+        side: Side,
+        ctx: &RowContext,
+        mono: &Font,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let (mut background, mark) = side_colors(kind, side == Side::Left);
+        let selected = ctx.selection.is_some_and(|s| s.side == side && s.rows().contains(&ctx.index));
+        if selected {
+            background = style::selection();
+        }
+        let row = ctx.index;
+        let base = div()
+            .id(("side", row as usize * 2 + side as usize))
+            .flex_1()
+            .w_0()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .items_center()
+            .bg(background)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                    window.focus(&this.focus);
+                    this.select_row(side, row, e.modifiers.shift, cx);
+                    if e.click_count >= 2 {
+                        this.edit_line(window, cx);
+                    }
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                    window.focus(&this.focus);
+                    if !this.selection.is_some_and(|s| s.side == side && s.rows().contains(&row)) {
+                        this.select_row(side, row, false, cx);
+                    }
+                    this.row_menu(e.position, cx);
+                }),
+            );
+        let number = div()
+            .w(px(64.))
+            .flex_none()
+            .flex()
+            .justify_end()
+            .pr_2()
+            .text_color(style::faint())
+            .child(line.map(|l| (l.number + 1).to_string()).unwrap_or_default());
+        if let Some((editing_side, input)) = &ctx.editing
+            && *editing_side == side
+        {
+            return base
+                .child(number)
+                .child(div().flex().flex_1().min_w_0().pr_1().child(input.clone()))
+                .into_any_element();
+        }
+        let Some(line) = line else {
+            let filler = if selected { style::selection() } else { style::chrome() };
+            return base.bg(filler).into_any_element();
         };
+        let s = side as u8;
+        let hits: Vec<(u32, u32, bool)> = ctx
+            .hits
+            .iter()
+            .filter(|h| h.side == s)
+            .map(|h| (h.start, h.end, ctx.current_hit.as_ref() == Some(h)))
+            .collect();
+        let (text, runs) = styled_line(line, mono, mark, &hits);
+        base.child(number)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .child(div().ml(px(-ctx.offset)).child(StyledText::new(text).with_runs(runs))),
+            )
+            .into_any_element()
+    }
+
+    fn header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let diff = self.diff();
+        let sections = diff.map_or(0, |d| d.sections().len());
+        let position = match (diff, self.current) {
+            (Some(_), Some(i)) => format!("{} / {}", i + 1, sections),
+            (Some(_), None) => format!("– / {sections}"),
+            _ => String::new(),
+        };
+        let stats = diff
+            .map(|d| {
+                let s = d.stats();
+                format!("{} changed · {} added · {} removed", s.changed, s.added, s.removed)
+            })
+            .unwrap_or_default();
+        let view_label = diff.map(|d| d.view.label()).unwrap_or("Text");
+        let editable = diff.map_or([false, false], |d| d.editable);
+        let (can_undo, can_redo) = diff.map_or((false, false), |d| (d.edit.can_undo(), d.edit.can_redo()));
+        let dirty = self.dirty();
+        let sep = || div().w(px(1.)).h(px(18.)).bg(style::line());
         div()
             .flex()
             .flex_wrap()
@@ -142,9 +715,16 @@ impl TextView {
             .when(self.can_go_back, |d| {
                 d.child(
                     style::button("back", "← Back", true)
-                        .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(TextEvent::Back))),
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.back(window, cx))),
                 )
+                .child(sep())
             })
+            .child(style::button("view", format!("{view_label} ▾"), diff.is_some()).on_click(cx.listener(
+                |this, e: &ClickEvent, _, cx| {
+                    let p = e.position();
+                    this.view_menu(point(p.x, p.y + px(12.)), cx)
+                },
+            )))
             .child(
                 style::button("prev", "‹ Previous", sections > 0)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.jump(false, cx))),
@@ -154,43 +734,141 @@ impl TextView {
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.jump(true, cx))),
             )
             .child(div().text_size(px(13.)).text_color(style::muted()).child(position))
-            .child(div().w(px(12.)))
+            .child(sep())
+            .child(
+                style::button("copy-left", "← Copy to left", editable[0] && sections > 0)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.copy_difference(Side::Left, cx))),
+            )
+            .child(
+                style::button("copy-right", "Copy to right →", editable[1] && sections > 0)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.copy_difference(Side::Right, cx))),
+            )
+            .child(
+                style::button("undo", "↶ Undo", can_undo)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.undo(false, cx))),
+            )
+            .child(
+                style::button("redo", "↷ Redo", can_redo)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.undo(true, cx))),
+            )
+            .child(
+                style::button("save", if dirty { "● Save" } else { "Save" }, dirty)
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.save(false, window, cx))),
+            )
+            .child(sep())
+            .child(
+                style::button("find", "Find", diff.is_some())
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_find(window, cx))),
+            )
+            .child(style::button("options", "Options ▾", diff.is_some()).on_click(cx.listener(
+                |this, e: &ClickEvent, _, cx| {
+                    let p = e.position();
+                    this.options_menu(point(p.x, p.y + px(12.)), cx)
+                },
+            )))
+            .child(div().w(px(8.)))
             .child(div().text_size(px(13.)).font_weight(gpui::FontWeight::SEMIBOLD).child(self.title.clone()))
             .child(div().flex_1())
             .child(div().text_size(px(12.)).text_color(style::muted()).child(stats))
+    }
+
+    fn find_bar(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let find = self.find.as_ref()?;
+        let summary = match (&find.error, find.hits.len(), find.current) {
+            (Some(e), _, _) => e.clone(),
+            (None, 0, _) => "No matches".to_string(),
+            (None, n, Some(i)) => format!("{} of {}", i + 1, style::group_digits(n as u64)),
+            (None, n, None) => style::group_digits(n as u64),
+        };
+        let o = find.options.clone();
+        let toggle = |id: &'static str, label: &'static str, on: bool, f: fn(&mut SearchOptions)| {
+            style::toggle(id, label, None, on).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                if let Some(find) = &mut this.find {
+                    f(&mut find.options);
+                }
+                this.search(cx);
+            }))
+        };
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .py_1p5()
+                .border_b_1()
+                .border_color(style::line())
+                .bg(style::chrome())
+                .child(div().flex().w(px(320.)).child(find.input.clone()))
+                .child(toggle("match-case", "Aa", o.match_case, |o| o.match_case = !o.match_case))
+                .child(toggle("whole-word", "Word", o.whole_word, |o| o.whole_word = !o.whole_word))
+                .child(toggle("regex", ".*", o.regex, |o| o.regex = !o.regex))
+                .child(
+                    style::button("hit-prev", "↑", !find.hits.is_empty())
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.next_hit(false, cx))),
+                )
+                .child(
+                    style::button("hit-next", "↓", !find.hits.is_empty())
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.next_hit(true, cx))),
+                )
+                .child(div().text_size(px(12.)).text_color(style::muted()).child(summary))
+                .child(div().flex_1())
+                .child(style::button("find-close", "✕", true).on_click(cx.listener(
+                    |this, _: &ClickEvent, window, cx| {
+                        this.find = None;
+                        window.focus(&this.focus);
+                        cx.notify();
+                    },
+                ))),
+        )
     }
 
     fn status(&self) -> impl IntoElement {
         let text = match &self.state {
             State::Loading => "Opening…".to_string(),
             State::Failed(e) => format!("Could not open {}: {e}", self.path),
-            State::Ready(diff) => {
+            State::Ready(loaded) if loaded.diff.view == View::Image => {
+                let side = |i: usize| {
+                    let s = &loaded.diff.sides[i];
+                    if s.exists { style::human_size(s.size) } else { "missing".to_string() }
+                };
+                format!(
+                    "Image compare · Left: {} · Right: {} · opened in {:.2} s",
+                    side(0),
+                    side(1),
+                    self.opened_in.unwrap_or_default()
+                )
+            }
+            State::Ready(loaded) => {
+                let diff = &loaded.diff;
                 let side = |i: usize| {
                     let s = &diff.sides[i];
+                    let dirty = if diff.dirty(SIDES[i]) { " · modified" } else { "" };
                     if s.exists {
                         format!(
-                            "{} · {} · {} lines · {}",
+                            "{} · {} · {} lines · {}{dirty}",
                             s.encoding,
                             s.line_ending_name(),
                             style::group_digits(s.lines as u64),
                             style::human_size(s.size)
                         )
                     } else {
-                        "missing".to_string()
+                        format!("missing{dirty}")
                     }
                 };
                 format!(
-                    "{} rows · {} · Left: {} · Right: {} · opened in {:.2} s{}",
+                    "{} rows · {} · Left: {} · Right: {} · opened in {:.2} s",
                     style::group_digits(diff.rows_total() as u64),
                     diff.syntax.clone().unwrap_or_else(|| "Plain text".into()),
                     side(0),
                     side(1),
                     self.opened_in.unwrap_or_default(),
-                    diff.note.as_ref().map(|n| format!(" · {n}")).unwrap_or_default(),
                 )
             }
         };
         div()
+            .flex()
+            .gap_3()
             .px_3()
             .py_1()
             .border_t_1()
@@ -198,70 +876,127 @@ impl TextView {
             .bg(style::chrome())
             .text_size(px(12.))
             .text_color(style::muted())
-            .child(text)
+            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().child(text))
+            .when_some(self.message.clone(), |d, m| d.child(div().text_color(style::fg()).child(m)))
+    }
+
+    fn render_image(&self, loaded: &Loaded, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some(d) = &loaded.diff.image else { return div().into_any_element() };
+        let panel = |i: usize, label: &str, side: &Option<parallax_core::convert::ImageSide>| {
+            let caption = side
+                .as_ref()
+                .map(|s| format!("{label}: {} × {} · {}", s.width, s.height, s.format))
+                .unwrap_or_else(|| format!("{label}: missing"));
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .p_3()
+                .child(div().text_size(px(12.)).text_color(style::muted()).child(caption))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .relative()
+                        .border_1()
+                        .border_color(style::line())
+                        .bg(style::chrome())
+                        .when_some(loaded.images[i].clone(), |d, image| {
+                            d.child(img(image).size_full().object_fit(ObjectFit::Contain))
+                        })
+                        .when(i == 1 && self.show_mask, |d| {
+                            d.when_some(loaded.images[2].clone(), |d, mask| {
+                                d.child(
+                                    div()
+                                        .absolute()
+                                        .inset_0()
+                                        .opacity(0.6)
+                                        .child(img(mask).size_full().object_fit(ObjectFit::Contain)),
+                                )
+                            })
+                        }),
+                )
+        };
+        let summary = if d.total_pixels > 0 {
+            format!(
+                "{} of {} pixels differ ({:.2} %)",
+                style::group_digits(d.different_pixels),
+                style::group_digits(d.total_pixels),
+                d.different_pixels as f64 * 100.0 / d.total_pixels as f64
+            )
+        } else {
+            String::new()
+        };
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .px_3()
+                    .pt_2()
+                    .text_size(px(12.))
+                    .child(div().text_color(style::muted()).child(summary))
+                    .child(
+                        style::toggle(
+                            "mask",
+                            "Mark differing pixels",
+                            Some(style::status_color(parallax_core::compare::Status::Different)),
+                            self.show_mask,
+                        )
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.show_mask = !this.show_mask;
+                            cx.notify();
+                        })),
+                    ),
+            )
+            .child(div().flex_1().min_h_0().flex().child(panel(0, "Left", &d.left)).child(panel(1, "Right", &d.right)))
+            .into_any_element()
     }
 }
 
-/// Background of a row's side by kind; `None` for a filler where the side has no line.
+/// What a row needs besides its lines: where it is and what is marked in it.
+struct RowContext {
+    index: u32,
+    current: bool,
+    selection: Option<Selection>,
+    hits: Vec<Hit>,
+    current_hit: Option<Hit>,
+    editing: Option<(Side, Entity<TextInput>)>,
+    offset: f32,
+}
+
+fn side_name(side: Side) -> &'static str {
+    match side {
+        Side::Left => "left",
+        Side::Right => "right",
+    }
+}
+
+/// Background of a row's side by kind, and of its changed characters.
 fn side_colors(kind: RowKind, left: bool) -> (Hsla, Hsla) {
-    // (line background, changed characters)
     match (kind, left) {
         (RowKind::Equal, _) => (style::bg(), style::bg()),
-        (RowKind::Minor, _) => (style::c(0xeef3fb), style::c(0xd6e2f7)),
-        (RowKind::Changed, _) => (style::c(0xfff3d6), style::c(0xf6c978)),
-        (RowKind::Removed, true) => (style::c(0xfde4e1), style::c(0xf4aaa3)),
-        (RowKind::Added, false) => (style::c(0xe2f4e4), style::c(0x9fd7a8)),
+        (RowKind::Minor, _) => style::minor(),
+        (RowKind::Changed, _) => style::changed(),
+        (RowKind::Removed, true) => style::removed(),
+        (RowKind::Added, false) => style::added(),
         _ => (style::chrome(), style::chrome()),
     }
-}
-
-fn render_row(row: &RowView, current: bool, mono: &Font) -> gpui::AnyElement {
-    div()
-        .h(px(TEXT_ROW))
-        .w_full()
-        .flex()
-        .child(div().w(px(3.)).h_full().when(current, |d| d.bg(style::accent())))
-        .child(render_side(row.left.as_ref(), row.kind, true, mono))
-        .child(div().w(px(1.)).h_full().bg(style::line()))
-        .child(render_side(row.right.as_ref(), row.kind, false, mono))
-        .into_any_element()
-}
-
-fn render_side(line: Option<&LineView>, kind: RowKind, left: bool, mono: &Font) -> impl IntoElement {
-    let (background, mark) = side_colors(kind, left);
-    let Some(line) = line else {
-        return div().flex_1().min_w_0().h_full().bg(style::chrome()).into_any_element();
-    };
-    let (text, runs) = styled_line(line, mono, mark);
-    div()
-        .flex_1()
-        .min_w_0()
-        .h_full()
-        .flex()
-        .items_center()
-        .bg(background)
-        .child(
-            div()
-                .w(px(64.))
-                .flex_none()
-                .flex()
-                .justify_end()
-                .pr_2()
-                .text_color(style::faint())
-                .child((line.number + 1).to_string()),
-        )
-        .child(
-            div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().child(StyledText::new(text).with_runs(runs)),
-        )
-        .into_any_element()
 }
 
 const TAB: usize = 4;
 
 /// The line as GPUI draws it: tabs expanded, cut ends marked, and text runs for
-/// the syntax colours (`spans`) and changed characters (`marks`), which the core
-/// gives in UTF-16 units.
-fn styled_line(line: &LineView, mono: &Font, mark: Hsla) -> (SharedString, Vec<TextRun>) {
+/// the syntax colours (`spans`), changed characters (`marks`) and search hits,
+/// which the core gives in UTF-16 units.
+fn styled_line(line: &LineView, mono: &Font, mark: Hsla, hits: &[(u32, u32, bool)]) -> (SharedString, Vec<TextRun>) {
     let src = line.text.as_str();
     // UTF-16 unit -> byte offset in `src`.
     let mut unit_to_byte = Vec::with_capacity(src.len() + 1);
@@ -297,15 +1032,24 @@ fn styled_line(line: &LineView, mono: &Font, mark: Hsla) -> (SharedString, Vec<T
     if line.cut_end.is_some() {
         out.push('…');
     }
-
+    // Search hits are given for the whole line; on a cut line they shift with it.
+    let shift = line.cut_start.unwrap_or(0);
     let spans: Vec<(usize, usize, Hsla)> =
         line.spans.iter().map(|&Span(a, b, color)| (out_at[byte(a)], out_at[byte(b)], style::c(color))).collect();
     let marks: Vec<(usize, usize)> = line.marks.iter().map(|&(a, b)| (out_at[byte(a)], out_at[byte(b)])).collect();
+    let hits: Vec<(usize, usize, bool)> = hits
+        .iter()
+        .filter(|h| h.1 > shift)
+        .map(|&(a, b, current)| (out_at[byte(a.saturating_sub(shift))], out_at[byte(b - shift)], current))
+        .collect();
     let mut cuts = vec![0, prefix.len(), body_end, out.len()];
     for &(a, b, _) in &spans {
         cuts.extend([a, b]);
     }
     for &(a, b) in &marks {
+        cuts.extend([a, b]);
+    }
+    for &(a, b, _) in &hits {
         cuts.extend([a, b]);
     }
     cuts.sort_unstable();
@@ -322,7 +1066,12 @@ fn styled_line(line: &LineView, mono: &Font, mark: Hsla) -> (SharedString, Vec<T
         } else {
             style::faint()
         };
-        let background = (in_body && marks.iter().any(|m| m.0 <= a && a < m.1)).then_some(mark);
+        let hit = hits.iter().find(|h| h.0 <= a && a < h.1);
+        let background = match hit {
+            Some(&(_, _, true)) if in_body => Some(style::accent_bg()),
+            Some(_) if in_body => Some(style::search_hit()),
+            _ => (in_body && marks.iter().any(|m| m.0 <= a && a < m.1)).then_some(mark),
+        };
         match runs.last_mut() {
             Some(last) if last.color == color && last.background_color == background => last.len += b - a,
             _ => runs.push(TextRun {
@@ -351,32 +1100,97 @@ impl Render for TextView {
                 .text_color(style::status_color(parallax_core::compare::Status::Error))
                 .child(e.clone())
                 .into_any_element(),
-            State::Ready(diff) => {
-                let rows = diff.rows_total();
-                let row_font = mono.clone();
-                uniform_list(
-                    "text-rows",
-                    rows,
-                    cx.processor(move |this, range: std::ops::Range<usize>, _window, _cx| {
-                        this.render_rows(range, &row_font)
-                    }),
-                )
-                .track_scroll(self.scroll.clone())
-                .flex_1()
-                .font(mono)
-                .text_size(px(13.))
-                .into_any_element()
+            State::Ready(loaded) if loaded.diff.view == View::Image => self.render_image(loaded, cx),
+            State::Ready(loaded) => {
+                let rows = loaded.diff.rows_total();
+                let note = loaded
+                    .diff
+                    .note
+                    .clone()
+                    .or_else(|| loaded.diff.identical.then(|| "The files are identical.".to_string()));
+                let equal_view = loaded.diff.equal_view;
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .when_some(note, |d, note| {
+                        d.child(
+                            div()
+                                .px_3()
+                                .py_1()
+                                .text_size(px(12.))
+                                .bg(style::accent_bg())
+                                .text_color(style::fg())
+                                .child(note),
+                        )
+                    })
+                    .when_some(equal_view, |d, v| {
+                        d.child(
+                            div()
+                                .id("equal-view")
+                                .px_3()
+                                .py_1()
+                                .text_size(px(12.))
+                                .bg(style::accent_bg())
+                                .text_color(style::accent())
+                                .cursor_pointer()
+                                .child(format!("The files are equal in “{}”. Show them there.", v.label()))
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    this.requested = Some(v);
+                                    this.state = State::Loading;
+                                    this.load(cx);
+                                })),
+                        )
+                    })
+                    .child(
+                        uniform_list(
+                            "text-rows",
+                            rows,
+                            cx.processor(|this, range: Range<usize>, _window, cx| this.render_rows(range, cx)),
+                        )
+                        .track_scroll(self.scroll.clone())
+                        .flex_1()
+                        .font(mono)
+                        .text_size(px(13.))
+                        .on_scroll_wheel(cx.listener(Self::on_wheel)),
+                    )
+                    .into_any_element()
             }
         };
+        let find_bar = self.find_bar(cx);
+        let menu = self.menu.as_ref().map(|m| {
+            let weak = cx.entity().downgrade();
+            menu::render("text-menu", m, move |_, cx| {
+                let _ = weak.update(cx, |this, cx| {
+                    this.menu = None;
+                    cx.notify();
+                });
+            })
+        });
         div()
             .key_context("TextView")
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &NextDifference, _, cx| this.jump(true, cx)))
             .on_action(cx.listener(|this, _: &PreviousDifference, _, cx| this.jump(false, cx)))
-            .on_action(cx.listener(|this, _: &Back, _, cx| {
-                if this.can_go_back {
-                    cx.emit(TextEvent::Back)
-                }
+            .on_action(cx.listener(|this, _: &Back, window, cx| this.back(window, cx)))
+            .on_action(cx.listener(|this, _: &CopyDifferenceLeft, _, cx| this.copy_difference(Side::Left, cx)))
+            .on_action(cx.listener(|this, _: &CopyDifferenceRight, _, cx| this.copy_difference(Side::Right, cx)))
+            .on_action(cx.listener(|this, _: &Undo, _, cx| this.undo(false, cx)))
+            .on_action(cx.listener(|this, _: &Redo, _, cx| this.undo(true, cx)))
+            .on_action(cx.listener(|this, _: &Save, window, cx| this.save(false, window, cx)))
+            .on_action(cx.listener(|this, _: &CopyLines, _, cx| this.copy_lines(cx)))
+            .on_action(cx.listener(|this, _: &EditLine, window, cx| this.edit_line(window, cx)))
+            .on_action(cx.listener(|this, _: &Find, window, cx| this.open_find(window, cx)))
+            .on_action(cx.listener(|this, _: &FindNext, _, cx| this.next_hit(true, cx)))
+            .on_action(cx.listener(|this, _: &FindPrevious, _, cx| this.next_hit(false, cx)))
+            .on_action(cx.listener(|this, _: &ScrollLeft, _, cx| this.scroll_by(-80.0, cx)))
+            .on_action(cx.listener(|this, _: &ScrollRight, _, cx| this.scroll_by(80.0, cx)))
+            .on_action(cx.listener(|this, _: &SelectNext, _, cx| this.move_selection(true, cx)))
+            .on_action(cx.listener(|this, _: &SelectPrevious, _, cx| this.move_selection(false, cx)))
+            .on_action(cx.listener(|this, _: &Refresh, _, cx| {
+                this.state = State::Loading;
+                this.load(cx)
             }))
             .size_full()
             .flex()
@@ -384,8 +1198,10 @@ impl Render for TextView {
             .bg(style::bg())
             .text_color(style::fg())
             .child(self.header(cx))
+            .children(find_bar)
             .child(body)
             .child(self.status())
+            .children(menu)
     }
 }
 
@@ -404,7 +1220,7 @@ mod tests {
         let mark = style::c(0xff0000);
         // "é" is one UTF-16 unit but two bytes; the emoji is two units and four bytes.
         let l = line("é😀ab", vec![Span(0, 1, 0x0000ff)], vec![(3, 4)]);
-        let (text, runs) = styled_line(&l, &mono, mark);
+        let (text, runs) = styled_line(&l, &mono, mark, &[]);
         assert_eq!(text.as_ref(), "é😀ab");
         assert_eq!(runs.iter().map(|r| r.len).sum::<usize>(), text.len());
         assert_eq!(runs[0].len, 2);
@@ -417,7 +1233,7 @@ mod tests {
     fn tabs_expand_and_shift_later_ranges() {
         let mono = font("monospace");
         let l = line("\tx", Vec::new(), vec![(1, 2)]);
-        let (text, runs) = styled_line(&l, &mono, style::c(0xff0000));
+        let (text, runs) = styled_line(&l, &mono, style::c(0xff0000), &[]);
         assert_eq!(text.as_ref(), "    x");
         let mut at = 0;
         for run in &runs {
@@ -433,8 +1249,141 @@ mod tests {
         let mono = font("monospace");
         let long = format!("{}needle{}", "a".repeat(20_000), "b".repeat(20_000));
         let l = LineView::window(0, &long, Vec::new(), vec![(20_000, 20_006)], None);
-        let (text, runs) = styled_line(&l, &mono, style::c(0xff0000));
+        let (text, runs) = styled_line(&l, &mono, style::c(0xff0000), &[]);
         assert!(text.starts_with('…') && text.ends_with('…'));
         assert_eq!(runs.iter().map(|r| r.len).sum::<usize>(), text.len());
+    }
+
+    #[test]
+    fn search_hits_get_their_own_background_and_the_current_one_stands_out() {
+        let mono = font("monospace");
+        let l = line("find me, find you", Vec::new(), Vec::new());
+        let (text, runs) = styled_line(&l, &mono, style::c(0xff0000), &[(0, 4, false), (9, 13, true)]);
+        let mut at = 0;
+        let mut seen = Vec::new();
+        for run in &runs {
+            if let Some(bg) = run.background_color {
+                seen.push((&text[at..at + run.len], bg == style::accent_bg()));
+            }
+            at += run.len;
+        }
+        assert_eq!(seen, [("find", false), ("find", true)]);
+    }
+
+    #[test]
+    fn selections_cover_rows_in_either_direction() {
+        let down = Selection { side: Side::Left, anchor: 3, head: 6 };
+        let up = Selection { side: Side::Left, anchor: 6, head: 3 };
+        assert_eq!(down.rows(), 3..7);
+        assert_eq!(up.rows(), 3..7);
+    }
+}
+
+/// The view driven like a user would, in a headless window.
+#[cfg(test)]
+mod ui_tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn copy_a_difference_edit_find_undo_and_save(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (l, r) = (dir.path().join("l.txt"), dir.path().join("r.txt"));
+        std::fs::write(&l, "alpha\nbeta\ngamma\n").unwrap();
+        std::fs::write(&r, "alpha\nBETA\ngamma\ndelta\n").unwrap();
+        let session = Arc::new(Session::open(&l.to_string_lossy(), &r.to_string_lossy()).unwrap());
+        cx.update(|cx| {
+            style::init(cx);
+            cx.bind_keys(crate::actions::bindings());
+            cx.bind_keys(crate::input::bindings());
+        });
+        let (view, cx) = cx.add_window_view(|_, cx| TextView::new(session, String::new(), "l ↔ r".into(), false, cx));
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| assert_eq!(view.diff().unwrap().sections().len(), 2));
+        cx.update(|window, cx| window.focus(&view.read(cx).focus));
+
+        // F8 to the first difference, Alt+← copies it to the left.
+        cx.simulate_keystrokes("f8 alt-left");
+        view.read_with(cx, |view, _| {
+            let diff = view.diff().unwrap();
+            assert_eq!(diff.sections().len(), 1);
+            assert!(diff.dirty(Side::Left));
+        });
+        // Ctrl+Z undoes it, Ctrl+Y does it again.
+        cx.simulate_keystrokes("ctrl-z");
+        view.read_with(cx, |view, _| assert_eq!(view.diff().unwrap().sections().len(), 2));
+        cx.simulate_keystrokes("ctrl-y");
+
+        // Edit the first line on the left: select it, F2, type, Enter.
+        view.update(cx, |view, cx| view.select_row(Side::Left, 0, false, cx));
+        cx.simulate_keystrokes("f2");
+        cx.simulate_keystrokes("ctrl-a");
+        cx.simulate_input("ALPHA");
+        cx.simulate_keystrokes("enter");
+        // Save writes the left file.
+        cx.simulate_keystrokes("ctrl-s");
+        cx.run_until_parked();
+        assert_eq!(std::fs::read_to_string(&l).unwrap(), "ALPHA\nBETA\ngamma\n");
+        assert_eq!(std::fs::read_to_string(&r).unwrap(), "alpha\nBETA\ngamma\ndelta\n");
+
+        // Find highlights matches on both sides; F3 moves through them.
+        cx.simulate_keystrokes("ctrl-f");
+        cx.simulate_input("alpha");
+        view.read_with(cx, |view, _| {
+            let find = view.find.as_ref().unwrap();
+            assert_eq!(find.hits.len(), 2, "ALPHA on the left and alpha on the right, ignoring case");
+            assert_eq!(find.current, Some(0));
+        });
+        cx.simulate_keystrokes("enter");
+        view.read_with(cx, |view, _| assert_eq!(view.find.as_ref().unwrap().current, Some(1)));
+        cx.simulate_keystrokes("escape");
+        view.read_with(cx, |view, _| assert!(view.find.is_none()));
+
+        // Ctrl+C copies the selected lines.
+        view.update(cx, |view, cx| {
+            view.select_row(Side::Right, 2, false, cx);
+            view.select_row(Side::Right, 3, true, cx);
+        });
+        cx.simulate_keystrokes("ctrl-c");
+        assert_eq!(cx.read_from_clipboard().and_then(|c| c.text()).as_deref(), Some("gamma\ndelta\n"));
+    }
+
+    #[gpui::test]
+    fn options_and_views(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (l, r) = (dir.path().join("a.json"), dir.path().join("b.json"));
+        std::fs::write(&l, r#"{"a":1,"b":"x"}"#).unwrap();
+        std::fs::write(&r, "{\n  \"a\": 1,\n  \"b\": \"X\"\n}\n").unwrap();
+        let session = Arc::new(Session::open(&l.to_string_lossy(), &r.to_string_lossy()).unwrap());
+        cx.update(style::init);
+        let (view, cx) = cx.add_window_view(|_, cx| TextView::new(session, String::new(), "json".into(), false, cx));
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            let diff = view.diff().unwrap();
+            // The values differ, so no converted view makes the files equal: text.
+            assert_eq!(diff.view, View::Text);
+            assert!(diff.views.contains(&View::PrettyJson));
+        });
+        // Pretty-printed, as the view menu picks it, only the case of one value differs.
+        view.update(cx, |view, cx| {
+            view.requested = Some(View::PrettyJson);
+            view.load(cx);
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            let diff = view.diff().unwrap();
+            assert_eq!(diff.view, View::PrettyJson);
+            assert_eq!(diff.sections().len(), 1);
+        });
+        // Ignore case: no differences left.
+        view.update(cx, |view, cx| view.set_options(DiffOptions { ignore_case: true, ..view.options }, cx));
+        view.read_with(cx, |view, _| assert!(view.diff().unwrap().sections().is_empty()));
+        // The text view shows the bytes as they are.
+        view.update(cx, |view, cx| {
+            view.requested = Some(View::Text);
+            view.load(cx);
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| assert_eq!(view.diff().unwrap().view, View::Text));
     }
 }

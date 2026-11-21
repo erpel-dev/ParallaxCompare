@@ -9,6 +9,7 @@ use std::time::Duration;
 use parallax_core::compare::{self, CompareOptions, Control, Excludes, Node, Summary};
 use parallax_core::convert::{self, View, syntax};
 use parallax_core::edit::{EditSession, Edited, Pos, Side};
+use parallax_core::file_view::FULL_COMPARE_LIMIT;
 use parallax_core::highlight::{self, DocHighlighter, ThemeKind};
 use parallax_core::ops::Removal;
 use parallax_core::progress::Progress;
@@ -1144,9 +1145,6 @@ fn invisible_difference(left: &TextDoc, right: &TextDoc, l: &[u8], r: &[u8], min
     }
 }
 
-/// Above this size, files shown in a summary view are not compared byte for byte.
-const FULL_COMPARE_LIMIT: usize = 64 << 20;
-
 #[tauri::command]
 pub async fn open_file_diff(
     state: State<'_, AppState>,
@@ -1170,142 +1168,40 @@ pub async fn open_file_diff(
             path.clone()
         };
         let schemas = flatbuffer_schemas.unwrap_or_default();
-        let lviews = left_data.as_deref().map(|d| convert::views_for_source(&session.left, &path, &name, d, schemas[0].as_deref()));
-        let rviews = right_data.as_deref().map(|d| convert::views_for_source(&session.right, &path, &name, d, schemas[1].as_deref()));
-        let views = match (lviews, rviews) {
-            (Some(l), Some(r)) => l.into_iter().filter(|v| r.contains(v)).collect::<Vec<_>>(),
-            (Some(v), None) | (None, Some(v)) => v,
-            _ => vec![View::Text],
-        };
-        let mut chosen = view.filter(|v| views.contains(v)).unwrap_or(views[0]);
-        // Summary views of large files (models, media) read only headers: comparing all
-        // bytes would read gigabytes of weights just to say whether the files are equal.
-        let unread = matches!((&left_data, &right_data), (Some(l), Some(r)) if l.len() == r.len())
-            && left_data.as_deref().map_or(0, <[u8]>::len) > FULL_COMPARE_LIMIT
-            && !matches!(chosen, View::Text | View::Hex | View::Image);
-        let identical = chosen != View::FlatbufferData && !unread && left_data.is_some() && left_data.as_deref() == right_data.as_deref();
-        let mut note = None;
-        // The texts of the chosen view, when finding it already made them.
-        let mut rendered = None;
-        // ≈ similar files open in the view where they are equal, and say why. Shown in
-        // their original bytes, the view where they are equal is offered instead.
-        let mut equal_view = None;
-        let similar = match (&left_data, &right_data) {
-            (Some(l), Some(r)) if !identical && (view.is_none() || matches!(chosen, View::Text | View::Hex)) => {
-                convert::similar_view(&name, l, r, &views)
-            }
-            _ => None,
-        };
-        let similar = match similar {
-            Some(found) if view.is_some() => {
-                equal_view = Some(ViewOption { id: found.view, label: found.view.label() });
-                None
-            }
-            other => other,
-        };
-        if let Some(convert::Similar { view: similar, reason, texts }) = similar {
-            chosen = similar;
-            // Flatbuffer data needs the schemas the generic rendering does not have.
-            rendered = texts.filter(|_| similar != View::FlatbufferData);
-            note = Some(if similar == View::Image {
-                let meta = if views.contains(&View::ImageMetadata) { " “Image metadata” shows how." } else { "" };
-                format!("≈ Similar: {reason}. The pixels are identical; the files differ in metadata or encoding.{meta}")
-            } else {
-                format!("≈ Similar: {reason}. Shown as “{}”, where the files are equal; “Text” shows every difference in the bytes.", similar.label())
-            });
-        }
+        let chosen = parallax_core::file_view::choose(
+            [&session.left, &session.right],
+            &path,
+            &name,
+            [left_data.as_deref(), right_data.as_deref()],
+            left_info.binary || right_info.binary,
+            view,
+            [schemas[0].as_deref(), schemas[1].as_deref()],
+        );
+        let parallax_core::file_view::Chosen { view: chosen, views, mut note, equal_view, identical, unread, image, texts } =
+            chosen;
+        let [left_text, right_text] = texts;
+        let equal_view = equal_view.map(|v| ViewOption { id: v, label: v.label() });
         let view_options = views.iter().map(|&v| ViewOption { id: v, label: v.label() }).collect();
-
-        let mut image = None;
-        if chosen == View::Image {
-            match convert::image_diff(&name, left_data.as_deref(), right_data.as_deref()) {
-                Ok(d) => {
-                    let side = |s: &Option<convert::ImageSide>| {
-                        s.as_ref().map(|s| ImageSideView {
-                            url: data_url(&s.mime, &s.bytes),
-                            width: s.width,
-                            height: s.height,
-                            format: s.format.clone(),
-                        })
-                    };
-                    note = d.note.clone().or(note);
-                    image = Some(ImageView {
-                        left: side(&d.left),
-                        right: side(&d.right),
-                        mask: d.mask.as_deref().map(|m| data_url("image/png", m)),
-                        area: d.area.clone(),
-                        outline: d.outline.clone(),
-                        different_pixels: d.different_pixels,
-                        total_pixels: d.total_pixels,
-                        bounds: d.bounds,
-                    });
-                }
-                Err(e) => {
-                    note = Some(format!("The image could not be decoded ({e}); showing a hex dump."));
-                    chosen = View::Hex;
-                }
+        let image = image.map(|d| {
+            let side = |s: &Option<convert::ImageSide>| {
+                s.as_ref().map(|s| ImageSideView {
+                    url: data_url(&s.mime, &s.bytes),
+                    width: s.width,
+                    height: s.height,
+                    format: s.format.clone(),
+                })
+            };
+            ImageView {
+                left: side(&d.left),
+                right: side(&d.right),
+                mask: d.mask.as_deref().map(|m| data_url("image/png", m)),
+                area: d.area.clone(),
+                outline: d.outline.clone(),
+                different_pixels: d.different_pixels,
+                total_pixels: d.total_pixels,
+                bounds: d.bounds,
             }
-        }
-
-        // Converted text for both sides; a slow converter on one side need not hold up
-        // the other, so the two sides run at the same time.
-        // A converter that panics on damaged input fails like one that returns an error,
-        // on either side, and falls back below.
-        let render = |data: &Option<Data>, view: View, side: usize| -> Option<Result<String, String>> {
-            data.as_ref().map(|d| {
-                let source = if side == 0 { &session.left } else { &session.right };
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| convert::render_source(view, source, &path, &name, d, schemas[side].as_deref()).map_err(err)))
-                    .unwrap_or_else(|_| Err("the file could not be read (internal error)".into()))
-            })
-        };
-        let (mut left_text, mut right_text) = (None, None);
-        if let Some((l, r)) = rendered.filter(|_| !matches!(chosen, View::Image | View::Text)) {
-            (left_text, right_text) = (Some(Ok(l)), Some(Ok(r)));
-        } else if !matches!(chosen, View::Image | View::Text) {
-            (left_text, right_text) = std::thread::scope(|s| {
-                let l = s.spawn(|| render(&left_data, chosen, 0));
-                let r = render(&right_data, chosen, 1);
-                (l.join().unwrap_or_else(|_| Some(Err("the file could not be read (internal error)".into()))), r)
-            });
-            // Either side failing falls back, whichever it is.
-            let failed = [&left_text, &right_text].into_iter().flatten().find_map(|r| r.as_ref().err()).cloned();
-            if let Some(e) = failed {
-                let fallback = if left_info.binary || right_info.binary { View::Hex } else { View::Text };
-                note = Some(format!("{} is not available: {e}. Showing {}.", chosen.label(), fallback.label()));
-                chosen = fallback;
-                (left_text, right_text) = if fallback == View::Hex {
-                    (render(&left_data, fallback, 0), render(&right_data, fallback, 1))
-                } else {
-                    (None, None)
-                };
-            }
-        }
-
-        // Equal simplified values do not imply equal AUTOSAR content. Show omitted
-        // differences by default, and explain the limitation for an explicitly chosen view.
-        if chosen == View::EcucValues && !identical
-            && matches!((&left_text, &right_text), (Some(Ok(l)), Some(Ok(r))) if l == r)
-        {
-            let (l, r) = std::thread::scope(|s| {
-                let l = s.spawn(|| render(&left_data, View::ArxmlStructure, 0));
-                let r = render(&right_data, View::ArxmlStructure, 1);
-                (l.join().ok().flatten(), r)
-            });
-            match (l, r) {
-                (Some(Ok(l)), Some(Ok(r))) if l != r => {
-                    note = Some("ECUC values match, but other AUTOSAR content differs. AUTOSAR structure shows full definitions, reference types, attributes and metadata.".into());
-                    if view.is_none() {
-                        chosen = View::ArxmlStructure;
-                        (left_text, right_text) = (Some(Ok(l)), Some(Ok(r)));
-                    }
-                }
-                // An incomplete full-tree comparison must not imply that the files match.
-                (Some(Err(e)), _) | (_, Some(Err(e))) => {
-                    note = Some(format!("ECUC values match; full AUTOSAR content could not be checked ({e}). Use Text to inspect all differences."));
-                }
-                _ => {}
-            }
-        }
+        });
 
         let make_doc = |data: &Option<Data>,
                         converted: Option<Result<String, String>>,
