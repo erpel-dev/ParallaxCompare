@@ -1,0 +1,45 @@
+[package]
+name = "parallax-gpui"
+description = "Prototype of the ParallaxCompare desktop app with a GPUI front end, on the same compare core as the Tauri app"
+version = "0.0.20"
+license = "MIT"
+edition = "2024"
+repository = "https://github.com/erpel-dev/ParallaxCompare"
+rust-version = "1.88"
+publish = false
+
+# A workspace of its own: GPUI brings several hundred crates, and keeping them in
+# a separate lockfile leaves the main workspace (core, CLI, Tauri app) and its CI
+# untouched. Cargo.lock started as a copy of the main one, so the core builds
+# with the same dependency versions in both apps.
+[workspace]
+
+[dependencies]
+parallax-core = { path = "../crates/parallax-core" }
+# The last release on crates.io (October 2025). Newer GPUI exists only in Zed's
+# repository; see README.md.
+gpui = "=0.2.2"
+unicode-segmentation = "1"
+parking_lot = "0.12"
+
+[dev-dependencies]
+tempfile = "3"
+image = { version = "0.25", default-features = false, features = ["png"] }
+# Headless window, simulated keystrokes and prompt answers for the UI tests.
+gpui = { version = "=0.2.2", features = ["test-support"] }
+
+[patch.crates-io]
+# gpui 0.2.2 needs xattr 0.2.3, which no longer builds against current libc on
+# Linux. vendor/xattr is that release with a one-line fix (see its src/sys/mod.rs).
+xattr = { path = "vendor/xattr" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+# As in the main workspace: diffing and hashing are hot paths, keep them fast in
+# debug builds too.
+[profile.dev.package."*"]
+opt-level = 2
+debug = false

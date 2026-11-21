@@ -13,7 +13,7 @@ use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
 
-use crate::edit::Pos;
+use crate::edit::{Pos, Unsaved};
 use crate::merge::{self, Block, BlockKind, MergeOptions};
 use crate::text::{self, TextDoc};
 
@@ -114,6 +114,15 @@ pub struct SyntaxOutcome {
     pub mapped: bool,
 }
 
+/// What [`MergeSession::offer_syntax`] made of a syntax-aware result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyntaxOffer {
+    /// `None` when the engine declined the file.
+    pub outcome: Option<SyntaxOutcome>,
+    /// The engine's whole result, when it is offered only as a whole.
+    pub whole: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MergeStats {
@@ -136,6 +145,7 @@ pub struct MergeSession {
     undo: Vec<Step>,
     redo: Vec<Step>,
     saved: u64,
+    unsaved: Unsaved,
     /// The syntax-aware solution of each block, where there is one, and the
     /// conflicts it still holds.
     syntax: Vec<Option<(String, u32)>>,
@@ -229,6 +239,7 @@ impl MergeSession {
             undo: Vec::new(),
             redo: Vec::new(),
             saved: 0,
+            unsaved: Unsaved::default(),
             syntax: Vec::new(),
         };
         let mut text = String::new();
@@ -245,13 +256,14 @@ impl MergeSession {
         }
         session.input_starts.push(row);
         session.set_result_text(text);
-        session.saved = hash(&session.result.text);
+        session.mark_saved();
         session
     }
 
     fn set_result_text(&mut self, text: String) {
         let len = self.result.text.len();
         self.result.splice(0..len, &text);
+        self.unsaved.changed();
     }
 
     pub fn result(&self) -> &TextDoc {
@@ -336,11 +348,12 @@ impl MergeSession {
     }
 
     pub fn is_dirty(&self) -> bool {
-        hash(&self.result.text) != self.saved
+        self.unsaved.get(|| hash(&self.result.text) != self.saved)
     }
 
     pub fn mark_saved(&mut self) {
         self.saved = hash(&self.result.text);
+        self.unsaved.saved();
     }
 
     pub fn can_undo(&self) -> bool {
@@ -455,6 +468,7 @@ impl MergeSession {
     fn splice(&mut self, range: Range<usize>, inserted: String, before: Vec<BlockState>, after: Vec<BlockState>) {
         let at = range.start;
         let removed = self.result.splice(range, &inserted);
+        self.unsaved.changed();
         self.state = after.clone();
         self.undo.push(Step { at, removed, inserted, before, after });
         self.redo.clear();
@@ -464,6 +478,7 @@ impl MergeSession {
     pub fn undo(&mut self) -> Option<usize> {
         let step = self.undo.pop()?;
         self.result.splice(step.at..step.at + step.inserted.len(), &step.removed);
+        self.unsaved.changed();
         self.state = step.before.clone();
         let line = self.line_of(step.at);
         self.redo.push(step);
@@ -473,6 +488,7 @@ impl MergeSession {
     pub fn redo(&mut self) -> Option<usize> {
         let step = self.redo.pop()?;
         self.result.splice(step.at..step.at + step.removed.len(), &step.inserted);
+        self.unsaved.changed();
         self.state = step.after.clone();
         let line = self.line_of(step.at);
         self.undo.push(step);
@@ -705,6 +721,27 @@ impl MergeSession {
     }
 
     /// The text with Git's markers style for the result as saved now.
+    /// Whether a syntax-aware merge has nothing to add: a side is unchanged, or
+    /// both sides are the same.
+    pub fn syntax_has_nothing_to_add(&self) -> bool {
+        self.local.text == self.remote.text || self.base.text == self.local.text || self.base.text == self.remote.text
+    }
+
+    /// Offers a syntax-aware merge's result (`None`: the engine declined the
+    /// file): per conflict where it lines up with this merge, else as a whole,
+    /// which [`SyntaxOffer::whole`] then holds. The result itself is not changed.
+    pub fn offer_syntax(&mut self, merged: Option<&str>) -> SyntaxOffer {
+        let Some(text) = merged else {
+            self.clear_syntax();
+            return SyntaxOffer { outcome: None, whole: None };
+        };
+        let outcome = self.set_syntax_result(text);
+        // Offered as a whole when it changed text the line merge had merged, or
+        // found conflicts where the line merge has none.
+        let whole = !outcome.mapped || (self.stats().conflicts == 0 && outcome.conflicts > 0);
+        SyntaxOffer { outcome: Some(outcome), whole: whole.then(|| text.to_string()) }
+    }
+
     pub fn result_text(&self) -> &str {
         &self.result.text
     }
@@ -730,6 +767,17 @@ fn conflicting_lines(text: &str) -> (u32, u32) {
         }
     }
     (conflicts, lines)
+}
+
+/// Whether two texts are the same, but for the labels after conflict markers:
+/// Git names the sides after the refs it was given, a merge here after branches.
+pub fn same_but_labels(a: &str, b: &str) -> bool {
+    let marker = |l: &str| ["<<<<<<<", "|||||||", ">>>>>>>"].iter().find(|m| l.starts_with(**m)).copied();
+    a.split('\n').count() == b.split('\n').count()
+        && a.split('\n').zip(b.split('\n')).all(|(x, y)| match (marker(x), marker(y)) {
+            (Some(m), Some(n)) => m == n,
+            _ => x == y,
+        })
 }
 
 /// Decodes the three inputs of a merge.

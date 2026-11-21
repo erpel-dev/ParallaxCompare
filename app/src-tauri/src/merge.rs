@@ -5,20 +5,19 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use parallax_core::conflicts::{self, ConflictKind, FileMode, RepoConflicts, Resolution};
+use parallax_core::conflicts::{self, ConflictKind, FileMode, Resolution};
 use parallax_core::edit::Pos;
 use parallax_core::highlight::{self, DocHighlighter, ThemeKind};
-use parallax_core::merge::{BlockKind, MarkerStyle, MergeOptions};
+use parallax_core::merge::{MarkerStyle, MergeOptions};
 use parallax_core::merge_session::{Choice, ConflictInfo, MergeSession, MergeStats};
 use parallax_core::source::{SourceOptions, SourceSpec};
 use parallax_core::syntax_merge::{Engine, Mergiraf};
 use parallax_core::text::{self, TextDoc};
-use parallax_core::textdiff;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
-use crate::commands::{AppState, CmdResult, LineView, blocking, err};
+use crate::commands::{AppState, CmdResult, blocking, err};
 
 /// The files of a merge given on the command line, as `git mergetool` passes them.
 #[derive(Debug, Clone, Default)]
@@ -176,27 +175,6 @@ fn text_or_error(name: &str, data: &[u8]) -> CmdResult<TextDoc> {
     Ok(text::decode(data))
 }
 
-/// Labels and Git's result for an output file that is a conflicted file of a repository.
-fn repo_context(output: &Path) -> Option<(RepoConflicts, String)> {
-    let dir = output.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    let state = conflicts::repo_conflicts(dir).ok()?;
-    let absolute = std::fs::canonicalize(output).ok()?;
-    let workdir = std::fs::canonicalize(&state.workdir).ok()?;
-    let rel = absolute.strip_prefix(&workdir).ok()?.to_string_lossy().replace('\\', "/");
-    state.files.iter().any(|f| f.path == rel).then_some((state, rel))
-}
-
-/// Whether two texts are the same, but for the labels after conflict markers:
-/// Git names the sides after the refs it was given, this merge after branches.
-fn same_but_labels(a: &str, b: &str) -> bool {
-    let marker = |l: &str| ["<<<<<<<", "|||||||", ">>>>>>>"].iter().find(|m| l.starts_with(**m)).copied();
-    a.split('\n').count() == b.split('\n').count()
-        && a.split('\n').zip(b.split('\n')).all(|(x, y)| match (marker(x), marker(y)) {
-            (Some(m), Some(n)) => m == n,
-            _ => x == y,
-        })
-}
-
 #[allow(clippy::too_many_arguments)]
 fn new_tab(
     base: &[u8],
@@ -219,7 +197,7 @@ fn new_tab(
     let git_result = git_result
         .filter(|d| !text::is_binary(d))
         .map(|d| text::decode(&d).text)
-        .filter(|t| !same_but_labels(t, session.result_text()));
+        .filter(|t| !parallax_core::merge_session::same_but_labels(t, session.result_text()));
     let on_disk = disk_stamp(&output);
     Ok(MergeTab {
         session,
@@ -253,32 +231,17 @@ pub async fn open_merge(state: State<'_, AppState>, request: MergeRequest) -> Cm
             new_tab(&base, &local, &remote, output, [local_name, base_name, remote_name], None, false, None)
         }
         MergeRequest::Repo { workdir, path } => {
-            let state = conflicts::repo_conflicts(Path::new(&workdir)).map_err(err)?;
-            let file =
-                state.files.iter().find(|f| f.path == path).ok_or_else(|| format!("{path} is not conflicted"))?;
-            let mut stages = conflicts::StageReader::new(&state.workdir);
-            let mut read = |i: usize| match &file.stages[i] {
-                Some(stage) => stages.read(stage).map_err(err),
-                None => Ok(Vec::new()),
-            };
-            if file.stages[1].is_none() || file.stages[2].is_none() {
-                return Err(format!("{path} was deleted on one side; keep or delete it as a whole file."));
-            }
-            if file.stages.iter().flatten().any(|s| matches!(s.file_mode(), FileMode::Symlink | FileMode::Gitlink)) {
-                return Err(format!("{path} is a link or a submodule; take one version as a whole."));
-            }
-            let output = state.workdir.join(&path);
-            let git_result = std::fs::read(&output).ok();
-            let labels = [state.labels.local.clone(), state.labels.base.clone(), state.labels.remote.clone()];
+            let inputs = conflicts::merge_inputs(Path::new(&workdir), &path).map_err(err)?;
+            let workdir = inputs.workdir.clone();
             new_tab(
-                &read(0)?,
-                &read(1)?,
-                &read(2)?,
-                output,
-                labels,
-                git_result,
+                &inputs.base,
+                &inputs.local,
+                &inputs.remote,
+                inputs.output,
+                inputs.labels,
+                inputs.git_result,
                 false,
-                Some((state.workdir.clone(), path)),
+                Some((workdir, path)),
             )
         }
         MergeRequest::Startup => {
@@ -286,7 +249,7 @@ pub async fn open_merge(state: State<'_, AppState>, request: MergeRequest) -> Cm
             let output = PathBuf::from(&args.output);
             let (base, local, remote) = (read_file(&args.base)?, read_file(&args.local)?, read_file(&args.remote)?);
             let git_result = std::fs::read(&output).ok();
-            let (labels, repo) = match repo_context(&output) {
+            let (labels, repo) = match conflicts::conflict_of(&output) {
                 Some((state, rel)) => (
                     [state.labels.local.clone(), state.labels.base.clone(), state.labels.remote.clone()],
                     Some((state.workdir, rel)),
@@ -319,23 +282,7 @@ pub async fn merge_info(state: State<'_, AppState>, id: u64) -> CmdResult<MergeI
     Ok(info)
 }
 
-#[derive(Serialize)]
-pub struct InputRowView {
-    k: BlockKind,
-    i: u32,
-    b: Option<LineView>,
-    l: Option<LineView>,
-    r: Option<LineView>,
-}
-
-#[derive(Serialize)]
-pub struct ResultRowView {
-    k: BlockKind,
-    c: Choice,
-    i: u32,
-    /// A line; a conflict's header row has none.
-    l: Option<LineView>,
-}
+pub use parallax_core::rows::{MergeInputRow as InputRowView, MergeResultRow as ResultRowView};
 
 /// The highlighters for the theme, and the session, borrowed side by side.
 fn highlighters(tab: &mut MergeTab, theme: ThemeKind) -> (&mut [DocHighlighter; 4], &MergeSession) {
@@ -344,16 +291,6 @@ fn highlighters(tab: &mut MergeTab, theme: ThemeKind) -> (&mut [DocHighlighter; 
         tab.highlighters = Some((theme, std::array::from_fn(|_| DocHighlighter::new(syntax, theme))));
     }
     (&mut tab.highlighters.as_mut().expect("set above").1, &tab.session)
-}
-
-/// Syntax colours for lines `first..last` of a document, as one batch.
-fn spans(
-    hl: &mut DocHighlighter,
-    doc: &TextDoc,
-    lines: impl Iterator<Item = u32> + Clone,
-) -> (usize, Vec<Vec<highlight::Span>>) {
-    let (Some(first), Some(last)) = (lines.clone().min(), lines.max()) else { return (0, Vec::new()) };
-    (first as usize, hl.highlight(doc, first as usize, last as usize + 1))
 }
 
 #[tauri::command]
@@ -367,44 +304,9 @@ pub async fn merge_input_rows(
     let tab = merge(&state, id)?;
     blocking(move || {
         let mut tab = tab.lock();
-        let rows = tab.session.input_rows(start, count);
-        let tab = &mut *tab;
-        let (hl, s) = highlighters(tab, theme);
-        let (bb, bs) = spans(&mut hl[0], &s.base, rows.iter().filter_map(|r| r.base));
-        let (lb, ls) = spans(&mut hl[1], &s.local, rows.iter().filter_map(|r| r.local));
-        let (rb, rs) = spans(&mut hl[2], &s.remote, rows.iter().filter_map(|r| r.remote));
-        let line = |doc: &TextDoc, n: u32, first: usize, all: &Vec<Vec<highlight::Span>>, marks: Vec<(u32, u32)>| {
-            LineView::new(n, doc.line(n as usize), all.get(n as usize - first).cloned().unwrap_or_default(), marks)
-        };
-        // Changed characters of a changed line against the base line beside it.
-        let marks =
-            |kind: BlockKind, side: &TextDoc, n: Option<u32>, base: Option<u32>, changed: bool| -> Vec<(u32, u32)> {
-                match (n, base) {
-                    (Some(n), Some(b)) if changed && kind != BlockKind::Unchanged => {
-                        let (_, m) = textdiff::intraline(s.base.line(b as usize), side.line(n as usize));
-                        m.into_iter().map(|r| (r.start, r.end)).collect()
-                    }
-                    _ => Vec::new(),
-                }
-            };
-        Ok(rows
-            .iter()
-            .map(|row| {
-                let local_changed = matches!(row.kind, BlockKind::Local | BlockKind::Same | BlockKind::Conflict);
-                let remote_changed = matches!(row.kind, BlockKind::Remote | BlockKind::Same | BlockKind::Conflict);
-                InputRowView {
-                    k: row.kind,
-                    i: row.block,
-                    b: row.base.map(|n| line(&s.base, n, bb, &bs, Vec::new())),
-                    l: row.local.map(|n| {
-                        line(&s.local, n, lb, &ls, marks(row.kind, &s.local, Some(n), row.base, local_changed))
-                    }),
-                    r: row.remote.map(|n| {
-                        line(&s.remote, n, rb, &rs, marks(row.kind, &s.remote, Some(n), row.base, remote_changed))
-                    }),
-                }
-            })
-            .collect())
+        let (hl, s) = highlighters(&mut tab, theme);
+        let [hb, hl_local, hr, _] = hl;
+        Ok(parallax_core::rows::merge_input_rows(s, start, count, [hb, hl_local, hr]))
     })
     .await
 }
@@ -420,32 +322,8 @@ pub async fn merge_result_rows(
     let tab = merge(&state, id)?;
     blocking(move || {
         let mut tab = tab.lock();
-        let rows = tab.session.result_rows(start, count);
-        let tab = &mut *tab;
-        let (hl, session) = highlighters(tab, theme);
-        let doc = session.result();
-        let (first, all) = spans(&mut hl[3], doc, rows.iter().filter_map(|r| r.line));
-        Ok(rows
-            .iter()
-            .map(|row| ResultRowView {
-                k: row.kind,
-                c: row.choice,
-                i: row.block,
-                l: row.line.map(|n| {
-                    // Between conflict markers the syntax colouring goes astray.
-                    let markers = row.choice == Choice::Unresolved
-                        || (row.choice == Choice::Syntax && session.syntax_left(row.block as usize) > 0);
-                    let line = doc.line(n as usize);
-                    let marker_line = ["<<<<<<<", "|||||||", "=======", ">>>>>>>"].iter().any(|m| line.starts_with(m));
-                    let colours = if markers || marker_line {
-                        Vec::new()
-                    } else {
-                        all.get(n as usize - first).cloned().unwrap_or_default()
-                    };
-                    LineView::new(n, line, colours, Vec::new())
-                }),
-            })
-            .collect())
+        let (hl, s) = highlighters(&mut tab, theme);
+        Ok(parallax_core::rows::merge_result_rows(s, start, count, &mut hl[3]))
     })
     .await
 }
@@ -586,7 +464,7 @@ pub async fn merge_structured(
             let s = &t.session;
             // With a side unchanged (or both sides the same) the merge is that side:
             // there is nothing for syntax to add, and copying large texts is wasted.
-            if s.local.text == s.remote.text || s.base.text == s.local.text || s.base.text == s.remote.text {
+            if s.syntax_has_nothing_to_add() {
                 return Ok(t.info(id, None));
             }
             (s.base.text.clone(), s.local.text.clone(), s.remote.text.clone(), t.output.clone(), t.labels.clone())
@@ -595,23 +473,19 @@ pub async fn merge_structured(
         let out =
             e.merge_text(&base, &local, &remote, &name.to_string_lossy(), labels, MERGIRAF_TIMEOUT).map_err(err)?;
         let mut t = tab.lock();
-        let Some((text, _)) = out else {
-            t.session.clear_syntax();
-            let view = StructuredView { engine: e.name(), declined: true, ..Default::default() };
-            t.structured = Some((view, None));
-            return Ok(t.info(id, None));
+        let offer = t.session.offer_syntax(out.as_ref().map(|(text, _)| text.as_str()));
+        let view = match offer.outcome {
+            None => StructuredView { engine: e.name(), declined: true, ..Default::default() },
+            Some(outcome) => StructuredView {
+                engine: e.name(),
+                solved: outcome.solved,
+                narrowed: outcome.narrowed,
+                conflicts: outcome.conflicts,
+                whole: offer.whole.is_some(),
+                declined: false,
+            },
         };
-        let outcome = t.session.set_syntax_result(&text);
-        let whole = !outcome.mapped || (t.session.stats().conflicts == 0 && outcome.conflicts > 0);
-        let view = StructuredView {
-            engine: e.name(),
-            solved: outcome.solved,
-            narrowed: outcome.narrowed,
-            conflicts: outcome.conflicts,
-            whole,
-            declined: false,
-        };
-        t.structured = Some((view, whole.then_some(text)));
+        t.structured = Some((view, offer.whole));
         Ok(t.info(id, None))
     })
     .await

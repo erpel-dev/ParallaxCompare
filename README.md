@@ -368,6 +368,18 @@ npm run tauri dev                # desktop app with hot reload
 npm run tauri build              # installers: MSI/NSIS on Windows, deb/rpm/AppImage on Linux
 ```
 
+### GPUI prototype
+
+`app-gpui/` is a second desktop front end, written with [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) instead of Tauri and Svelte, on the same `parallax-core`. It has tabs and a new-comparison screen, the folder compare (filters, Flat, copy and delete, include/exclude options, watching for changes) and the text compare (converted views, image compare, copying differences, line editing, undo, save, find), in light and dark; three-way merge with the syntax-aware engine, `git mergetool` mode and a repository's conflicts; a command palette, zoom and path completion. It does not have pull request review. Both front ends choose views with `parallax_core::file_view`, build their text and merge rows with `parallax_core::rows`, and read conflicts with `parallax_core::conflicts`. It is a workspace of its own, so its dependencies stay out of the main lockfile and CI. On Linux it needs the X11/Wayland, Vulkan and fontconfig development packages:
+
+```sh
+sudo apt install libxkbcommon-x11-dev libxcb1-dev libwayland-dev libvulkan-dev libfontconfig-dev libfreetype-dev
+cd app-gpui
+cargo run --release -- old/ new/   # any sources, as for the CLI: repo@main, a.zip!/dir …; no arguments: New comparison
+```
+
+See [app-gpui/README.md](app-gpui/README.md) for what it covers, what it does not, and how it compares in size, memory and start-up.
+
 CI runs formatting, clippy, the Svelte type check and all tests on Ubuntu and Windows. Clippy forbids `std::process::Command::new` and the opener plugin's `open_url` / `open_path` outside tests: programs start through `parallax_core::process::command` and links open through `open_with_system`, which keep the AppImage's own libraries away from the system's `git`, `gh` and browser. Pull requests also build the AppImage and run its self-test on Ubuntu 22.04 and 24.04; a release does the same before publishing. They also build the Flatpak (`flatpak/dev.erpel.parallaxcompare.yml`) and run its self-test, which checks that `git` and `gh` run on the host; releases attach the bundle. Pushing a `v*` tag builds standalone Windows and Linux executables and publishes a GitHub release; `0.x` tags are prereleases.
 
 ## Architecture
@@ -376,6 +388,7 @@ CI runs formatting, clippy, the Svelte type check and all tests on Ubuntu and Wi
 app/                      Tauri 2 desktop app
   src/                    Svelte 5 UI: tabs, new-comparison dialog, folder view, text view
   src-tauri/              commands: sessions, compare, expand, copy/delete, file diff rows
+app-gpui/                 prototype desktop app with a GPUI front end (own workspace)
 crates/parallax-core/     UI-agnostic engine (also used by the CLI)
   vfs/                    every source as a tree: local, archive, git, archive mount layer
   compare.rs              parallel folder compare with tree-id / CRC / blob-id shortcuts
@@ -383,6 +396,8 @@ crates/parallax-core/     UI-agnostic engine (also used by the CLI)
   convert/                content views: office/PDF text, executables, firmware, pretty XML/JSON, hex, images
   syntaxes/               extra grammars (A2L, DBC, Intel HEX, S-record, FreeMarker, Conan, Xpand/Xtend/Check, view output)
   highlight.rs            syntect highlighting with checkpoints
+  rows.rs                 side-by-side and merge rows as both front ends show them
+  file_view.rs            which view two files open in, shared by both front ends
   source.rs               source syntax and opening, merge-base
 crates/parallax-cli/      the `parallax` command
 ```

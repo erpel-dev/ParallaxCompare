@@ -410,6 +410,68 @@ pub fn stage(workdir: &Path, paths: &[(String, Resolution)]) -> Result<()> {
     Ok(())
 }
 
+/// What a line merge of one conflicted file starts from: the three versions,
+/// the file to write, the names of the sides and the marker style.
+pub struct MergeInputs {
+    pub base: Vec<u8>,
+    pub local: Vec<u8>,
+    pub remote: Vec<u8>,
+    pub output: PathBuf,
+    /// The repository's work tree.
+    pub workdir: PathBuf,
+    /// Local, base, remote.
+    pub labels: [String; 3],
+    pub style: crate::merge::MarkerStyle,
+    /// The file as Git wrote it into the work tree.
+    pub git_result: Option<Vec<u8>>,
+}
+
+/// The versions of the conflicted file `path` of the repository at `dir`, for a
+/// line merge. Files deleted on one side, links and submodules are resolved as
+/// a whole instead, which the error says.
+pub fn merge_inputs(dir: &Path, path: &str) -> Result<MergeInputs> {
+    let state = repo_conflicts(dir)?;
+    let file = state
+        .files
+        .iter()
+        .find(|f| f.path == path)
+        .ok_or_else(|| Error::Unsupported(format!("{path} is not conflicted")))?;
+    if file.stages[1].is_none() || file.stages[2].is_none() {
+        return Err(Error::Unsupported(format!("{path} was deleted on one side; keep or delete it as a whole file.")));
+    }
+    if file.stages.iter().flatten().any(|s| matches!(s.file_mode(), FileMode::Symlink | FileMode::Gitlink)) {
+        return Err(Error::Unsupported(format!("{path} is a link or a submodule; take one version as a whole.")));
+    }
+    let mut stages = StageReader::new(&state.workdir);
+    let mut read = |i: usize| match &file.stages[i] {
+        Some(stage) => stages.read(stage),
+        None => Ok(Vec::new()),
+    };
+    let (base, local, remote) = (read(0)?, read(1)?, read(2)?);
+    let output = state.workdir.join(path);
+    Ok(MergeInputs {
+        base,
+        local,
+        remote,
+        git_result: std::fs::read(&output).ok(),
+        output,
+        workdir: state.workdir.clone(),
+        labels: [state.labels.local.clone(), state.labels.base.clone(), state.labels.remote.clone()],
+        style: conflict_style(&state.workdir),
+    })
+}
+
+/// For a file `git mergetool` asks to merge: its repository's conflicts and its
+/// path there, when it is one of them.
+pub fn conflict_of(output: &Path) -> Option<(RepoConflicts, String)> {
+    let dir = output.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let state = repo_conflicts(dir).ok()?;
+    let absolute = std::fs::canonicalize(output).ok()?;
+    let workdir = std::fs::canonicalize(&state.workdir).ok()?;
+    let rel = absolute.strip_prefix(&workdir).ok()?.to_string_lossy().replace('\\', "/");
+    state.files.iter().any(|f| f.path == rel).then_some((state, rel))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
