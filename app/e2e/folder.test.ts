@@ -222,6 +222,10 @@ test('a failed matched comparison waits for a relevant change or manual refresh'
   await page.evaluate(() => (window as any).__backend.failNextPairs());
   await page.getByRole('button', { name: 'Flat', exact: true }).click();
   await page.getByText('Matched files could not be compared', { exact: false }).waitFor();
+  // The failed rows show as errors, not as still being compared.
+  await page.getByRole('button', { name: 'Errors 2', exact: true }).waitFor();
+  assert.equal(await page.getByText('Matched files are still being compared').count(), 0);
+  assert.equal(await page.locator('.row .mid', { hasText: '…' }).count(), 0);
   await page.evaluate(() => (window as any).__backend.touch('aaa/line-endings.txt'));
   await waitForCount('refresh_paths', 1);
   assert.equal(await count('compare_pairs'), 1);
@@ -265,6 +269,7 @@ test('refresh keeps an expansion requested while a lazy folder is loading', asyn
   await page.evaluate(() => (window as any).__backend.holdNextExpand('equal'));
   await row('equal').locator('.chev').first().click();
   await waitForCount('expand', 1);
+  await page.locator('.status').getByText('Loading equal…').waitFor();
   await page.getByRole('button', { name: /Refresh/ }).click();
   await page.getByText('Restoring the comparison view…').waitFor();
   assert.equal(await page.getByRole('button', { name: 'Cancel', exact: true }).count(), 0);
@@ -286,14 +291,29 @@ test('Flat refresh restores scroll after the matched rows settle', async () => {
     return node.scrollTop;
   });
   assert.ok(scrollTop > 0);
+  const refresh = page.getByRole('button', { name: /Refresh/ });
+  const comparing = page.getByText('Matched files are still being compared');
   await page.evaluate(() => (window as any).__backend.holdNextPairs());
-  await page.getByRole('button', { name: /Refresh/ }).click();
+  await refresh.click();
   await waitForCount('compare_pairs', 2);
-  await page.getByText('Restoring the comparison view…').waitFor();
-  assert.equal(await page.getByRole('button', { name: 'Cancel', exact: true }).count(), 0);
-  await page.evaluate(() => (window as any).__backend.finishPairs());
+  // While the matched files are compared, the view is usable and can be refreshed again.
+  await comparing.waitFor();
   await page.locator('.status').getByText('compared in', { exact: false }).waitFor();
+  assert.equal(await refresh.isEnabled(), true);
+  await page.evaluate(() => (window as any).__backend.finishPairs());
+  await comparing.waitFor({ state: 'detached' });
   assert.equal(await tree.evaluate((node) => node.scrollTop), scrollTop);
+
+  // Scrolling while the matched files are compared is not undone when they settle.
+  await page.evaluate(() => (window as any).__backend.holdNextPairs());
+  await refresh.click();
+  await waitForCount('compare_pairs', 3);
+  await comparing.waitFor();
+  const scrolledByUser = await tree.evaluate((node) => (node.scrollTop = 40, node.scrollTop));
+  assert.notEqual(scrolledByUser, scrollTop);
+  await page.evaluate(() => (window as any).__backend.finishPairs());
+  await comparing.waitFor({ state: 'detached' });
+  assert.equal(await tree.evaluate((node) => node.scrollTop), scrolledByUser);
 });
 
 test('tree navigation uses display order from a row without a difference', async () => {

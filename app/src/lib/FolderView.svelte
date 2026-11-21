@@ -148,7 +148,6 @@
   /** Files of all folders in one list, files of the same name matched across folders. */
   let flat = $state(false);
   let pairStatus = new Map<string, MatchedStatus>();
-  const failedPairs = new Map<string, string>();
   let activePairs = new Map<string, string>();
   let pairGeneration = 0;
   const moved = $derived.by(() => {
@@ -222,7 +221,7 @@
   function compareMoved() {
     const pairs = moved;
     if (pairWork) return pairWork;
-    const todo = pairs.filter(([left, right]) => pairStatus.get(left)?.right !== right && failedPairs.get(left) !== right);
+    const todo = pairs.filter(([left, right]) => pairStatus.get(left)?.right !== right);
     if (!todo.length) return;
     const batch = new Map(todo);
     activePairs = batch;
@@ -237,8 +236,10 @@
       })
       .catch((e) => {
         if (generation !== pairGeneration || !batch.size) return;
-        for (const [left, right] of batch) failedPairs.set(left, right);
-        error = String(e);
+        // Shown as errors, and not asked for again until a relevant change or a refresh.
+        const message = String(e);
+        for (const [left, right] of batch) pairStatus.set(left, { right, result: { status: "error", message } });
+        error = message;
       })
       .finally(() => {
         pairWork = undefined;
@@ -327,7 +328,9 @@
       for (const p of pending) {
         if (result?.root !== root) break;
         if (!expanded.has(p) || !missing(p)) continue;
+        busy = `Loading ${p}…`;
         try {
+          // An archive compared as a file may turn out to have the same entries.
           const fresh = await api.expand(session.id, p, $state.snapshot(options));
           if (result?.root !== root) break;
           replaceNode(root, p, fresh);
@@ -336,6 +339,8 @@
           unloadable.add(p);
           expanded.delete(p);
           error = String(e);
+        } finally {
+          busy = "";
         }
       }
     });
@@ -370,10 +375,8 @@
     for (const [left, { right }] of pairStatus) {
       if (affected(left) || affected(right)) pairStatus.delete(left);
     }
-    for (const pairs of [activePairs, failedPairs]) {
-      for (const [left, right] of pairs) {
-        if (affected(left) || affected(right)) pairs.delete(left);
-      }
+    for (const [left, right] of activePairs) {
+      if (affected(left) || affected(right)) activePairs.delete(left);
     }
   }
   const counts = $derived.by(() => {
@@ -591,20 +594,40 @@
     flat = restoring.flat;
   }
 
+  /**
+   * Ends the restore phase, so the view can be used, and in Flat view waits until
+   * the matched files are compared, so the rows stop changing. True when the view
+   * may still be scrolled and selected as before: the comparison is still the
+   * current one, and the user has not scrolled or selected meanwhile.
+   */
+  async function settlePairs(runId: number): Promise<boolean> {
+    restoringView = false;
+    const scrolled = viewport?.scrollTop;
+    const chosen = selected;
+    if (flat) {
+      for (let work = compareMoved(); work; work = compareMoved()) {
+        await work;
+        if (runId !== compareRun) return false;
+      }
+    }
+    version++;
+    await tick();
+    if (runId !== compareRun || selected !== chosen) return false;
+    if (!viewport || scrolled === undefined) return true;
+    // Rows that settled out of a filter can shorten the list, which lowers the
+    // scroll position to its end; that is no scrolling by the user.
+    const end = viewport.scrollHeight - viewport.clientHeight;
+    return viewport.scrollTop === scrolled || (viewport.scrollTop < scrolled && viewport.scrollTop >= end - 1);
+  }
+
   /** Opens again what was open, where it still exists, and selects and scrolls as before. */
   async function finishRestore(state: FolderViewState, runId: number) {
     if (!result) return;
     if (loading) await loading;
     await (flat ? loadSkipped() : loadOpened());
     if (runId !== compareRun) return;
-    if (flat) {
-      if (pairWork) await pairWork;
-      if (runId !== compareRun) return;
-      await compareMoved();
-    }
-    version++;
-    await tick();
-    if (runId !== compareRun) return;
+    const untouched = await settlePairs(runId);
+    if (!untouched) return;
     if (viewport) viewport.scrollTop = state.scrollTop;
     // The selected row, or the nearest folder above it that still exists.
     let path = state.selected;
@@ -691,7 +714,6 @@
       }
       unloadable = new Set();
       pairStatus = new Map();
-      failedPairs.clear();
       provisional = false;
       result = r;
       version++;
@@ -701,13 +723,9 @@
         await finishRestore(state, runId);
       } else if (keepView) {
         await (flat ? loadSkipped() : loadOpened());
-        if (flat) {
-          if (pairWork) await pairWork;
-          if (runId !== compareRun) return;
-          await compareMoved();
-        }
-        await tick();
-        if (runId === compareRun && viewport && flat === wasFlat && filter === savedFilter) {
+        if (runId !== compareRun) return;
+        const untouched = await settlePairs(runId);
+        if (untouched && viewport && flat === wasFlat && filter === savedFilter) {
           const index = topPath === undefined ? -1 : rows.findIndex((row) => row.path === topPath);
           viewport.scrollTop = index < 0 ? top : (index * ROW + visibleTop % ROW) / scale;
           scrollTop = viewport.scrollTop;
@@ -1539,7 +1557,7 @@
 
   {#if !compact}
     <FilterBar items={countFilters} value={filter} onSelect={(id) => setFilter(id as Filter)} disabled={!result} {legend}
-      hint={running ? "Totals update during comparison" : flatRows.some((r) => r.pending && failedPairs.get(r.path) !== r.rightPath) ? "Matched files are still being compared" : ""} />
+      hint={running ? "Totals update during comparison" : flatRows.some((r) => r.pending) ? "Matched files are still being compared" : ""} />
   {/if}
   {#if shares.length > 1}
     <div class="shares" role="group" aria-label="Share of each status; click to filter">
