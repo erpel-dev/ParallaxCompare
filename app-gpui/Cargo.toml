@@ -1,7 +1,7 @@
 [package]
 name = "parallax-gpui"
 description = "Prototype of the ParallaxCompare desktop app with a GPUI front end, on the same compare core as the Tauri app"
-version = "0.0.20"
+version = "0.0.21"
 license = "MIT"
 edition = "2024"
 repository = "https://github.com/erpel-dev/ParallaxCompare"
