@@ -6,7 +6,7 @@ default-members = ["crates/parallax-core", "crates/parallax-cli"]
 exclude = ["app-gpui"]
 
 [workspace.package]
-version = "0.0.20"
+version = "0.0.21"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/erpel-dev/ParallaxCompare"

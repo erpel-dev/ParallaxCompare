@@ -5214,7 +5214,7 @@ dependencies = [
 
 [[package]]
 name = "parallax-core"
-version = "0.0.20"
+version = "0.0.21"
 dependencies = [
  "aes",
  "base64",
@@ -5275,7 +5275,7 @@ dependencies = [
 
 [[package]]
 name = "parallax-gpui"
-version = "0.0.20"
+version = "0.0.21"
 dependencies = [
  "gpui",
  "image",
