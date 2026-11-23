@@ -40,6 +40,13 @@ linking exception, which allows linking the unmodified library into other
 programs and distributing them under their own terms. It is linked unmodified.
 <https://github.com/libgit2/libgit2/blob/main/COPYING>
 
+## GPUI (the GPUI app only)
+
+The GPUI AppImage (`app-gpui`) is built with GPUI by Zed Industries, licensed
+under the Apache License 2.0. A copy of the license is included in that
+AppImage as `usr/share/doc/parallax-gpui/LICENSE-gpui-APACHE`.
+<https://github.com/zed-industries/zed/tree/main/crates/gpui>
+
 ## mergiraf (optional, not included)
 
 mergiraf (GPL-3.0) is not part of ParallaxCompare. When installed separately,

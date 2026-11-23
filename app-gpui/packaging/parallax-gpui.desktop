@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=ParallaxCompare (GPUI)
+GenericName=Compare tool
+Comment=Compare and merge files, folders, archives and Git revisions
+Exec=parallax-gpui %F
+Icon=parallax-gpui
+Terminal=false
+Categories=Development;Utility;

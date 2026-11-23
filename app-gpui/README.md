@@ -25,6 +25,27 @@ X11/Wayland, Vulkan and fontconfig development packages:
 sudo apt install libxkbcommon-x11-dev libxcb1-dev libwayland-dev libvulkan-dev libfontconfig-dev libfreetype-dev
 ```
 
+## AppImage
+
+Releases (and the AppImage workflow on pull requests) also ship the app as
+`ParallaxCompare-GPUI-…-linux-x86_64.AppImage`. It bundles only the libraries
+the binary links (xcb-xkb, xkbcommon and their few dependencies) and uses the
+system's Vulkan driver, Wayland and fonts, as on any desktop; it does not start
+without a Vulkan driver (on machines without a GPU, Mesa's `lavapipe`, package
+`mesa-vulkan-drivers`). To build one locally:
+
+```sh
+cargo build --release
+../scripts/appimage-gpui.sh ParallaxCompare-GPUI-x86_64.AppImage
+../scripts/appimage-gpui-self-test.sh ParallaxCompare-GPUI-x86_64.AppImage
+```
+
+`parallax-gpui --self-test [REPO_URL]` runs the same checks as the Tauri app's
+(`git`, `gh` and `xdg-open` start as the app starts them; with a URL, `git
+ls-remote` reaches it) and, with a display, opens a window and waits for its
+first frame. The self-test script starts Xvfb and openbox when there is no
+display (GPUI draws only once a window manager reports the window visible).
+
 ## What it does
 
 **Tabs and new comparisons.** Without arguments the app opens the "New

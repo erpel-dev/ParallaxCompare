@@ -1,0 +1,24 @@
+name: Build GPUI AppImage
+description: >
+  Builds the GPUI app (app-gpui) and packs it as an AppImage with the pinned
+  linuxdeploy, then runs its self-test on this host. Expects Rust and the
+  packages in GPUI_BUILD_PACKAGES and GPUI_TEST_PACKAGES to be installed.
+inputs:
+  output:
+    description: Path of the AppImage to write
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Build the GPUI app
+      shell: bash
+      working-directory: app-gpui
+      run: cargo build --release --locked
+
+    - name: Pack the AppImage
+      shell: bash
+      run: scripts/appimage-gpui.sh "${{ inputs.output }}"
+
+    - name: Self-test on the build host
+      shell: bash
+      run: scripts/appimage-gpui-self-test.sh "${{ inputs.output }}"

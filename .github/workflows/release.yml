@@ -2,7 +2,8 @@ name: Release
 
 # Builds standalone executables and publishes them as a GitHub release:
 #   Windows: the app as one portable .exe and the CLI, static C runtime
-#   Linux:   the app as an AppImage and the CLI as a static (musl) binary
+#   Linux:   the app as an AppImage, the GPUI app as a second AppImage, and the
+#            CLI as a static (musl) binary
 # Tags with a pre-release suffix or a 0.x.y version are published as pre-releases.
 on:
   push:
@@ -20,6 +21,9 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  # As in appimage.yml: building the GPUI app, and drawing in its self-test.
+  GPUI_BUILD_PACKAGES: pkg-config libxkbcommon-x11-dev libxcb1-dev libwayland-dev libvulkan-dev libfontconfig-dev libfreetype-dev
+  GPUI_TEST_PACKAGES: xvfb openbox mesa-vulkan-drivers libvulkan1 fonts-dejavu-core
 
 jobs:
   linux:
@@ -62,6 +66,33 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: linux
+          path: dist/*
+          if-no-files-found: error
+
+  # The GPUI app (app-gpui) as its own AppImage; the self-test on this host
+  # opens a window and draws.
+  linux-gpui:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y $GPUI_BUILD_PACKAGES $GPUI_TEST_PACKAGES
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app-gpui
+
+      - uses: ./.github/actions/appimage-gpui
+        with:
+          output: dist/ParallaxCompare-GPUI-${{ env.TAG }}-linux-x86_64.AppImage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-gpui
           path: dist/*
           if-no-files-found: error
 
@@ -132,13 +163,34 @@ jobs:
       - name: Self-test
         run: scripts/appimage-self-test.sh dist/ParallaxCompare-*.AppImage
 
+  appimage-gpui-self-test:
+    needs: linux-gpui
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-gpui
+          path: dist
+      - name: Install a display and a Vulkan driver
+        run: |
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y $GPUI_TEST_PACKAGES
+
+      - name: Self-test
+        run: scripts/appimage-gpui-self-test.sh dist/ParallaxCompare-GPUI-*.AppImage
+
   flatpak:
     uses: ./.github/workflows/flatpak.yml
     with:
       bundle: ParallaxCompare-${{ github.event.inputs.tag || github.ref_name }}-x86_64.flatpak
 
   release:
-    needs: [linux, windows, appimage-self-test, flatpak]
+    needs: [linux, linux-gpui, windows, appimage-self-test, appimage-gpui-self-test, flatpak]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
