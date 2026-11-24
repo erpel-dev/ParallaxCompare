@@ -1317,7 +1317,8 @@ mod tests {
     fn zip_modes_only_from_unix() {
         let mut buf = Cursor::new(Vec::new());
         let mut zip = zip::ZipWriter::new(&mut buf);
-        let unix = zip::write::SimpleFileOptions::default().unix_permissions(0o640);
+        // The zip crate writes entries as made on DOS by default on Windows.
+        let unix = zip::write::SimpleFileOptions::default().system(zip::System::Unix).unix_permissions(0o640);
         zip.start_file("unix.txt", unix).unwrap();
         std::io::Write::write_all(&mut zip, b"u").unwrap();
         zip.start_file("dos.txt", zip::write::SimpleFileOptions::default().system(zip::System::Dos)).unwrap();
