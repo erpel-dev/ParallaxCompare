@@ -102,44 +102,8 @@ fn main() {
 
 /// Prints one line per check; the exit code is 0 when every required check passed.
 fn self_test(remote: Option<&str>) -> i32 {
-    println!("ParallaxCompare {} self-test", env!("CARGO_PKG_VERSION"));
-    match parallax_core::process::bundle_dir() {
-        Some(dir) => println!("AppImage: yes ({})", dir.to_string_lossy()),
-        None => println!("AppImage: no"),
-    }
-    if parallax_core::process::in_flatpak() {
-        println!("Flatpak: yes; git and gh run on the host through flatpak-spawn");
-    }
-    let (checks, passed) = parallax_core::tools::self_test(remote);
-    for (check, required) in &checks {
-        let mark = match (check.ok(), required) {
-            (true, _) => "ok  ",
-            (false, true) => "FAIL",
-            (false, false) => "skip",
-        };
-        println!("{mark} {:<14} {}", check.name, check.detail);
-    }
-    if parallax_core::process::bundle_dir().is_some() {
-        // For comparison: git started with the environment the AppImage gives the app.
-        // With a URL it talks to the server, which loads libcurl (git-remote-https),
-        // where the bundled libraries break a newer system's git.
-        let args: Vec<&str> = match remote {
-            Some(url) => vec!["ls-remote", "--heads", "--", url],
-            None => vec!["--version"],
-        };
-        #[allow(clippy::disallowed_methods)] // deliberately without process::command
-        let plain = std::process::Command::new("git").args(&args).env("GIT_TERMINAL_PROMPT", "0").output();
-        let note = match plain {
-            Ok(o) if o.status.success() => "starts too".to_string(),
-            Ok(o) => {
-                let err = String::from_utf8_lossy(&o.stderr);
-                let line = err.lines().find(|l| l.contains("symbol lookup") || l.contains("error while loading"));
-                format!("fails: {}", line.or_else(|| err.lines().next()).unwrap_or("").trim())
-            }
-            Err(e) => format!("could not be run: {e}"),
-        };
-        println!("note git {} with the AppImage's own environment {note}", args[0]);
-    }
+    let passed =
+        parallax_core::tools::print_self_test(&format!("ParallaxCompare {}", env!("CARGO_PKG_VERSION")), remote);
     println!("{}", if passed { "self-test passed" } else { "self-test FAILED" });
     if passed { 0 } else { 1 }
 }

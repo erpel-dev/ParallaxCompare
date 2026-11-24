@@ -3,13 +3,18 @@ name: AppImage
 # Builds the AppImage as a release would and runs its self-test on older and
 # newer Ubuntu than the one it is built on: the bundled libraries must not
 # reach the system's git and gh, which fail to load with them otherwise
-# ("symbol lookup error" in git-remote-https).
+# ("symbol lookup error" in git-remote-https). The GPUI app (app-gpui) is
+# packed as a second AppImage and must also open a window and draw.
 on:
   pull_request:
   workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
+  # What the GPUI app needs to build, and to draw in its self-test on a runner:
+  # an X server with a window manager and Mesa's software Vulkan driver.
+  GPUI_BUILD_PACKAGES: pkg-config libxkbcommon-x11-dev libxcb1-dev libwayland-dev libvulkan-dev libfontconfig-dev libfreetype-dev
+  GPUI_TEST_PACKAGES: xvfb openbox mesa-vulkan-drivers libvulkan1 fonts-dejavu-core
 
 jobs:
   build:
@@ -64,3 +69,49 @@ jobs:
 
       - name: Self-test
         run: scripts/appimage-self-test.sh appimage/*.AppImage
+
+  build-gpui:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y $GPUI_BUILD_PACKAGES $GPUI_TEST_PACKAGES
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app-gpui
+
+      - uses: ./.github/actions/appimage-gpui
+        with:
+          output: dist/ParallaxCompare-GPUI-x86_64.AppImage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appimage-gpui
+          path: dist/*.AppImage
+          if-no-files-found: error
+
+  self-test-gpui:
+    needs: build-gpui
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: appimage-gpui
+          path: appimage
+      - name: Install a display and a Vulkan driver
+        run: |
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y $GPUI_TEST_PACKAGES
+
+      - name: Self-test
+        run: scripts/appimage-gpui-self-test.sh appimage/*.AppImage
