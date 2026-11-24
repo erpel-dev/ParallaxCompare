@@ -1309,6 +1309,107 @@ fn equal_crc32_with_and_without_verifying() {
     assert_eq!(status_of(&statuses(&right, &folder, &verifying), "payload.bin"), Status::Same);
 }
 
+/// A stored zip entry with one byte of its data changed and its CRC32 left as it
+/// was: what a damaged backup archive looks like.
+fn damaged_zip(files: &[(&str, &[u8])], damage: &str) -> Vec<u8> {
+    let mut buf = std::io::Cursor::new(Vec::new());
+    let mut zip = zip::ZipWriter::new(&mut buf);
+    let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for (path, content) in files {
+        zip.start_file(*path, stored).unwrap();
+        zip.write_all(content).unwrap();
+    }
+    zip.finish().unwrap();
+    let mut bytes = buf.into_inner();
+    let content = files.iter().find(|(p, _)| *p == damage).unwrap().1;
+    let at = bytes.windows(content.len()).position(|w| w == content).unwrap();
+    bytes[at] ^= 0x20;
+    bytes
+}
+
+/// Verifying checks every archive entry against the CRC32 its archive stores:
+/// two copies damaged alike are equal to each other, but both are reported, and
+/// so is a damaged entry on one side only. Without verifying, the stored CRC32
+/// settles equality and the result says so.
+#[test]
+fn verifying_finds_damaged_archive_entries() {
+    let payload: &[u8] = b"backup payload, long enough to find again";
+    let dir = tempfile::tempdir().unwrap();
+    let path = |name: &str| dir.path().join(name).display().to_string();
+    let damaged = damaged_zip(&[("data.bin", payload), ("only.bin", b"one-sided entry")], "data.bin");
+    fs::write(path("a.zip"), &damaged).unwrap();
+    fs::write(path("b.zip"), &damaged).unwrap();
+    fs::write(path("healthy.zip"), zip_raw(&[("data.bin", payload)])).unwrap();
+    let one_sided = damaged_zip(&[("data.bin", payload), ("only.bin", b"one-sided entry")], "only.bin");
+    fs::write(path("one-sided.zip"), &one_sided).unwrap();
+
+    let trusting = CompareOptions::default();
+    assert_eq!(status_of(&statuses(&path("a.zip"), &path("b.zip"), &trusting), "data.bin"), Status::Same);
+    assert_eq!(status_of(&statuses(&path("a.zip"), &path("healthy.zip"), &trusting), "data.bin"), Status::Same);
+
+    let verifying = CompareOptions { verify_checksums: true, ..Default::default() };
+    assert_eq!(status_of(&statuses(&path("a.zip"), &path("b.zip"), &verifying), "data.bin"), Status::Error);
+    // Against a healthy copy it is not the same: damaged (read to its end) or
+    // different (where a long entry stops at the first differing byte).
+    let against_healthy = status_of(&statuses(&path("a.zip"), &path("healthy.zip"), &verifying), "data.bin");
+    assert!(matches!(against_healthy, Status::Error | Status::Different), "{against_healthy:?}");
+    let list = statuses(&path("one-sided.zip"), &path("healthy.zip"), &verifying);
+    assert_eq!(status_of(&list, "data.bin"), Status::Same);
+    assert_eq!(status_of(&list, "only.bin"), Status::Error);
+    // The message names the damage.
+    let (l, r) = open_pair(
+        &SourceSpec::parse(&path("a.zip")),
+        &SourceSpec::parse(&path("b.zip")),
+        SourceOptions::default(),
+        false,
+    )
+    .unwrap();
+    let result = compare::compare(&l, &r, &verifying, &Control::default()).unwrap();
+    let node = result.root.children().iter().find(|n| n.name() == "data.bin").unwrap();
+    assert!(node.message().unwrap().contains("does not match the CRC32"), "{:?}", node.message());
+    assert_eq!(result.summary.errors, 1);
+}
+
+/// Content comparison ignores permissions and times; with `compare_metadata`
+/// (for backups) a file with equal content but other permissions or another
+/// modification time is different, and says why.
+#[cfg(unix)]
+#[test]
+fn permissions_and_times_count_when_asked() {
+    use std::os::unix::fs::PermissionsExt;
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    write(a.path(), &[("run.sh", "#!/bin/sh\n"), ("data.txt", "same")]);
+    write(b.path(), &[("run.sh", "#!/bin/sh\n"), ("data.txt", "same")]);
+    fs::set_permissions(a.path().join("run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(b.path().join("run.sh"), fs::Permissions::from_mode(0o644)).unwrap();
+    let when = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    for (dir, offset) in [(a.path(), 0), (b.path(), 1)] {
+        // One second apart: within the tolerance.
+        let file = fs::File::options().write(true).open(dir.join("data.txt")).unwrap();
+        file.set_modified(when + std::time::Duration::from_secs(offset)).unwrap();
+    }
+    let (left, right) = (a.path().display().to_string(), b.path().display().to_string());
+    let plain = statuses(&left, &right, &CompareOptions::default());
+    assert_eq!(status_of(&plain, "run.sh"), Status::Same);
+    let backup = CompareOptions { compare_metadata: true, ..Default::default() };
+    let list = statuses(&left, &right, &backup);
+    assert_eq!(status_of(&list, "run.sh"), Status::Different);
+    assert_eq!(status_of(&list, "data.txt"), Status::Same);
+    // Ten seconds apart: different.
+    let file = fs::File::options().write(true).open(b.path().join("data.txt")).unwrap();
+    file.set_modified(when + std::time::Duration::from_secs(10)).unwrap();
+    let (l, r) =
+        open_pair(&SourceSpec::parse(&left), &SourceSpec::parse(&right), SourceOptions::default(), false).unwrap();
+    let result = compare::compare(&l, &r, &backup, &Control::default()).unwrap();
+    let message = |name: &str| {
+        let node = result.root.children().iter().find(|n| n.name() == name).unwrap();
+        (node.status, node.message().map(str::to_string))
+    };
+    assert_eq!(message("run.sh"), (Status::Different, Some("same content, but other permissions".into())));
+    assert_eq!(message("data.txt"), (Status::Different, Some("same content, but another modification time".into())));
+}
+
 #[cfg(unix)]
 #[test]
 fn a_symlink_is_not_a_file_with_its_target_as_content() {

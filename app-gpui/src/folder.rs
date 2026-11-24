@@ -1181,6 +1181,9 @@ impl FolderView {
                         .child(toggle("verify", "Verify archive entries byte for byte", o.verify_checksums, |o| {
                             o.verify_checksums = !o.verify_checksums
                         }))
+                        .child(toggle("metadata", "Permissions and times count too", o.compare_metadata, |o| {
+                            o.compare_metadata = !o.compare_metadata
+                        }))
                         .child(div().flex_1())
                         .child(
                             style::button("apply", "Compare with these patterns", true)

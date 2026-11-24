@@ -54,13 +54,22 @@ pub struct CompareOptions {
     /// for byte. Off, an equal CRC32 counts as equal content: different data shares
     /// a CRC32 only by a one-in-four-billion chance or by design, and verifying
     /// decompresses every equal entry (a large solid 7z takes seconds instead of a
-    /// tenth of one).
+    /// tenth of one). Verifying also checks each zip and 7z entry it reads, and every
+    /// entry on one side only, against the CRC32 its archive stores, so a damaged
+    /// entry is an error even when the other side is damaged the same way.
     pub verify_checksums: bool,
     /// Archives (also nested ones) are opened and compared entry by entry. Off,
     /// an archive is compared as a file (by size, stored CRC32 or bytes) and left
     /// unexpanded, to be compared with [`compare_path`] when it is opened. An
     /// archive at the root, or next to a folder, is always opened.
     pub open_archives: bool,
+    /// For backups: files with equal content but other permission bits or another
+    /// modification time are different. Times count when they differ by more than
+    /// 2 seconds (zip stores them in 2-second steps, and without a time zone: they
+    /// are read as UTC). Git knows only whether a file is executable, so against a
+    /// Git revision only that counts. Ownership, ACLs and extended attributes are
+    /// not compared.
+    pub compare_metadata: bool,
 }
 
 impl Default for CompareOptions {
@@ -73,6 +82,7 @@ impl Default for CompareOptions {
             compare_contents: true,
             verify_checksums: false,
             open_archives: true,
+            compare_metadata: false,
         }
     }
 }
@@ -735,6 +745,25 @@ impl<'a> Engine<'a> {
             node.set_children(self.children(rel, left, !left)?);
         } else {
             self.control.files_done.fetch_add(1, Ordering::Relaxed);
+            // Verifying checks every archive entry against its stored CRC32, also
+            // those on one side only: a damaged entry is an error, not "left only".
+            if let Some(QuickId::Crc32(crc)) = e.quick_id
+                && self.opts.verify_checksums
+            {
+                let source = if left { self.left } else { self.right };
+                let mut reader = CrcCheck::new(source.vfs.open(&source.path(rel))?, crc);
+                let mut sink = std::io::sink();
+                let mut buf = vec![0u8; 64 << 10];
+                loop {
+                    if self.control.cancel.load(Ordering::Relaxed) {
+                        return Err(Error::Cancelled);
+                    }
+                    match std::io::Read::read(&mut reader, &mut buf).map_err(|e| self.stream_error(rel, e))? {
+                        0 => break,
+                        n => std::io::Write::write_all(&mut sink, &buf[..n]).map_err(|e| Error::io(rel, e))?,
+                    }
+                }
+            }
             let counter = if left { &self.counters.left_only } else { &self.counters.right_only };
             counter.fetch_add(1, Ordering::Relaxed);
         }
@@ -845,6 +874,18 @@ impl<'a> Engine<'a> {
     /// `Same`, `Different`, or `Similar` with the reason when the bytes differ but
     /// the active rules consider the content equal.
     fn compare_files(&self, lrel: &str, rrel: &str, l: &Entry, r: &Entry) -> Result<(Status, Option<&'static str>)> {
+        let (status, reason) = self.compare_data(lrel, rrel, l, r)?;
+        if self.opts.compare_metadata
+            && matches!(status, Status::Same | Status::Similar)
+            && let Some(change) = metadata_change(l, r)
+        {
+            return Ok((Status::Different, Some(change)));
+        }
+        Ok((status, reason))
+    }
+
+    /// The content part of [`compare_files`](Self::compare_files).
+    fn compare_data(&self, lrel: &str, rrel: &str, l: &Entry, r: &Entry) -> Result<(Status, Option<&'static str>)> {
         const SAME: Result<(Status, Option<&'static str>)> = Ok((Status::Same, None));
         const DIFFERENT: Result<(Status, Option<&'static str>)> = Ok((Status::Different, None));
         // A symlink whose target text equals a file's bytes is still not that file.
@@ -936,17 +977,32 @@ impl<'a> Engine<'a> {
         let on_disk = |source: &Source, rel: &str| source.vfs.local_path(&source.path(rel)).is_some();
         let small = l.size < READ_WHOLE && r.size < READ_WHOLE && on_disk(self.left, lrel) && on_disk(self.right, rrel);
         let streamed = !content && !small;
+        // Verifying also checks each archive entry against the CRC32 its archive
+        // stores, at the end of its data: two copies damaged the same way are equal
+        // to each other, but neither holds what was archived.
+        let stored_crc = |e: &Entry| match e.quick_id {
+            Some(QuickId::Crc32(crc)) if self.opts.verify_checksums => Some(crc),
+            _ => None,
+        };
         if streamed {
-            let open = |source: &Source, rel: &str, data: Option<Data>| -> Result<Box<dyn std::io::Read + Send>> {
-                match data {
-                    Some(data) => Ok(Box::new(std::io::Cursor::new(data))),
-                    None => source.vfs.open(&source.path(rel)),
-                }
+            let open = |source: &Source,
+                        rel: &str,
+                        data: Option<Data>,
+                        entry: &Entry|
+             -> Result<Box<dyn std::io::Read + Send>> {
+                let reader: Box<dyn std::io::Read + Send> = match data {
+                    Some(data) => Box::new(std::io::Cursor::new(data)),
+                    None => source.vfs.open(&source.path(rel))?,
+                };
+                Ok(match stored_crc(entry) {
+                    Some(crc) => Box::new(CrcCheck::new(reader, crc)),
+                    None => reader,
+                })
             };
             let io = |e| Error::io(lrel, e);
             let head = if sniff { convert::SNIFF } else { 4 };
-            let (left_head, left_stream) = peek(open(self.left, lrel, left_data)?, head).map_err(io)?;
-            let (right_head, right_stream) = peek(open(self.right, rrel, right_data)?, head).map_err(io)?;
+            let (left_head, left_stream) = peek(open(self.left, lrel, left_data, l)?, head).map_err(io)?;
+            let (right_head, right_stream) = peek(open(self.right, rrel, right_data, r)?, head).map_err(io)?;
             return match compare_streams(left_stream, right_stream, eol, &self.control.cancel)
                 .map_err(|e| self.stream_error(lrel, e))?
             {
@@ -982,6 +1038,13 @@ impl<'a> Engine<'a> {
             Some(data) => data,
             None => read_right()?,
         };
+        for (rel, entry, data) in [(lrel, l, &left_data), (rrel, r, &right_data)] {
+            if let Some(crc) = stored_crc(entry)
+                && crc32fast::hash(data) != crc
+            {
+                return Err(Error::io(rel, damaged()));
+            }
+        }
         if *left_data == *right_data {
             return SAME;
         }
@@ -1006,6 +1069,64 @@ impl<'a> Engine<'a> {
             return Ok((Status::Similar, Some("same FlatBuffers data and schema, only binary layout differs")));
         }
         DIFFERENT
+    }
+}
+
+/// How two files of equal content differ in their metadata, if they do: their
+/// permission bits (only the executable bit against Git) or modification times.
+fn metadata_change(l: &Entry, r: &Entry) -> Option<&'static str> {
+    if let (Some(a), Some(b)) = (l.mode, r.mode) {
+        let git = [l, r].iter().any(|e| matches!(e.quick_id, Some(QuickId::GitOid(_))));
+        if git && (a & 0o111 != 0) != (b & 0o111 != 0) {
+            return Some("same content, but executable on one side only");
+        }
+        if !git && a != b {
+            return Some("same content, but other permissions");
+        }
+    }
+    if let (Some(a), Some(b)) = (l.mtime, r.mtime)
+        && a.abs_diff(b) > 2
+    {
+        return Some("same content, but another modification time");
+    }
+    None
+}
+
+/// The error for an archive entry whose data does not match its stored CRC32.
+fn damaged() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "damaged in the archive: the data does not match the CRC32 stored for it",
+    )
+}
+
+/// Passes an archive entry's data through and checks it against the CRC32 its
+/// archive stores once the end is reached.
+struct CrcCheck<R> {
+    inner: R,
+    hasher: crc32fast::Hasher,
+    expected: u32,
+    checked: bool,
+}
+
+impl<R> CrcCheck<R> {
+    fn new(inner: R, expected: u32) -> Self {
+        CrcCheck { inner, hasher: crc32fast::Hasher::new(), expected, checked: false }
+    }
+}
+
+impl<R: std::io::Read> std::io::Read for CrcCheck<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        if n > 0 {
+            self.hasher.update(&buf[..n]);
+        } else if !buf.is_empty() && !self.checked {
+            self.checked = true;
+            if self.hasher.clone().finalize() != self.expected {
+                return Err(damaged());
+            }
+        }
+        Ok(n)
     }
 }
 
@@ -1219,6 +1340,30 @@ pub fn flatten(node: &Node) -> Vec<(String, Status)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Against Git only the executable bit counts; elsewhere every permission bit
+    /// and times more than 2 seconds apart.
+    #[test]
+    fn metadata_changes() {
+        let file = |mode: u32, mtime: Option<i64>, git: bool| Entry {
+            name: "f".into(),
+            kind: EntryKind::File,
+            size: 1,
+            mtime,
+            quick_id: git.then(|| QuickId::GitOid(gix::ObjectId::empty_blob(gix::hash::Kind::Sha1))),
+            mode: Some(mode),
+            ignored: false,
+        };
+        assert_eq!(metadata_change(&file(0o644, Some(10), false), &file(0o644, Some(12), false)), None);
+        assert!(metadata_change(&file(0o644, Some(10), false), &file(0o664, Some(10), false)).is_some());
+        assert!(metadata_change(&file(0o644, Some(10), false), &file(0o644, Some(13), false)).is_some());
+        // A worktree file 0o664 against Git's 0o644: not executable either way.
+        assert_eq!(metadata_change(&file(0o664, Some(10), false), &file(0o644, None, true)), None);
+        assert_eq!(
+            metadata_change(&file(0o755, Some(10), false), &file(0o644, None, true)),
+            Some("same content, but executable on one side only")
+        );
+    }
 
     #[test]
     fn crlf_equality() {

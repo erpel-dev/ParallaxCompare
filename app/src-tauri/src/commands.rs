@@ -685,6 +685,8 @@ pub async fn run_compare(
             session.right.vfs.changed(&session.right.path(""));
         }
         let result = compare::compare(&session.left, &session.right, &options, &control).map_err(err)?;
+        // The progress line says what the wait is for once the compare is done.
+        let _preparing = parallax_core::activity::begin("Preparing the result");
         let view = ViewResult { root: tree::view(&result.root, false), summary: result.summary };
         *session.tree.lock() = Some(result.root);
         Ok(view)

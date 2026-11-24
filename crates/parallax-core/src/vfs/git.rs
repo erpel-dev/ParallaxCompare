@@ -373,6 +373,11 @@ impl GitTreeFs {
 }
 
 fn to_entry(repo: &gix::Repository, name: String, kind: GitEntryKind, oid: ObjectId) -> Result<Entry> {
+    let mode = match kind {
+        GitEntryKind::BlobExecutable => Some(0o755),
+        GitEntryKind::Blob => Some(0o644),
+        _ => None,
+    };
     let (kind, size) = match kind {
         GitEntryKind::Tree => (EntryKind::Dir, 0),
         GitEntryKind::Commit => (EntryKind::Submodule, 0),
@@ -381,7 +386,7 @@ fn to_entry(repo: &gix::Repository, name: String, kind: GitEntryKind, oid: Objec
             (EntryKind::File, repo.find_header(oid).map_err(Error::git)?.size())
         }
     };
-    Ok(Entry { name, kind, size, mtime: None, quick_id: Some(QuickId::GitOid(oid)), ignored: false })
+    Ok(Entry { name, kind, size, mtime: None, quick_id: Some(QuickId::GitOid(oid)), mode, ignored: false })
 }
 
 impl Vfs for GitTreeFs {
@@ -521,6 +526,7 @@ impl GitIndexFs {
                 size: 0,
                 mtime: None,
                 quick_id: None,
+                mode: None,
                 ignored: false,
             });
         }
