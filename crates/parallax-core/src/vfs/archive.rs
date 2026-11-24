@@ -469,7 +469,9 @@ fn open_zip(data: ArchiveData, index: &mut Index) -> Result<Backend> {
             index.ensure_dir(&path, mtime);
         } else {
             let kind = if file.is_symlink() { EntryKind::Symlink } else { EntryKind::File };
-            let mode = file.unix_mode().map(|m| m & 0o7777);
+            // Only a zip made on Unix stores permissions; the zip crate makes up a
+            // mode from the DOS attributes of others (0664 for a plain file).
+            let mode = (file.system() == zip::System::Unix).then(|| file.unix_mode()).flatten().map(|m| m & 0o7777);
             index.add_file(&path, kind, file.size(), mtime, Some(QuickId::Crc32(file.crc32())), mode);
             index_of.insert(path, i);
         }
@@ -1298,6 +1300,32 @@ mod tests {
         }
         let fs = ArchiveFs::open_file(&tgz, ArchiveFormat::TarGz, "big.tar.gz").unwrap();
         assert!(read_all(&fs) == big);
+
+        // Verifying the 7z entry's CRC32 against a tar member, which has none,
+        // reads both as streams, not the tar member whole.
+        use crate::source::{SourceOptions, SourceSpec, open_pair};
+        let spec = |p: &std::path::Path| SourceSpec::parse(&p.display().to_string());
+        let (l, r) = open_pair(&spec(&seven), &spec(&tgz), SourceOptions::default(), false).unwrap();
+        let verify = crate::compare::CompareOptions { verify_checksums: true, ..Default::default() };
+        let result = crate::compare::compare(&l, &r, &verify, &crate::compare::Control::default()).unwrap();
+        assert_eq!(crate::compare::flatten(&result.root), [("video.bin".to_string(), crate::compare::Status::Same)]);
+    }
+
+    /// Only a zip made on Unix stores permissions; the zip crate makes up a mode
+    /// for others, which must not count as stored.
+    #[test]
+    fn zip_modes_only_from_unix() {
+        let mut buf = Cursor::new(Vec::new());
+        let mut zip = zip::ZipWriter::new(&mut buf);
+        let unix = zip::write::SimpleFileOptions::default().unix_permissions(0o640);
+        zip.start_file("unix.txt", unix).unwrap();
+        std::io::Write::write_all(&mut zip, b"u").unwrap();
+        zip.start_file("dos.txt", zip::write::SimpleFileOptions::default().system(zip::System::Dos)).unwrap();
+        std::io::Write::write_all(&mut zip, b"d").unwrap();
+        zip.finish().unwrap();
+        let fs = ArchiveFs::open(Data::from_vec(buf.into_inner()), ArchiveFormat::Zip, "modes.zip").unwrap();
+        assert_eq!(fs.stat("unix.txt").unwrap().mode, Some(0o640));
+        assert_eq!(fs.stat("dos.txt").unwrap().mode, None);
     }
 
     /// The limit on how far an archive expands follows its size beyond 4 GiB.

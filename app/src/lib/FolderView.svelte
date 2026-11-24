@@ -493,21 +493,33 @@
   /** Waits until the browser has painted what changed, such as a status message. */
   const painted = () => new Promise<void>((done) => requestAnimationFrame(() => setTimeout(done)));
 
+  /** Changes waiting for their label to be painted, applied in the order they came. */
+  let rebuilds: { label: string; changes: (() => void | Promise<void>)[] } | null = null;
+
   /**
    * Runs a change that rebuilds the rows. With a large tree that takes a moment on
-   * the UI thread, during which nothing can be drawn: `label` is shown first.
+   * the UI thread, during which nothing can be drawn: `label` is shown first. A
+   * change that comes while another waits joins it, so they apply in order and
+   * an older one never overwrites a newer one.
    */
   async function rebuilding(label: string, change: () => void | Promise<void>) {
+    if (rebuilds) {
+      rebuilds.changes.push(change);
+      rebuilds.label = busy = label;
+      return;
+    }
     const size = flat ? flatRows.length : (counts?.files ?? 0);
     if (size < 50_000 || busy) return change();
+    const pending = (rebuilds = { label, changes: [change] });
     busy = label;
-    await tick();
-    await painted();
     try {
-      await change();
+      await tick();
+      await painted();
+      while (pending.changes.length) await pending.changes.shift()!();
       await tick();
     } finally {
-      if (busy === label) busy = "";
+      rebuilds = null;
+      if (busy === pending.label) busy = "";
     }
   }
 

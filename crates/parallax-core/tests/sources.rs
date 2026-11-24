@@ -1312,6 +1312,11 @@ fn equal_crc32_with_and_without_verifying() {
 /// A stored zip entry with one byte of its data changed and its CRC32 left as it
 /// was: what a damaged backup archive looks like.
 fn damaged_zip(files: &[(&str, &[u8])], damage: &str) -> Vec<u8> {
+    damaged_zip_at(files, damage, 0)
+}
+
+/// As [`damaged_zip`], changing the byte at `offset` in the entry's data.
+fn damaged_zip_at(files: &[(&str, &[u8])], damage: &str, offset: usize) -> Vec<u8> {
     let mut buf = std::io::Cursor::new(Vec::new());
     let mut zip = zip::ZipWriter::new(&mut buf);
     let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
@@ -1323,7 +1328,7 @@ fn damaged_zip(files: &[(&str, &[u8])], damage: &str) -> Vec<u8> {
     let mut bytes = buf.into_inner();
     let content = files.iter().find(|(p, _)| *p == damage).unwrap().1;
     let at = bytes.windows(content.len()).position(|w| w == content).unwrap();
-    bytes[at] ^= 0x20;
+    bytes[at + offset] ^= 0x20;
     bytes
 }
 
@@ -1373,6 +1378,48 @@ fn verifying_finds_damaged_archive_entries() {
 /// Content comparison ignores permissions and times; with `compare_metadata`
 /// (for backups) a file with equal content but other permissions or another
 /// modification time is different, and says why.
+/// An archive inside an archive, compared as a file (archives left closed, as
+/// the app does): verifying checks it against the outer archive's CRC32 too, on
+/// both sides and on one side only.
+#[test]
+fn verifying_checks_nested_archives_compared_as_files() {
+    let inner = zip_raw(&[("doc.txt", b"inner document, long enough to stand out")]);
+    let dir = tempfile::tempdir().unwrap();
+    let path = |name: &str| dir.path().join(name).display().to_string();
+    let damaged = damaged_zip_at(&[("inner.zip", &inner), ("x.txt", b"x")], "inner.zip", 40);
+    fs::write(path("a.zip"), &damaged).unwrap();
+    fs::write(path("b.zip"), &damaged).unwrap();
+    fs::write(path("c.zip"), zip_raw(&[("x.txt", b"x")])).unwrap();
+    let lazy = CompareOptions { open_archives: false, ..Default::default() };
+    assert_eq!(status_of(&statuses(&path("a.zip"), &path("b.zip"), &lazy), "inner.zip"), Status::Same);
+    let verifying = CompareOptions { verify_checksums: true, ..lazy };
+    assert_eq!(status_of(&statuses(&path("a.zip"), &path("b.zip"), &verifying), "inner.zip"), Status::Error);
+    assert_eq!(status_of(&statuses(&path("a.zip"), &path("c.zip"), &verifying), "inner.zip"), Status::Error);
+}
+
+/// A text entry whose bytes differ only in a byte order mark is read whole to
+/// compare its text; with verifying, that read is checked too, so a damaged
+/// entry is not taken as similar.
+#[test]
+fn verifying_checks_whole_reads_after_a_stream_comparison() {
+    // Longer than what a stream comparison reads before stopping at the first
+    // difference (the mark), so only the whole read reaches the end.
+    let text = "the same text in both, but for the byte order mark\n".repeat(400);
+    let with_bom = [&b"\xEF\xBB\xBF"[..], text.replacen("mark", "marK", 1).as_bytes()].concat();
+    let dir = tempfile::tempdir().unwrap();
+    let path = |name: &str| dir.path().join(name).display().to_string();
+    // Damage turns "marK" into "mark": the text matches, the stored CRC32 does not.
+    let at = with_bom.windows(4).position(|w| w == b"marK").unwrap() + 3;
+    fs::write(path("bom.zip"), damaged_zip_at(&[("t.txt", &with_bom)], "t.txt", at)).unwrap();
+    fs::write(path("plain.zip"), zip_raw(&[("t.txt", text.as_bytes())])).unwrap();
+    assert_eq!(
+        status_of(&statuses(&path("bom.zip"), &path("plain.zip"), &CompareOptions::default()), "t.txt"),
+        Status::Similar
+    );
+    let verifying = CompareOptions { verify_checksums: true, ..Default::default() };
+    assert_eq!(status_of(&statuses(&path("bom.zip"), &path("plain.zip"), &verifying), "t.txt"), Status::Error);
+}
+
 #[cfg(unix)]
 #[test]
 fn permissions_and_times_count_when_asked() {

@@ -695,6 +695,8 @@ impl<'a> Engine<'a> {
                 && self.includes.covers(rel)
                 && let (Some(a), Some(b)) = (&l.quick_id, &r.quick_id)
                 && a.matches(b) == Some(true)
+                // A Git tree id; or the CRC32 of a nested archive, unless verifying.
+                && self.trusts(a)
             {
                 self.counters.identical_subtrees.fetch_add(1, Ordering::Relaxed);
                 node.set_unexpanded(true);
@@ -736,9 +738,12 @@ impl<'a> Engine<'a> {
 
     fn fill_orphan(&self, node: &mut Node, rel: &str, e: &Entry, left: bool, is_root: bool) -> Result<()> {
         node.status = if left { Status::LeftOnly } else { Status::RightOnly };
+        let source = if left { self.left } else { self.right };
         if e.kind.is_container() && !is_root && self.lazy_archive(rel, e) {
             node.set_unexpanded(true);
             self.control.files_done.fetch_add(1, Ordering::Relaxed);
+            // An archive inside an archive, compared as a file: checked like one.
+            self.check_entry(source, rel, e)?;
             let counter = if left { &self.counters.left_only } else { &self.counters.right_only };
             counter.fetch_add(1, Ordering::Relaxed);
         } else if e.kind.is_container() {
@@ -747,23 +752,7 @@ impl<'a> Engine<'a> {
             self.control.files_done.fetch_add(1, Ordering::Relaxed);
             // Verifying checks every archive entry against its stored CRC32, also
             // those on one side only: a damaged entry is an error, not "left only".
-            if let Some(QuickId::Crc32(crc)) = e.quick_id
-                && self.opts.verify_checksums
-            {
-                let source = if left { self.left } else { self.right };
-                let mut reader = CrcCheck::new(source.vfs.open(&source.path(rel))?, crc);
-                let mut sink = std::io::sink();
-                let mut buf = vec![0u8; 64 << 10];
-                loop {
-                    if self.control.cancel.load(Ordering::Relaxed) {
-                        return Err(Error::Cancelled);
-                    }
-                    match std::io::Read::read(&mut reader, &mut buf).map_err(|e| self.stream_error(rel, e))? {
-                        0 => break,
-                        n => std::io::Write::write_all(&mut sink, &buf[..n]).map_err(|e| Error::io(rel, e))?,
-                    }
-                }
-            }
+            self.check_entry(source, rel, e)?;
             let counter = if left { &self.counters.left_only } else { &self.counters.right_only };
             counter.fetch_add(1, Ordering::Relaxed);
         }
@@ -853,8 +842,8 @@ impl<'a> Engine<'a> {
         {
             return Ok(if equal { Status::Same } else { Status::Different });
         }
-        let left = self.left.vfs.open(&self.left.path(rel))?;
-        let right = self.right.vfs.open(&self.right.path(rel))?;
+        let left = self.open_checked(self.left, rel, l)?;
+        let right = self.open_checked(self.right, rel, r)?;
         Ok(match compare_streams(left, right, false, &self.control.cancel).map_err(|e| self.stream_error(rel, e))? {
             Streams::Same => Status::Same,
             _ => Status::Different,
@@ -869,6 +858,52 @@ impl<'a> Engine<'a> {
     /// Whether equal ids settle equal content: Git ids always, CRC32 unless verifying.
     fn trusts(&self, id: &QuickId) -> bool {
         id.proves_equality() || !self.opts.verify_checksums
+    }
+
+    /// The CRC32 an archive stores for `entry`, when verifying: every read of the
+    /// entry is checked against it, so a damaged entry is an error even when the
+    /// other side is damaged the same way.
+    fn stored_crc(&self, entry: &Entry) -> Option<u32> {
+        match entry.quick_id {
+            Some(QuickId::Crc32(crc)) if self.opts.verify_checksums => Some(crc),
+            _ => None,
+        }
+    }
+
+    /// Opens `rel` of `source` as a stream, checked against its stored CRC32 at the end.
+    fn open_checked(&self, source: &Source, rel: &str, entry: &Entry) -> Result<Box<dyn std::io::Read + Send>> {
+        let reader = source.vfs.open(&source.path(rel))?;
+        Ok(match self.stored_crc(entry) {
+            Some(crc) => Box::new(CrcCheck::new(reader, crc)),
+            None => reader,
+        })
+    }
+
+    /// Reads `rel` of `source` whole, checked against its stored CRC32.
+    fn read_checked(&self, source: &Source, rel: &str, entry: &Entry) -> Result<Data> {
+        let data = source.vfs.read(&source.path(rel))?;
+        match self.stored_crc(entry) {
+            Some(crc) if crc32fast::hash(&data) != crc => Err(Error::io(rel, damaged())),
+            _ => Ok(data),
+        }
+    }
+
+    /// Reads an entry to its end only to check it against its stored CRC32, when
+    /// verifying: for entries on one side only, which nothing else reads.
+    fn check_entry(&self, source: &Source, rel: &str, entry: &Entry) -> Result<()> {
+        if self.stored_crc(entry).is_none() {
+            return Ok(());
+        }
+        let mut reader = self.open_checked(source, rel, entry)?;
+        let mut buf = vec![0u8; 64 << 10];
+        loop {
+            if self.control.cancel.load(Ordering::Relaxed) {
+                return Err(Error::Cancelled);
+            }
+            if reader.read(&mut buf).map_err(|e| self.stream_error(rel, e))? == 0 {
+                return Ok(());
+            }
+        }
     }
 
     /// `Same`, `Different`, or `Similar` with the reason when the bytes differ but
@@ -928,12 +963,16 @@ impl<'a> Engine<'a> {
         if l.size != r.size && !must_read {
             return DIFFERENT;
         }
-        let read_left = || self.left.vfs.read(&self.left.path(lrel));
-        let read_right = || self.right.vfs.read(&self.right.path(rrel));
+        // Every whole read is checked against a stored CRC32 when verifying, the
+        // fallbacks after a stream comparison included.
+        let read_left = || self.read_checked(self.left, lrel, l);
+        let read_right = || self.read_checked(self.right, rrel, r);
         // A Git object or archive entry on one side, a plain file on the other: hash the
         // plain file the way the id was made instead of inflating the stored data.
+        // Not when verifying a CRC32: both sides are read then, as streams, so an
+        // entry too large to read whole is still compared.
         let (left_data, right_data) = match (&l.quick_id, &r.quick_id) {
-            (Some(id), None) => {
+            (Some(id), None) if self.trusts(id) => {
                 let data = read_right()?;
                 if l.size == r.size && id.matches_data(&data) {
                     // A CRC match still needs the bytes compared below.
@@ -945,7 +984,7 @@ impl<'a> Engine<'a> {
                 }
                 (None, Some(data))
             }
-            (None, Some(id)) => {
+            (None, Some(id)) if self.trusts(id) => {
                 let data = read_left()?;
                 if l.size == r.size && id.matches_data(&data) {
                     // A CRC match still needs the bytes compared below.
@@ -977,27 +1016,17 @@ impl<'a> Engine<'a> {
         let on_disk = |source: &Source, rel: &str| source.vfs.local_path(&source.path(rel)).is_some();
         let small = l.size < READ_WHOLE && r.size < READ_WHOLE && on_disk(self.left, lrel) && on_disk(self.right, rrel);
         let streamed = !content && !small;
-        // Verifying also checks each archive entry against the CRC32 its archive
-        // stores, at the end of its data: two copies damaged the same way are equal
-        // to each other, but neither holds what was archived.
-        let stored_crc = |e: &Entry| match e.quick_id {
-            Some(QuickId::Crc32(crc)) if self.opts.verify_checksums => Some(crc),
-            _ => None,
-        };
         if streamed {
+            // Read data is from a plain file (the side without an id), already whole.
             let open = |source: &Source,
                         rel: &str,
                         data: Option<Data>,
                         entry: &Entry|
              -> Result<Box<dyn std::io::Read + Send>> {
-                let reader: Box<dyn std::io::Read + Send> = match data {
-                    Some(data) => Box::new(std::io::Cursor::new(data)),
-                    None => source.vfs.open(&source.path(rel))?,
-                };
-                Ok(match stored_crc(entry) {
-                    Some(crc) => Box::new(CrcCheck::new(reader, crc)),
-                    None => reader,
-                })
+                match data {
+                    Some(data) => Ok(Box::new(std::io::Cursor::new(data))),
+                    None => self.open_checked(source, rel, entry),
+                }
             };
             let io = |e| Error::io(lrel, e);
             let head = if sniff { convert::SNIFF } else { 4 };
@@ -1038,13 +1067,6 @@ impl<'a> Engine<'a> {
             Some(data) => data,
             None => read_right()?,
         };
-        for (rel, entry, data) in [(lrel, l, &left_data), (rrel, r, &right_data)] {
-            if let Some(crc) = stored_crc(entry)
-                && crc32fast::hash(data) != crc
-            {
-                return Err(Error::io(rel, damaged()));
-            }
-        }
         if *left_data == *right_data {
             return SAME;
         }
@@ -1074,7 +1096,7 @@ impl<'a> Engine<'a> {
 
 /// How two files of equal content differ in their metadata, if they do: their
 /// permission bits (only the executable bit against Git) or modification times.
-fn metadata_change(l: &Entry, r: &Entry) -> Option<&'static str> {
+pub fn metadata_change(l: &Entry, r: &Entry) -> Option<&'static str> {
     if let (Some(a), Some(b)) = (l.mode, r.mode) {
         let git = [l, r].iter().any(|e| matches!(e.quick_id, Some(QuickId::GitOid(_))));
         if git && (a & 0o111 != 0) != (b & 0o111 != 0) {

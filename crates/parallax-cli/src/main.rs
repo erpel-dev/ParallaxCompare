@@ -342,6 +342,14 @@ fn compare_files(cli: &Cli, left: &Source, right: &Source, paint: &Paint) -> Res
     let left_data = left.vfs.read(&left.root).with_context(|| format!("reading {}", left.root))?;
     let right_data = right.vfs.read(&right.root).with_context(|| format!("reading {}", right.root))?;
     let mut out = std::io::stdout().lock();
+    // As in a folder comparison: equal content with other permissions or times.
+    if cli.metadata && *left_data == *right_data {
+        let (l, r) = (left.vfs.stat(&left.root)?, right.vfs.stat(&right.root)?);
+        if let Some(change) = compare::metadata_change(&l, &r) {
+            writeln!(out, "Files differ: {change}")?;
+            return Ok(false);
+        }
+    }
     let schemas =
         [cli.left_schema.as_deref().or(cli.schema.as_deref()), cli.right_schema.as_deref().or(cli.schema.as_deref())];
     if *left_data == *right_data
