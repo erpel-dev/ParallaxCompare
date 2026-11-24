@@ -16,7 +16,11 @@
   const manyPairs = scenario.has("many-pairs");
   const movedNames = manyPairs ? [...names(24, "a-same-"), ...names(24, "z-changed-")] : ["same\nname.txt", "changed-move.txt"];
   const orphan = (name, left) => ({ name, left: left ? file() : null, right: left ? null : file(), status: left ? "leftOnly" : "rightOnly" });
-  const root = arxml ? folder("", [pair("metadata.arxml", "different")]) : scenario.has("tree-order") ? folder("", [
+  // large: 60,000 files, enough that rebuilding the rows takes a visible moment.
+  const large = () => folder("", [
+    folder("big", Array.from({ length: 60000 }, (_, i) => (i % 2 ? pair(`f${i}.txt`, "different") : orphan(`g${i}.txt`, true)))),
+  ]);
+  const root = arxml ? folder("", [pair("metadata.arxml", "different")]) : scenario.has("large") ? large() : scenario.has("tree-order") ? folder("", [
     folder("z-folder", [pair("inside.txt", "different")]),
     pair("a-same.txt"),
     pair("b-later.txt", "different"),

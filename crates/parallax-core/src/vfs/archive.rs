@@ -98,6 +98,7 @@ impl Index {
                     size: 0,
                     mtime: if dir == path { mtime } else { None },
                     quick_id: None,
+                    mode: None,
                     ignored: false,
                 };
                 self.dirs.get_mut(parent).expect("parent dir exists").push(entry);
@@ -118,7 +119,15 @@ impl Index {
         *count = (*count).max(n);
     }
 
-    fn add_file(&mut self, path: &str, kind: EntryKind, size: u64, mtime: Option<i64>, quick_id: Option<QuickId>) {
+    fn add_file(
+        &mut self,
+        path: &str,
+        kind: EntryKind,
+        size: u64,
+        mtime: Option<i64>,
+        quick_id: Option<QuickId>,
+        mode: Option<u32>,
+    ) {
         let (parent, name) = split_parent(path);
         self.ensure_dir(parent, None);
         if !self.known_dirs.contains(parent) {
@@ -126,7 +135,7 @@ impl Index {
             return;
         }
         let list = self.dirs.get_mut(parent).expect("parent dir exists");
-        let entry = Entry { name: name.to_string(), kind, size, mtime, quick_id, ignored: false };
+        let entry = Entry { name: name.to_string(), kind, size, mtime, quick_id, mode, ignored: false };
         // Later entries win, like extraction would behave; the path is then
         // ambiguous, and reading it fails rather than compare one of them.
         if let Some(&at) = self.file_at.get(path) {
@@ -151,10 +160,24 @@ const MT_BLOCK_SIZE: u64 = 16 << 20;
 
 /// No entry of an archive is expanded beyond this. The size in a header is
 /// attacker-controlled, and neither memory nor a temporary file should follow it.
-const MAX_ENTRY: u64 = 2 << 30;
+const MAX_ENTRY: u64 = if cfg!(test) { 24 << 20 } else { 2 << 30 };
 
-/// No 7z block is decoded beyond this; what does not fit in memory goes to disk.
-const MAX_BLOCK: u64 = 4 << 30;
+/// How far an archive may expand, as a 7z block or a compressed tar written to
+/// the temporary file: 4 GiB, or 16 times the archive's own size for a larger
+/// one. The sizes in an archive's headers are attacker-controlled, so a small
+/// archive never fills the disk; a backup of videos or other data that hardly
+/// compresses still expands to its real size.
+const MAX_EXPANSION: u64 = 4 << 30;
+const EXPANSION_RATIO: u64 = 16;
+
+fn expansion_limit(archive_len: u64) -> u64 {
+    archive_len.saturating_mul(EXPANSION_RATIO).max(MAX_EXPANSION)
+}
+
+/// A 7z block holding a single file larger than this is decoded to the temporary
+/// file and read as a stream, like a solid block, instead of into memory (where
+/// entries are limited to [`MAX_ENTRY`]).
+const STREAM_BLOCK: u64 = if cfg!(test) { 4 << 20 } else { 64 << 20 };
 
 /// Decoded files of solid 7z blocks kept in memory, for all blocks of all open
 /// archives together; the rest goes to temporary files. A solid block can hold
@@ -172,11 +195,11 @@ const SOLID_IDLE: std::time::Duration = std::time::Duration::from_millis(if cfg!
 /// header cannot make the process ask for gigabytes before a byte is read.
 const READ_HINT: usize = 8 << 20;
 
-/// A compressed tar may expand to this multiple of its own size, within these
-/// bounds, before it is refused rather than written to the temporary file.
+/// A compressed tar may expand to this multiple of its own size, at least to
+/// `TAR_MIN` and at most to [`expansion_limit`], before it is refused rather than
+/// written to the temporary file.
 const TAR_RATIO: u64 = 200;
 const TAR_MIN: u64 = 256 << 20;
-const TAR_MAX: u64 = 4 << 30;
 
 /// Directories that one archive member may create. Member names are unbounded, and
 /// creating the parents recursively would overflow the stack on a crafted one.
@@ -446,7 +469,10 @@ fn open_zip(data: ArchiveData, index: &mut Index) -> Result<Backend> {
             index.ensure_dir(&path, mtime);
         } else {
             let kind = if file.is_symlink() { EntryKind::Symlink } else { EntryKind::File };
-            index.add_file(&path, kind, file.size(), mtime, Some(QuickId::Crc32(file.crc32())));
+            // Only a zip made on Unix stores permissions; the zip crate makes up a
+            // mode from the DOS attributes of others (0664 for a plain file).
+            let mode = (file.system() == zip::System::Unix).then(|| file.unix_mode()).flatten().map(|m| m & 0o7777);
+            index.add_file(&path, kind, file.size(), mtime, Some(QuickId::Crc32(file.crc32())), mode);
             index_of.insert(path, i);
         }
     }
@@ -501,7 +527,7 @@ fn open_7z(data: ArchiveData, index: &mut Index, label: &str) -> Result<Backend>
             index.ensure_dir(&path, mtime);
         } else {
             let quick_id = file.has_crc.then_some(QuickId::Crc32(file.crc as u32));
-            index.add_file(&path, sevenz_kind(file), file.size, mtime, quick_id);
+            index.add_file(&path, sevenz_kind(file), file.size, mtime, quick_id, sevenz_mode(file));
             index_of.insert(path, i);
         }
     }
@@ -516,9 +542,22 @@ fn open_7z(data: ArchiveData, index: &mut Index, label: &str) -> Result<Backend>
             ends[i] = decoded[block];
         }
     }
-    let solid =
-        SolidBlocks(files_per_block.iter().map(|&n| (n > 1).then(|| Arc::new(SolidBlock::named(label)))).collect());
+    // Blocks of several files, and large blocks of one, are decoded to memory or
+    // the temporary file as they are read (see `SolidBlock`).
+    let solid = SolidBlocks(
+        files_per_block
+            .iter()
+            .zip(&decoded)
+            .map(|(&n, &size)| (n > 1 || size > STREAM_BLOCK).then(|| Arc::new(SolidBlock::named(label))))
+            .collect(),
+    );
     Ok(Backend::SevenZ { data, archive: Arc::new(archive), index_of, solid, ends })
+}
+
+/// The Unix permission bits, when 7-Zip stored a Unix mode (see [`sevenz_kind`]).
+fn sevenz_mode(file: &sevenz_rust2::ArchiveEntry) -> Option<u32> {
+    let attributes = file.windows_attributes;
+    (file.has_windows_attributes && attributes & 0x8000 != 0).then_some((attributes >> 16) & 0o7777)
 }
 
 /// A symlink, when the entry has a Unix mode, which 7-Zip stores in the high 16
@@ -546,7 +585,7 @@ fn open_tar(data: ArchiveData, format: ArchiveFormat, index: &mut Index) -> Resu
     let compressed = !matches!(format, ArchiveFormat::Tar);
     // A compressed stream is written to the temporary file, so how far it may
     // expand has to be bounded here; an uncompressed tar is read in place.
-    let limit = data.len().saturating_mul(TAR_RATIO).clamp(TAR_MIN, TAR_MAX);
+    let limit = data.len().saturating_mul(TAR_RATIO).clamp(TAR_MIN, expansion_limit(data.len()));
     let mut expanded = 0u64;
     let mut spool: Option<Spool> = None;
     let mut contents: HashMap<String, TarContent> = HashMap::new();
@@ -560,6 +599,7 @@ fn open_tar(data: ArchiveData, format: ArchiveFormat, index: &mut Index) -> Resu
             continue;
         }
         let mtime = entry.header().mtime().ok().map(|t| t as i64);
+        let mode = entry.header().mode().ok().map(|m| m & 0o7777);
         let kind = entry.header().entry_type();
         let content = match kind {
             tar::EntryType::Directory => {
@@ -573,7 +613,8 @@ fn open_tar(data: ArchiveData, format: ArchiveFormat, index: &mut Index) -> Resu
                     // stream, so no size limit applies to comparing it.
                     TarContent::Direct(Span { at: entry.raw_file_position(), len: size })
                 } else {
-                    entry_hint(size).map_err(|e| in_entry(&path, e))?;
+                    // Written to the temporary file, not memory: the limit on what
+                    // the whole archive expands to bounds it.
                     count(&mut expanded, size, limit)?;
                     let spool = match &mut spool {
                         Some(spool) => spool,
@@ -612,7 +653,7 @@ fn open_tar(data: ArchiveData, format: ArchiveFormat, index: &mut Index) -> Resu
             tar::EntryType::Symlink => EntryKind::Symlink,
             _ => EntryKind::File,
         };
-        index.add_file(&path, entry_kind, size, mtime, None);
+        index.add_file(&path, entry_kind, size, mtime, None, mode);
         contents.insert(path, content);
     }
     drop(archive);
@@ -631,13 +672,17 @@ fn count(expanded: &mut u64, size: u64, limit: u64) -> Result<()> {
     Ok(())
 }
 
-/// Refuses a block that expands beyond [`MAX_BLOCK`]; the decoder threads to use.
-fn block_threads(archive: &sevenz_rust2::Archive, block: usize) -> Result<u32> {
+/// Refuses a block that expands beyond [`expansion_limit`] of the archive's
+/// size (`archive_len`); the decoder threads to use.
+fn block_threads(archive: &sevenz_rust2::Archive, block: usize, archive_len: u64) -> Result<u32> {
     let unpacked = archive.blocks[block].get_unpack_size();
-    if unpacked > MAX_BLOCK {
+    let limit = expansion_limit(archive_len);
+    if unpacked > limit {
         return Err(Error::Unsupported(format!(
-            "a block of this archive expands to {} MiB, more than a comparison reads",
-            unpacked >> 20
+            "a block of this archive expands to {} MiB; a {} MiB archive is read up to {} MiB (4 GiB, or 16 times its size)",
+            unpacked >> 20,
+            archive_len >> 20,
+            limit >> 20
         )));
     }
     Ok(if unpacked >= MT_BLOCK_SIZE {
@@ -655,7 +700,7 @@ fn decode_7z_file(
     block: usize,
     path: &str,
 ) -> Result<Option<Vec<u8>>> {
-    let threads = block_threads(archive, block)?;
+    let threads = block_threads(archive, block, data.len())?;
     let password = sevenz_rust2::Password::empty();
     let mut source = data.reader();
     let mut found = None;
@@ -775,7 +820,7 @@ impl SolidBlock {
                 st.restart = true;
             }
             if !st.running {
-                block_threads(archive, block)?;
+                block_threads(archive, block, data.len())?;
                 st.running = true;
                 // Never fewer threads than before: another restart would decode the prefix again.
                 st.threads = threads.max(st.threads);
@@ -889,7 +934,8 @@ impl SolidBlock {
 
     /// Keeps a decoded file: in memory while the block's budget lasts, else on disk.
     fn keep(&self, r: &mut dyn Read, size: u64) -> Result<Decoded> {
-        entry_hint(size)?;
+        // In memory only within the shared budget, which is far below `MAX_ENTRY`;
+        // on disk the block's limit bounds it.
         use std::sync::atomic::Ordering;
         let size_usize = usize::try_from(size).unwrap_or(usize::MAX);
         let mut used = SOLID_MEMORY_USED.load(Ordering::Acquire);
@@ -940,7 +986,7 @@ impl ArchiveFs {
         // threads: halving them would take two rounds of chunks instead of one.
         let first = block.state.lock().files.is_empty();
         let percent = ends[i].saturating_mul(100) / archive.blocks[b].get_unpack_size().max(1);
-        let threads = match block_threads(archive, b)? {
+        let threads = match block_threads(archive, b, data.len())? {
             _ if first && percent < 15 => 1,
             all => all,
         };
@@ -1218,6 +1264,79 @@ mod tests {
         assert!(block.state.lock().error.is_none());
     }
 
+    /// An entry larger than what is read into memory ([`MAX_ENTRY`], lowered for
+    /// tests) is still compared: a 7z block of one large file and a compressed tar
+    /// are decoded to the temporary file and read as streams.
+    #[test]
+    fn entries_beyond_the_memory_limit_are_streamed() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        let big: Vec<u8> = (0..32u32 << 20).map(|i| (i % 251) as u8).collect();
+        std::fs::write(src.join("video.bin"), &big).unwrap();
+        let read_all = |fs: &ArchiveFs| {
+            let mut out = Vec::new();
+            fs.open("video.bin").unwrap().read_to_end(&mut out).unwrap();
+            out
+        };
+
+        let seven = dir.path().join("big.7z");
+        let mut writer = sevenz_rust2::ArchiveWriter::create(&seven).unwrap();
+        writer.set_content_methods(vec![sevenz_rust2::EncoderConfiguration::new(sevenz_rust2::EncoderMethod::COPY)]);
+        writer.push_source_path(&src, |_| true).unwrap();
+        writer.finish().unwrap();
+        let fs = ArchiveFs::open_file(&seven, ArchiveFormat::SevenZ, "big.7z").unwrap();
+        assert!(fs.solid_block_of("video.bin").is_some(), "streamed through the block decoder");
+        assert!(read_all(&fs) == big);
+        // Read whole (as content rules do), the memory limit still applies.
+        assert!(fs.read("video.bin").is_err());
+
+        let tgz = dir.path().join("big.tar.gz");
+        {
+            let gz = flate2::write::GzEncoder::new(std::fs::File::create(&tgz).unwrap(), flate2::Compression::fast());
+            let mut tar = tar::Builder::new(gz);
+            tar.append_path_with_name(src.join("video.bin"), "video.bin").unwrap();
+            tar.into_inner().unwrap().finish().unwrap();
+        }
+        let fs = ArchiveFs::open_file(&tgz, ArchiveFormat::TarGz, "big.tar.gz").unwrap();
+        assert!(read_all(&fs) == big);
+
+        // Verifying the 7z entry's CRC32 against a tar member, which has none,
+        // reads both as streams, not the tar member whole.
+        use crate::source::{SourceOptions, SourceSpec, open_pair};
+        let spec = |p: &std::path::Path| SourceSpec::parse(&p.display().to_string());
+        let (l, r) = open_pair(&spec(&seven), &spec(&tgz), SourceOptions::default(), false).unwrap();
+        let verify = crate::compare::CompareOptions { verify_checksums: true, ..Default::default() };
+        let result = crate::compare::compare(&l, &r, &verify, &crate::compare::Control::default()).unwrap();
+        assert_eq!(crate::compare::flatten(&result.root), [("video.bin".to_string(), crate::compare::Status::Same)]);
+    }
+
+    /// Only a zip made on Unix stores permissions; the zip crate makes up a mode
+    /// for others, which must not count as stored.
+    #[test]
+    fn zip_modes_only_from_unix() {
+        let mut buf = Cursor::new(Vec::new());
+        let mut zip = zip::ZipWriter::new(&mut buf);
+        // The zip crate writes entries as made on DOS by default on Windows.
+        let unix = zip::write::SimpleFileOptions::default().system(zip::System::Unix).unix_permissions(0o640);
+        zip.start_file("unix.txt", unix).unwrap();
+        std::io::Write::write_all(&mut zip, b"u").unwrap();
+        zip.start_file("dos.txt", zip::write::SimpleFileOptions::default().system(zip::System::Dos)).unwrap();
+        std::io::Write::write_all(&mut zip, b"d").unwrap();
+        zip.finish().unwrap();
+        let fs = ArchiveFs::open(Data::from_vec(buf.into_inner()), ArchiveFormat::Zip, "modes.zip").unwrap();
+        assert_eq!(fs.stat("unix.txt").unwrap().mode, Some(0o640));
+        assert_eq!(fs.stat("dos.txt").unwrap().mode, None);
+    }
+
+    /// The limit on how far an archive expands follows its size beyond 4 GiB.
+    #[test]
+    fn the_expansion_limit_follows_the_archive_size() {
+        assert_eq!(expansion_limit(1 << 20), 4 << 30);
+        assert_eq!(expansion_limit(1 << 30), 16 << 30);
+        assert_eq!(expansion_limit(u64::MAX), u64::MAX);
+    }
+
     /// A solid block decodes as far as reads need, keeps what it decoded (beyond the
     /// memory budget on disk), and serves reads in any order and from any thread.
     #[test]
@@ -1292,10 +1411,10 @@ mod tests {
         let n = 200_000;
         let start = std::time::Instant::now();
         for i in 0..n {
-            index.add_file(&format!("f{i}"), EntryKind::File, 1, None, None);
+            index.add_file(&format!("f{i}"), EntryKind::File, 1, None, None, None);
         }
         // A repeated entry replaces the earlier one.
-        index.add_file("f7", EntryKind::File, 2, None, None);
+        index.add_file("f7", EntryKind::File, 2, None, None, None);
         let root = &index.dirs[""];
         assert_eq!(root.len(), n);
         assert_eq!(root[7].size, 2);

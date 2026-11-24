@@ -371,3 +371,42 @@ test('a superseded find-side search leaves the row filter and selection in place
   assert.equal(await same.getAttribute('aria-pressed'), 'false');
   assert.equal(await selected.innerText(), 'needle');
 });
+
+test('a filter change on a large tree says so before the rows are rebuilt', async () => {
+  await page.goto(origin + '/?large');
+  await page.locator('.status').filter({ hasText: 'Showing' }).waitFor();
+  await page.evaluate(() => {
+    const seen: string[] = ((window as any).__seen = []);
+    new MutationObserver(() => seen.push(document.querySelector('.status')?.textContent ?? '')).observe(document.body, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+    });
+  });
+  await filter('Left only').click();
+  await page.waitForFunction(() => {
+    const text = document.querySelector('.status')?.textContent ?? '';
+    return text.includes('Showing') && !text.includes('Filtering');
+  });
+  const seen: string[] = await page.evaluate(() => (window as any).__seen);
+  assert.ok(seen.some((s) => s.includes('Filtering…')), 'the status said it was filtering');
+  assert.match(await statusLine(), /Showing 30,000 of 60,000 files/);
+});
+
+test('two filter changes in a row on a large tree end at the second', async () => {
+  await page.goto(origin + '/?large');
+  await page.locator('.status').filter({ hasText: 'Showing' }).waitFor();
+  // Both in one task: the second comes while the first waits for its label to show.
+  await page.evaluate(() => {
+    const button = (label: string) =>
+      [...document.querySelectorAll<HTMLButtonElement>('button[aria-pressed]')].find((b) => b.textContent?.includes(label))!;
+    button('Left only').click();
+    button('All differences').click();
+  });
+  await page.waitForFunction(() => {
+    const text = document.querySelector('.status')?.textContent ?? '';
+    return text.includes('Showing') && !text.includes('Filtering');
+  });
+  assert.match(await statusLine(), /Showing 60,000 of 60,000 files/);
+  assert.equal(await filter('All differences').getAttribute('aria-pressed'), 'true');
+});

@@ -59,9 +59,15 @@ struct Cli {
     bytes: bool,
 
     /// Decompress and compare archive entries with equal CRC32 byte for byte,
-    /// instead of taking the stored CRC32 as proof (slower for large archives)
+    /// instead of taking the stored CRC32 as proof, and check every entry read
+    /// (also one-sided ones) against its stored CRC32 (slower for large archives)
     #[arg(long)]
     verify_archives: bool,
+
+    /// Also compare permissions and modification times: files with equal content
+    /// but other permissions or a time more than 2 s apart are different (for backups)
+    #[arg(long)]
+    metadata: bool,
 
     /// Exclude names or paths matching a glob (repeatable); replaces the default .git/.svn/.hg
     #[arg(long, short = 'x', value_name = "GLOB")]
@@ -236,6 +242,7 @@ fn compare_folders(cli: &Cli, left: &Source, right: &Source, paint: &Paint) -> R
         ignore_line_endings: !cli.strict_eol,
         compare_contents: !cli.bytes,
         verify_checksums: cli.verify_archives,
+        compare_metadata: cli.metadata,
         includes: cli.include.clone(),
         ..Default::default()
     };
@@ -335,6 +342,14 @@ fn compare_files(cli: &Cli, left: &Source, right: &Source, paint: &Paint) -> Res
     let left_data = left.vfs.read(&left.root).with_context(|| format!("reading {}", left.root))?;
     let right_data = right.vfs.read(&right.root).with_context(|| format!("reading {}", right.root))?;
     let mut out = std::io::stdout().lock();
+    // As in a folder comparison: equal content with other permissions or times.
+    if cli.metadata && *left_data == *right_data {
+        let (l, r) = (left.vfs.stat(&left.root)?, right.vfs.stat(&right.root)?);
+        if let Some(change) = compare::metadata_change(&l, &r) {
+            writeln!(out, "Files differ: {change}")?;
+            return Ok(false);
+        }
+    }
     let schemas =
         [cli.left_schema.as_deref().or(cli.schema.as_deref()), cli.right_schema.as_deref().or(cli.schema.as_deref())];
     if *left_data == *right_data

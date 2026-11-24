@@ -282,7 +282,14 @@ fn entry_and_meta(path: &Path, name: String) -> Option<(Entry, fs::Metadata)> {
         (EntryKind::File, meta.len())
     };
     let mtime = to_unix(meta.modified());
-    Some((Entry { name, kind, size, mtime, quick_id: None, ignored: false }, meta))
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::PermissionsExt;
+        (kind != EntryKind::Symlink).then(|| meta.permissions().mode() & 0o7777)
+    };
+    #[cfg(not(unix))]
+    let mode = None;
+    Some((Entry { name, kind, size, mtime, quick_id: None, mode, ignored: false }, meta))
 }
 
 fn special_kind(kind: fs::FileType) -> &'static str {

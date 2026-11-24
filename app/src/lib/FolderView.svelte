@@ -360,8 +360,10 @@
       if (loading) await loading;
       await loadSkipped();
     }
-    flat = on;
-    version++;
+    await rebuilding(on ? "Building the flat list…" : "Building the folder tree…", () => {
+      flat = on;
+      version++;
+    });
   }
 
   /** The path of a row's entry on one side: a matched row has its own on the right. */
@@ -473,9 +475,11 @@
   const remaining = $derived.by(() => {
     const total = Math.max(listed, progress);
     if (!running || !total) return null;
+    // While folders are still being listed, the total keeps growing: a share of
+    // it would read as nearly done when much is still to be found.
     const settled = performance.now() - listedAt > 1500 && elapsed > 1500;
     const left = settled && progress > 20 && progress < total ? Math.round(((elapsed / progress) * (total - progress)) / 1000) : null;
-    return { total, share: Math.min(1, progress / total), left };
+    return { total, share: Math.min(1, progress / total), left, settled };
   });
 
   /** "+2.9 KB": how much larger or smaller the right file is. */
@@ -486,7 +490,44 @@
     return delta === 0 ? "same size" : `${delta > 0 ? "+" : "−"}${formatSize(Math.abs(delta))}`;
   }
 
+  /** Waits until the browser has painted what changed, such as a status message. */
+  const painted = () => new Promise<void>((done) => requestAnimationFrame(() => setTimeout(done)));
+
+  /** Changes waiting for their label to be painted, applied in the order they came. */
+  let rebuilds: { label: string; changes: (() => void | Promise<void>)[] } | null = null;
+
+  /**
+   * Runs a change that rebuilds the rows. With a large tree that takes a moment on
+   * the UI thread, during which nothing can be drawn: `label` is shown first. A
+   * change that comes while another waits joins it, so they apply in order and
+   * an older one never overwrites a newer one.
+   */
+  async function rebuilding(label: string, change: () => void | Promise<void>) {
+    if (rebuilds) {
+      rebuilds.changes.push(change);
+      rebuilds.label = busy = label;
+      return;
+    }
+    const size = flat ? flatRows.length : (counts?.files ?? 0);
+    if (size < 50_000 || busy) return change();
+    const pending = (rebuilds = { label, changes: [change] });
+    busy = label;
+    try {
+      await tick();
+      await painted();
+      while (pending.changes.length) await pending.changes.shift()!();
+      await tick();
+    } finally {
+      rebuilds = null;
+      if (busy === pending.label) busy = "";
+    }
+  }
+
   function setFilter(id: Filter) {
+    return rebuilding("Filtering…", () => applyFilter(id));
+  }
+
+  function applyFilter(id: Filter) {
     filter = id;
     menu = null;
     selected = null;
@@ -641,6 +682,8 @@
   let activity = $state<string | null>(null);
   let startedAt = 0;
   let elapsed = $state(0);
+  /** Milliseconds from the start of the last comparison until its rows were shown. */
+  let shownAfter = $state<number | null>(null);
   let ticker: ReturnType<typeof setInterval> | undefined;
   /** How the last comparison ended when it was cancelled: shown until the next one. */
   let cancelled = $state<{ seconds: number; previous: boolean } | null>(null);
@@ -690,8 +733,16 @@
       version++;
     }
     try {
+      shownAfter = null;
       const r = await api.runCompare(session.id, $state.snapshot(options), invalidate);
       if (runId !== compareRun) return;
+      // Building the rows of a large result takes a moment: say so before it starts.
+      if (r.summary.files > 50_000) {
+        activity = "Showing the result";
+        await tick();
+        await painted();
+        if (runId !== compareRun) return;
+      }
       running = false;
       cancelling = false;
       activity = null;
@@ -717,6 +768,11 @@
       provisional = false;
       result = r;
       version++;
+      // From the click until the rows are on screen, which for a large result is
+      // longer than the compare itself: transferring and building the rows count too.
+      void tick().then(painted).then(() => {
+        if (runId === compareRun) shownAfter = performance.now() - startedAt;
+      });
       if (restoring) {
         const state = restoring;
         restoring = null;
@@ -1202,6 +1258,7 @@
       options.ignoreLineEndings !== d.ignoreLineEndings ||
       options.compareContents !== d.compareContents ||
       options.verifyChecksums !== d.verifyChecksums ||
+      !!options.compareMetadata !== d.compareMetadata ||
       options.excludes.join("\n") !== d.excludes.join("\n")
     );
   });
@@ -1491,8 +1548,11 @@
       <label title="Documents with the same text, images with the same pixels, and data files (JSON, YAML, TOML …) with the same data are marked ≈ instead of ≠">
         <input type="checkbox" bind:checked={options.compareContents} disabled={options.mode === "quick"} onchange={() => run()} /> Equal content counts as similar <small>affects ≈</small>
       </label>
-      <label title="Zip and 7z entries with the same CRC32 and size are taken as equal without decompressing them. Different data shares a CRC32 only by a one-in-four-billion chance or when made to. Verifying decompresses every such entry, which takes seconds for large solid 7z archives.">
+      <label title="Zip and 7z entries with the same CRC32 and size are taken as equal without decompressing them. Different data shares a CRC32 only by a one-in-four-billion chance or when made to. Verifying decompresses every such entry, which takes seconds for large solid 7z archives, and checks each entry against the CRC32 stored in its own archive, so damaged entries show as errors even when both copies are damaged alike.">
         <input type="checkbox" bind:checked={options.verifyChecksums} disabled={options.mode === "quick"} onchange={() => run()} /> Verify archive entries byte for byte <small>affects =</small>
+      </label>
+      <label title="For backups: files with the same content but other permissions, or a modification time more than 2 seconds apart, are marked ≠ with the reason. Against a Git revision only the executable bit counts. Ownership, ACLs and extended attributes are not compared.">
+        <input type="checkbox" bind:checked={options.compareMetadata} onchange={() => run()} /> Permissions and times count too <small>affects ≠</small>
       </label>
       <div class="field">
         <span>Exclude (globs, comma separated)</span>
@@ -1514,7 +1574,7 @@
       <div class="pline">
         <b>{cancelling ? "Cancelling…" : (activity ?? "Comparing")}</b>
         {#if remaining}
-          <span><b>{progress.toLocaleString()}</b> of {remaining.total.toLocaleString()} files</span>
+          <span title={remaining.settled ? undefined : "Folders are still being listed: the total grows until they all are"}><b>{progress.toLocaleString()}</b> of {remaining.settled ? "" : "at least "}{remaining.total.toLocaleString()} files</span>
         {:else}
           <span>Listing…</span>
         {/if}
@@ -1522,7 +1582,7 @@
         <span class="grow"></span>
         <button class="small" onclick={cancelRun} disabled={cancelling}>Cancel</button>
       </div>
-      <div class="track" aria-hidden="true">{#if remaining}<i class="det" style:width="{remaining.share * 100}%"></i>{:else}<i></i>{/if}</div>
+      <div class="track" aria-hidden="true">{#if remaining?.settled}<i class="det" style:width="{remaining.share * 100}%"></i>{:else}<i></i>{/if}</div>
     </div>
   {:else if cancelled}
     <div class="progress done" role="status">
@@ -1707,7 +1767,7 @@
     {:else if result && counts}
       {@const s = result.summary}
       <span>Showing <b>{matchingFiles.toLocaleString()}</b> of <b>{counts.files.toLocaleString()}</b> files</span>
-      {#if cancelled}<span>{cancelled.previous ? "refresh cancelled · previous results" : "partial: cancelled"}</span>{:else}<span>compared in <b>{s.elapsedMs < 1000 ? `${s.elapsedMs} ms` : `${(s.elapsedMs / 1000).toFixed(2)} s`}</b>{s.identicalSubtrees ? ` · ${s.identicalSubtrees.toLocaleString()} identical folders skipped via Git tree ids` : ""}</span>{/if}
+      {#if cancelled}<span>{cancelled.previous ? "refresh cancelled · previous results" : "partial: cancelled"}</span>{:else}<span>compared in <b>{s.elapsedMs < 1000 ? `${s.elapsedMs} ms` : `${(s.elapsedMs / 1000).toFixed(2)} s`}</b>{#if shownAfter !== null && shownAfter - s.elapsedMs > 1000}<span title="From the start of the comparison until its rows were on screen, including transferring and building them"> · shown after {(shownAfter / 1000).toFixed(1)} s</span>{/if}{s.identicalSubtrees ? ` · ${s.identicalSubtrees.toLocaleString()} identical folders skipped via Git tree ids` : ""}</span>{/if}
     {/if}
     {#if busy}<span>{busy}</span>{/if}
     {#if op}

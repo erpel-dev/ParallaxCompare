@@ -287,6 +287,8 @@ export interface CompareOptions {
   verifyChecksums: boolean;
   /** Archives are opened during the compare; off, they are compared as files and opened when expanded. */
   openArchives: boolean;
+  /** Files with equal content but other permissions or modification times are different. */
+  compareMetadata: boolean;
 }
 
 export interface DiffOptions {
@@ -682,6 +684,7 @@ export const defaultCompareOptions = (): CompareOptions => ({
   compareContents: true,
   verifyChecksums: false,
   openArchives: false,
+  compareMetadata: false,
 });
 
 export const defaultDiffOptions = (): DiffOptions => ({ whitespace: "exact", ignoreCase: false, histogram: false });
